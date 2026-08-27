@@ -29,6 +29,8 @@ class EventCfg:
     push_robot = None
 
     randomize_rigid_body_mass = None
+    randomize_ankle_armature = None
+    randomize_actuator_gains = None
 
 
 def randomize_joint_default_pos(

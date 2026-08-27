@@ -1,0 +1,57 @@
+# @package _global_
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 原生 SONIC 双编码器配置：完整保留发布版的 MLP、FSQ、token 和
+# g1 动力学/运动学解码器，只不实例化 Teleop Encoder。内部 g1 键代表通用
+# Robot Encoder，特意保持原名以兼容现有网络主体、损失函数和 checkpoint 结构。
+
+defaults:
+  - critics/mlp@algo.config.critic
+  - quantizers/fsq@algo.config.actor.backbone.quantizer
+  # encoders
+  - encoders/g1_mf_mlp@algo.config.actor.backbone.encoders
+  - encoders/smpl_mlp@algo.config.actor.backbone.encoders
+  # decoders
+  - decoders/g1_dyn_mlp@algo.config.actor.backbone.decoders
+  - decoders/g1_kin_mf_mlp@algo.config.actor.backbone.decoders
+
+manager_env:
+  commands:
+    motion:
+      encoder_sample_probs: # unnormalized
+        g1: 1.0
+        smpl: 1.0
+
+algo:
+  config:
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_obs_dict: true
+      has_aux_loss: true
+      backbone:
+        _target_: gear_sonic.trl.modules.universal_token_modules.UniversalTokenModule
+        num_future_frames: ${manager_env.commands.motion.num_future_frames}
+        proprioception_features: ["actor_obs"]
+        encoder_sample_probs: ${manager_env.commands.motion.encoder_sample_probs}
+        num_fsq_levels: 32
+        fsq_level_list: 32
+        max_num_tokens: 2
+        encoders:
+          g1:
+            inputs:
+              [
+                "command_multi_future_nonflat",
+                "motion_anchor_ori_b_mf_nonflat",
+                "command_z_multi_future_nonflat",
+              ]
+          smpl:
+            inputs: ["smpl_joints_multi_future_nonflat", "smpl_root_ori_b_multi_future"]
+        decoders:
+          g1_kin:
+            outputs:
+              [
+                "command_multi_future_nonflat",
+                "motion_anchor_ori_b_mf_nonflat",
+                "command_z_multi_future_nonflat",
+              ]

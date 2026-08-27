@@ -1,0 +1,223 @@
+# @package _global_
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 原生 SONIC 训练入口。该配置继承发布版 SONIC 的仿真、奖励、事件、
+# termination、PPO、critic 与 trainer，只替换机器人和名称契约，并选择不含
+# Teleop 的 Robot+SMPL 双编码器配置。训练 motion/SMPL 路径必须由 CLI 显式提供，
+# 避免把 G1 数据误用于 21 DoF BUMI3。
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - /callbacks/im_resample
+  - /aux_losses: universal_token/g1_recon_and_smpl_latent
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: universal_token/all_mlp_v1_no_teleop
+  - override /manager_env/observations/tokenizer: unitoken_robot_smpl_noz
+  - override /manager_env/observations/policy: local_dir_hist
+  - override /manager_env/observations/critic: privileged_mf_hist
+  - override /manager_env/events: tracking/level0_4
+  - override /manager_env/terminations: tracking/base_adaptive_strict_ori_foot_xyz
+  - override /manager_env/rewards: tracking/base_5point_local_feet_acc
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+exp_var: test
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 4096
+project_name: TRL_BUMI3_Track
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  rewards:
+    feet_acc:
+      weight: -2.5e-6
+    torque_limits:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:applied_torque_limits_by_ratio
+      weight: -0.01
+      params:
+        asset_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: "robot"
+          joint_names: [".*"]
+        limit_ratio: 0.85
+    undesired_contacts:
+      params:
+        sensor_cfg:
+          body_names:
+            - "^(?!l_ankle_roll_link$)(?!r_ankle_roll_link$)(?!l_elbow_pitch_link$)(?!r_elbow_pitch_link$).+$"
+    anti_shake_ang_vel:
+      params:
+        body_names:
+          - "l_elbow_pitch_link"
+          - "r_elbow_pitch_link"
+          - "waist_yaw_link"
+
+  events:
+    base_com:
+      params:
+        asset_cfg:
+          body_names: "waist_yaw_link"
+    randomize_rigid_body_mass:
+      params:
+        asset_cfg:
+          body_names: "waist_yaw_link|l_elbow_pitch_link|r_elbow_pitch_link"
+        mass_distribution_params: [0.8, 1.2]
+    randomize_ankle_armature:
+      _target_: isaaclab.managers.EventTermCfg
+      func: gear_sonic.envs.manager_env.mdp:randomize_joint_parameters
+      mode: "reset"
+      params:
+        asset_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: "robot"
+          joint_names: [".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
+        armature_distribution_params: [0.9, 1.1]
+        operation: "scale"
+    randomize_actuator_gains:
+      _target_: isaaclab.managers.EventTermCfg
+      func: gear_sonic.envs.manager_env.mdp:randomize_actuator_gains
+      mode: "reset"
+      params:
+        asset_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: "robot"
+          joint_names: [".*"]
+        stiffness_distribution_params: [0.8, 1.2]
+        damping_distribution_params: [0.8, 1.2]
+        operation: "scale"
+
+  terminations:
+    foot_pos_xyz:
+      params:
+        threshold: 0.15
+        body_names:
+          - "l_ankle_roll_link"
+          - "r_ankle_roll_link"
+    anchor_pos:
+      params:
+        threshold: 0.12
+    ee_body_pos:
+      params:
+        threshold: 0.12
+        body_names:
+          - "l_ankle_roll_link"
+          - "r_ankle_roll_link"
+          - "l_elbow_pitch_link"
+          - "r_elbow_pitch_link"
+    anchor_ori_full:
+      params:
+        threshold: 0.20
+
+  config:
+    robot:
+      type: bumi3
+    terrain_type: trimesh
+
+  commands:
+    motion:
+      anchor_body: "waist_yaw_link"
+      body_names:
+        [
+          "base_link",
+          "waist_yaw_link",
+          "l_arm_roll_link",
+          "l_elbow_pitch_link",
+          "r_arm_roll_link",
+          "r_elbow_pitch_link",
+          "l_leg_roll_link",
+          "l_leg_yaw_link",
+          "l_knee_pitch_link",
+          "l_ankle_roll_link",
+          "r_leg_roll_link",
+          "r_leg_yaw_link",
+          "r_knee_pitch_link",
+          "r_ankle_roll_link",
+        ]
+      reward_point_body:
+        ["waist_yaw_link", "l_elbow_pitch_link", "r_elbow_pitch_link"]
+      reward_point_body_offset:
+        [
+          [0.0010007, 0.0, 0.17204],
+          [0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0],
+        ]
+      vr_3point_body:
+        ["l_elbow_pitch_link", "r_elbow_pitch_link", "waist_yaw_link"]
+      vr_3point_body_offset:
+        [
+          [0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0],
+          [0.0010007, 0.0, 0.17204],
+        ]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      cat_upper_body_poses: true
+      cat_upper_body_poses_prob: 0.5
+      freeze_frame_aug: true
+      teleop_sample_prob_when_smpl: 0.0
+      randomize_wrist_poses: false
+      motion_lib_num_dof: 21
+
+      motion_lib_cfg:
+        upper_body_augment_prefixes:
+          [
+            "2025",
+            "sonic_mixed_walking_running",
+            "sonic_squating_different_height_switching",
+            "sonic_running",
+            "sonic_walking",
+            "sonic_squating_different_height_hold",
+            "sonic_walking_other_style",
+            "balance",
+          ]
+        adaptive_sampling:
+          adp_samp_failure_rate_max_over_mean: 200
+        motion_file: null
+        smpl_motion_file: null
+        smpl_y_up: true
+        asset:
+          assetFileName: "bumi3.xml"
+        robot_type: "bumi3"
+        wrist_mujoco_dof_indices: []
+
+algo:
+  config:
+    empty_cache_every_n_ppo_epoch: -1
+    num_steps_per_env: 24
+    use_clampped_std: true
+    std_clamp_min: 0.001
+    std_clamp_max: 0.5
+    max_grad_norm: 0.1
+    actor:
+      backbone:
+        reencode_smpl_g1_recon: true
+        encoders:
+          g1:
+            inputs: ["command_multi_future_nonflat", "motion_anchor_ori_b_mf_nonflat"]
+          smpl:
+            inputs:
+              [
+                "smpl_joints_multi_future_local_nonflat",
+                "smpl_root_ori_b_multi_future",
+              ]
+        decoders:
+          g1_kin:
+            outputs: ["command_multi_future_nonflat", "motion_anchor_ori_b_mf_nonflat"]
+
+    critic:
+      backbone:
+        module_config_dict:
+          layer_config:
+            hidden_dims: [2048, 2048, 1024, 1024, 512, 512]

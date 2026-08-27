@@ -52,6 +52,7 @@ class RewardsCfg:
     tracking_vr_5point_local = None
     motion_5point_local_pos = None
     feet_acc = None
+    torque_limits = None
     energy_consumption = None
     is_terminated = None
     upright_penalty = None
@@ -259,6 +260,25 @@ def energy_consumption(
         robot_name = getattr(asset_cfg, "name", "robot")
     robot = env.scene[robot_name]
     return torch.abs(robot.data.applied_torque * robot.data.joint_vel).sum(dim=-1)
+
+
+def applied_torque_limits_by_ratio(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    limit_ratio: float = 0.8,
+) -> torch.Tensor:
+    """惩罚超过指定仿真力矩上限比例的关节力矩。
+
+    对每个选中关节计算 ``max(|tau| - limit_ratio * tau_limit, 0)^2``，
+    再沿关节维求和。该形式在阈值内不施加惩罚，并在接近执行器饱和区时
+    平滑增大，适合与负权重组合成力矩安全裕量奖励。
+    """
+
+    robot = env.scene[asset_cfg.name]
+    effort_limits = robot.data.joint_effort_limits[:, asset_cfg.joint_ids]
+    applied_torque = torch.abs(robot.data.applied_torque[:, asset_cfg.joint_ids])
+    excess = torch.clamp(applied_torque - effort_limits * limit_ratio, min=0.0)
+    return torch.sum(torch.square(excess), dim=-1)
 
 
 def tracking_local_head_ori_error(

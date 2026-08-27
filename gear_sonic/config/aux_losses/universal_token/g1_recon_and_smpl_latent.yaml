@@ -1,0 +1,15 @@
+# @package algo.config.actor.backbone
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 双编码器 SONIC 的辅助损失：保留 Robot 重建、Robot-SMPL 对齐和
+# SMPL 重编码后的 Robot latent 对齐；不实例化任何 Teleop 相关损失。
+
+defaults:
+  - terms/g1_recon@aux_loss_func
+  - terms/g1_smpl_latent@aux_loss_func
+  - terms/reencoded_smpl_g1_latent@aux_loss_func
+
+aux_loss_coef:
+  g1_recon: 0.01
+  g1_smpl_latent: 1.0
+  reencoded_smpl_g1_latent: 1.0

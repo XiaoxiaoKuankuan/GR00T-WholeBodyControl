@@ -207,6 +207,25 @@ teleop_vids/
 *.code-workspace
 # Motion/training data (large local datasets, not tracked in git)
 data/
+
+# BUMI3 机器人描述属于代码资产而非训练数据，必须随仓库分发。
+!/gear_sonic/data/
+/gear_sonic/data/*
+!/gear_sonic/data/assets/
+/gear_sonic/data/assets/*
+!/gear_sonic/data/assets/robot_description/
+/gear_sonic/data/assets/robot_description/*
+!/gear_sonic/data/assets/robot_description/urdf/
+/gear_sonic/data/assets/robot_description/urdf/*
+!/gear_sonic/data/assets/robot_description/urdf/bumi3/
+!/gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf
+!/gear_sonic/data/assets/robot_description/meshes/
+/gear_sonic/data/assets/robot_description/meshes/*
+!/gear_sonic/data/assets/robot_description/meshes/bumi3/
+!/gear_sonic/data/assets/robot_description/meshes/bumi3/*
+!/gear_sonic/data/assets/robot_description/mjcf/
+/gear_sonic/data/assets/robot_description/mjcf/*
+!/gear_sonic/data/assets/robot_description/mjcf/bumi3.xml
 bones_seed_smpl/
 sonic_release/
 # Training output logs

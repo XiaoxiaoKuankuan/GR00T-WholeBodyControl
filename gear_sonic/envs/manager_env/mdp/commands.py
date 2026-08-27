@@ -43,6 +43,27 @@ INACTIVE_OBJECT_BASE_OFFSET = torch.tensor([1000.0, 0.0, -50.0])  # 1km away in 
 INACTIVE_OBJECT_Z_SPACING = 10.0  # 10m vertical spacing between objects (must be > chair height)
 
 
+def _validated_lower_joint_indices(
+    mapping: dict,
+    robot_num_dof: int,
+    robot_type: str = "g1",
+) -> list[int]:
+    """读取并验证 MuJoCo lower-body 索引，缺省保持 G1 的前 12 关节。"""
+
+    indices = list(mapping.get("lower_joint_indices_mujoco", range(12)))
+    assert all(0 <= index < robot_num_dof for index in indices), (
+        f"lower_joint_indices_mujoco={indices} 超出 [0, {robot_num_dof})"
+    )
+    assert len(indices) == len(set(indices)), (
+        f"lower_joint_indices_mujoco 存在重复索引: {indices}"
+    )
+    if robot_type.lower() == "bumi3":
+        assert indices == list(range(9, 21)), (
+            f"BUMI3 lower-body MuJoCo 索引必须为 9..20，实际为 {indices}"
+        )
+    return indices
+
+
 def _init_variable_frames(
     enabled: bool,
     min_frames: int,
@@ -173,7 +194,13 @@ class TrackingCommand(CommandTerm):
 
         self.isaaclab_to_mujoco_dof = env.cfg.isaaclab_to_mujoco_mapping["isaaclab_to_mujoco_dof"]
         self.mujoco_to_isaaclab_dof = env.cfg.isaaclab_to_mujoco_mapping["mujoco_to_isaaclab_dof"]
-        self.lower_joint_indices_mujoco = list(range(12))
+        self.robot_num_dof = self.robot.num_joints
+        robot_type = env.cfg.config.get("robot", {}).get("type", "g1")
+        self.lower_joint_indices_mujoco = _validated_lower_joint_indices(
+            env.cfg.isaaclab_to_mujoco_mapping,
+            self.robot_num_dof,
+            robot_type,
+        )
         self.lower_joint_isaaclab_indices = [
             self.isaaclab_to_mujoco_dof[i] for i in self.lower_joint_indices_mujoco
         ]
@@ -246,7 +273,6 @@ class TrackingCommand(CommandTerm):
 
         # Setup DOF mapping for handling mismatch between motion library and robot
 
-        self.robot_num_dof = self.robot.num_joints
         self.motion_lib_num_dof = self.cfg.motion_lib_num_dof
         if self.motion_lib_num_dof is None:
             self.motion_lib_num_dof = self.robot_num_dof
@@ -613,7 +639,19 @@ class TrackingCommand(CommandTerm):
         # Inject body/DOF mapping into motion_lib_cfg so motion_lib handles
         # body reordering and xyzw→wxyz quaternion conversion at load time.
 
-        isaaclab_to_mujoco_mapping = order_converter.G1Converter().get_isaaclab_to_mujoco_mapping()
+        converter_spec = motion_lib_cfg.get(
+            "order_converter", motion_lib_cfg.get("robot_type", "g1")
+        )
+        if isinstance(converter_spec, str) or converter_spec is None:
+            converter = order_converter.get_order_converter(converter_spec)
+        elif hasattr(converter_spec, "get_isaaclab_to_mujoco_mapping"):
+            converter = converter_spec
+        else:
+            raise TypeError(
+                "motion_lib_cfg.order_converter 必须是机器人类型字符串或 converter 实例，"
+                f"实际为 {type(converter_spec).__name__}"
+            )
+        isaaclab_to_mujoco_mapping = converter.get_isaaclab_to_mujoco_mapping()
         motion_lib_cfg.update(
             {
                 "mujoco_to_isaaclab_body": isaaclab_to_mujoco_mapping["mujoco_to_isaaclab_body"],
@@ -669,7 +707,12 @@ class TrackingCommand(CommandTerm):
         if isaaclab_to_mujoco_mapping is not None:
             inst.isaaclab_to_mujoco_dof = isaaclab_to_mujoco_mapping["isaaclab_to_mujoco_dof"]
             inst.mujoco_to_isaaclab_dof = isaaclab_to_mujoco_mapping["mujoco_to_isaaclab_dof"]
-        inst.lower_joint_indices_mujoco = list(range(12))
+        robot_type = motion_lib_cfg.get("robot_type", "g1")
+        inst.lower_joint_indices_mujoco = _validated_lower_joint_indices(
+            isaaclab_to_mujoco_mapping,
+            len(inst.mujoco_to_isaaclab_dof),
+            robot_type,
+        )
         if hasattr(inst, "isaaclab_to_mujoco_dof"):
             inst.lower_joint_isaaclab_indices = [
                 inst.isaaclab_to_mujoco_dof[i] for i in inst.lower_joint_indices_mujoco

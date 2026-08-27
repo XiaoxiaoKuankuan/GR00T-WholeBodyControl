@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 原生 SONIC tokenizer：仅暴露编码器选择、Robot 未来关节/锚点姿态和
+# SMPL 未来局部关节/根姿态。这里不包含 Teleop、lower-body Teleop 或 G1 wrist
+# for SMPL 项，确保策略输入契约与双编码器结构一致。
+
+defaults:
+  - ../terms/encoder_index@_here_
+  - ../terms/command_multi_future_nonflat@_here_
+  - ../terms/motion_anchor_ori_b_mf_nonflat@_here_
+  - ../terms/smpl_joints_multi_future_local_nonflat@_here_
+  - ../terms/smpl_root_ori_b_multi_future@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.observations.TokenizerCfg
+enable_corruption: true
+concatenate_terms: false
+
+motion_anchor_ori_b_mf_nonflat:
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.05
+    n_max: 0.05
+
+smpl_joints_multi_future_local_nonflat:
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.05
+    n_max: 0.05
+
+smpl_root_ori_b_multi_future:
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.05
+    n_max: 0.05
