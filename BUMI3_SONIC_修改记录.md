@@ -49,8 +49,102 @@
 - `git diff --check`：通过。
 - 本地 Isaac Lab 环境未安装独立 `ruff` 可执行文件，因此没有把 Ruff 描述为已运行；
   将在 noetix 的正式训练环境再次检查可用性。
-- 全量数据转换及 SONIC 单卡/八卡训练 smoke：待服务器数据就绪后填写；在实际
-  完成以前不得描述为已通过。
+- noetix 全量数据转换及 SONIC 单卡/八卡训练 smoke 已于本节后续“服务器落盘与
+  正式规模训练可行性验证”中完成并记录。正式 100k 训练未启动。
+
+## 2026-08-27：服务器落盘与正式规模训练可行性验证
+
+### 1. noetix 2TiB 数据盘
+
+- 操作前再次确认 `/dev/vdb` 为精确的 2TiB 空盘，无分区、文件系统、挂载点、
+  残留签名、占用进程或 `/etc/fstab` 条目；系统盘是 `/dev/vda2`，未对其执行
+  分区或格式化操作。
+- 为 `/dev/vdb` 创建 GPT 和单个 ext4 分区 `/dev/vdb1`，卷标为 `SONIC_DATA`，
+  reserved blocks 为 0；实际 UUID 为
+  `68f60019-f39c-44d1-8e14-320d25755dd6`。
+- `/etc/fstab` 使用 `defaults,noatime,nofail 0 2` 挂载到 `/data`；`findmnt`、
+  `findmnt --verify`、`df -hT` 和写入/删除测试均通过。原 fstab 备份为
+  `/etc/fstab.codex-before-sonic-data`。
+- 数据固定放在 `/data/sonic_bumi3/datasets/hq_all_v1`，训练和 smoke 分别放在
+  `/data/sonic_bumi3/runs`、`/data/sonic_bumi3/smoke`，日志放在
+  `/data/sonic_bumi3/logs`。全部数据和 smoke 验证结束时数据盘使用约 6.2GiB，
+  仍有约 2.0TiB 可用；其中 datasets 约 5.5GiB、smoke 约 737MiB。
+
+### 2. 服务器间直传和源数据校验
+
+- SMPL 服务器直接向 noetix 推送 2,202 个 motion/curation 文件，共
+  `1,503,420,296` bytes；BUMI 服务器直接推送四个配对集合 3,174 个文件，共
+  `418,741,956` bytes，以及 Mine 集合 103 个文件，共 `17,722,804` bytes。
+- 数据没有经过本地机器，也没有传 WAV 或 35 维音乐特征。传输使用临时受限
+  SSH 公钥和可续传 rsync；完成后源端私钥和 noetix 临时授权条目均已删除，
+  密码未写入仓库、脚本或日志。
+- 源端/目标端逐文件排序 SHA256 清单的聚合指纹完全一致：SMPL 为
+  `e934012a7c4b81adaa69d821df147fe2024ca3eda320549a32acefcdfa9bd23d`，
+  四个 BUMI 配对集合为
+  `46f04748306a8b9e473525394c13ceda10972bb4555d560a2ca509be49a4e25c`，
+  Mine 为 `7cebe8f2404e271900760cac18dbb8bfaef90aa1bb2ca938c61cef52b78ff123`。
+- 目标端逐文件清单保存在 `meta/source_smpl_files.sha256`、
+  `meta/source_bumi_files.sha256` 和 `meta/source_mine_files.sha256`。
+
+### 3. 代码、LFS 与转换产物
+
+- noetix 仓库固定在提交 `b3cd0699a04ac31aef0a1f2ce76b8e06082ae30f`；分支为
+  `feature/bumi-native-sonic-full-training`，拉取后工作区干净。
+- BUMI3 的 22 个 STL 和 `human/human_joints_info.pkl` 共 23 个 LFS 文件均不再是
+  指针，并逐文件通过“实体 SHA256 等于 Git LFS OID”检查。全仓库 `git lfs fsck`
+  仍会报告两个与 BUMI3 无关且未实体化的大文件，因此不把全仓库 fsck 结果误写成
+  BUMI3 资产失败。
+- noetix 的 `compileall` 和转换器 4 项 pytest 均通过；本地完整
+  `validate_bumi3_integration.py` 再次通过实际 Isaac Sim 配置导入、Hydra 组合、
+  资产追溯、映射、执行器、碰撞和双编码器维度检查。
+- 全量 `build` 后又独立运行一次 `validate`，两次均通过。最终是 3,261 个 robot、
+  3,162 个 SMPL、3,162 个配对、99 个 Mine-only；所有 key 唯一，Mine-only 的
+  `dataset=mine`、key 前缀为 `mine__`，并且 `smpl_file=null`。
+- robot motion-lib 保持 30Hz，SMPL 的 pose/transl/joints 全部共同离线转为 50Hz，
+  两者运行目标均为 50Hz。`meta/SHA256SUMS` 共 6,425 行，执行
+  `sha256sum -c` 全部通过。
+- 关键元数据指纹：`SHA256SUMS` 为
+  `2fecb9ed7f70430c8d86a9b261c3c4d3862e032b31fb7b0dc06cfceffbf01c99`，
+  `manifest.jsonl` 为
+  `5871ec25ff70786763bb31d0f70b177bed6b278e8b7abdadec46e8b2020593b6`，
+  `provenance.json` 为
+  `e21d9572ee922a7db7d524e0197369f921f8b5b0dbef546db5faf24a8f3930cd`。
+
+### 4. 实际训练 smoke
+
+所有 smoke 都使用同一份正式数据、`checkpoint=null`、`auto_load_latest=False`、
+`resume=False` 从零初始化。未使用 smoke 权重作为后一档 smoke 的初始化；最后的
+checkpoint 重载是单独的兼容性检查。
+
+| 阶段 | 结果 | 关键证据 |
+|---|---|---|
+| 单卡、64 env、10 iterations | 通过 | 完成 15,360 timesteps 和 10 次 PPO 更新；无 OOM、Traceback、NaN/Inf；首批实际采到 `mine__...` |
+| 八卡、每 rank 512 env、100 iterations | 通过 | 8 个进程正常退出；9,830,400 timesteps；约 41k steps/s；每卡约 10.6–11.0GiB；无 OOM、NCCL timeout、Traceback、NaN/Inf |
+| 八卡、每 rank 4,096 env、100 iterations | 通过 | 8 个进程正常退出；78,643,200 timesteps；稳定约 195k–202k steps/s；每卡约 20.3–20.9GiB、约 86–90% GPU 负载；无 OOM、NCCL timeout、Traceback、NaN/Inf |
+
+- 4,096/rank 已完整通过，因此没有执行 2,048 或 1,024 回退，正式 `num_envs`
+  取 4,096。
+- 512/rank 和 4,096/rank 的日志均显示八个 rank 各自初始化 Robot（内部兼容键名
+  `g1`）与 SMPL encoder，并在抽样 motion key 中实际出现 Mine-only。Mine 数据没有
+  SMPL 文件，因此只能走 Robot encoder；配对数据同时提供两个 encoder 的输入。
+- 4,096/rank 的 `last.pt` 在 step 50 和 100 均成功保存，大小约 368MiB。直接加载
+  得到 global step 100、45 个 policy tensors、17 个 value tensors，并包含 optimizer、
+  LR scheduler 和 env state。随后通过 SONIC 训练入口打印
+  `Loaded checkpoint from step 100`，在单卡 64 env 上再完成 1 次 PPO 更新，证明
+  不只是 pickle 可读，模型权重形状和加载路径也兼容。
+- noetix 的 Isaac Sim 在纯 headless 启动时每 rank 会打印
+  `VkResult: ERROR_INCOMPATIBLE_DRIVER` 和图形插件不可用；4,096/rank 日志共 24 次。
+  这是当前服务器 Vulkan/渲染环境告警，不影响 PhysX/CUDA 无渲染训练：三档 smoke
+  均继续完成，八卡负载稳定且进程以 0 退出。若未来需要相机或渲染，必须先修复
+  Vulkan ICD/驱动环境，不能用本次 headless 训练通过替代渲染验证。
+
+### 5. 正式训练边界
+
+- 本轮没有启动 100k 正式训练，也没有执行 ONNX 导出；只证明当前提交、当前数据和
+  当前 noetix 软硬件环境可从零训练到 4,096 env/rank。
+- 正式训练必须继续使用 `checkpoint=null`、`auto_load_latest=False`、`resume=False`，
+  不得添加 smoke checkpoint。正式命令的 `num_envs=4096` 已由完整 100 iterations
+  实测确定，其余网络、PPO、环境和数据参数保持活跃配置不变。
 
 ## 2026-08-26：将误用的 BUMI2 集成完整迁移为 BUMI3
 
