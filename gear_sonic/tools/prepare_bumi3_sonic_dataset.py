@@ -53,6 +53,7 @@ TARGET_FPS = 50.0
 EXPECTED_ROBOT = 3261
 EXPECTED_SMPL = 3162
 EXPECTED_MINE = 99
+EXPECTED_SOURCE_MJCF_SHA256 = "482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c"
 DATASET_DIRS = {
     "aistpp": "AIST++",
     "aioz_gdance": "AIOZ-GDANCE",
@@ -298,6 +299,7 @@ def _convert_robot_job(args: tuple[SampleRecord, MjcfContract, str]) -> str:
         "source_dataset",
         "source_sample_id",
         "quality_accepted",
+        "source_mjcf_sha256",
     }
     missing = sorted(required - payload.keys())
     if missing:
@@ -306,6 +308,12 @@ def _convert_robot_job(args: tuple[SampleRecord, MjcfContract, str]) -> str:
         raise ValueError(f"{source} contract_version 错误: {payload['contract_version']}")
     if payload["quaternion_convention"] != "wxyz" or payload["qpos_order"] != "mujoco_native":
         raise ValueError(f"{source} 四元数或 qpos 顺序契约错误")
+    if payload["robot_name"] != "bumi":
+        raise ValueError(f"{source} robot_name 应为 'bumi'，实际 {payload['robot_name']!r}")
+    if payload["source_mjcf_sha256"] != EXPECTED_SOURCE_MJCF_SHA256:
+        raise ValueError(
+            f"{source} source_mjcf_sha256 漂移: {payload['source_mjcf_sha256']}"
+        )
     if not bool(payload["quality_accepted"]):
         raise ValueError(f"{source} 未通过质量筛选")
     if _normalise_dataset(str(payload["source_dataset"])) != record.dataset:
@@ -360,7 +368,9 @@ def _convert_robot_job(args: tuple[SampleRecord, MjcfContract, str]) -> str:
         "fps": 30,
     }
     output = Path(output_dir_text) / f"{record.key}.pkl"
-    joblib.dump({record.key: entry}, output, compress=3)
+    temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
+    joblib.dump({record.key: entry}, temporary, compress=3)
+    os.replace(temporary, output)
     return record.key
 
 
@@ -481,6 +491,7 @@ def _convert_smpl_job(args: tuple[SampleRecord, str, str]) -> str:
     if not torch.isfinite(joints_50).all() or joints_50.shape != (len(pose_50), 24, 3):
         raise ValueError(f"{record.key} SMPL joints 非有限或形状错误: {tuple(joints_50.shape)}")
     output = Path(output_dir_text) / f"{record.key}.pkl"
+    temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
     joblib.dump(
         {
             "pose_aa": pose_50.numpy().astype(np.float32, copy=False),
@@ -488,9 +499,10 @@ def _convert_smpl_job(args: tuple[SampleRecord, str, str]) -> str:
             "smpl_joints": joints_50.numpy().astype(np.float32, copy=False),
             "fps": 50.0,
         },
-        output,
+        temporary,
         compress=3,
     )
+    os.replace(temporary, output)
     return record.key
 
 
@@ -598,6 +610,7 @@ def _write_metadata(
         "contract_version": "sonic.bumi3_hq_all.v1",
         "repo_commit": _git_commit(Path(__file__).resolve().parents[2]),
         "mjcf_sha256": contract.sha256,
+        "source_bumi_mjcf_sha256": EXPECTED_SOURCE_MJCF_SHA256,
         "human_joints_info_sha256": _sha256(human_info_path),
         "robot_count": len(records),
         "smpl_count": sum(record.paired for record in records),

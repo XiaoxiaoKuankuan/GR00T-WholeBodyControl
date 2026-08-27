@@ -60,6 +60,9 @@ def test_robot_conversion_reorders_source_names(tmp_path: Path) -> None:
             "source_dataset": "mine",
             "source_sample_id": "sample",
             "quality_accepted": True,
+            "source_mjcf_sha256": (
+                "482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c"
+            ),
         },
         source,
     )

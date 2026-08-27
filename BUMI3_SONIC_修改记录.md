@@ -14,6 +14,12 @@
   名称重排、axis-angle 生成以及与 SONIC 相同的 30Hz→50Hz 末帧排除时间网格。
 - `validate` 读取包含输出路径和运行时帧数的扩展 manifest 时，只提取
   `SampleRecord` 契约字段，避免元数据扩展字段被误传给数据类构造函数。
+- robot/SMPL 单文件先写入带 PID 的隐藏临时文件，joblib 完成后再原子替换为目标
+  文件名；中断恢复不会把半文件误判为已完成。
+- 锁定源 BUMI 文件实际携带的 MJCF SHA256
+  `482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c`，并将其与
+  当前 SONIC BUMI3 MJCF 指纹分别写入 provenance。两者不相同，因此只允许通过
+  每段文件的 21 个 `joint_names` 做名称集合验证和显式重排，禁止按源列位置直拷。
 - 实施前复核发现 `bumi.urdf` 的修改时间晚于验证脚本，工作区已经存在一组未记录
   的后续碰撞参数。为保留用户现有修改，本轮不改 URDF，只同步更新
   `validate_bumi3_integration.py` 的锁定值：左右 leg-roll 为 origin Z `-0.08`、
