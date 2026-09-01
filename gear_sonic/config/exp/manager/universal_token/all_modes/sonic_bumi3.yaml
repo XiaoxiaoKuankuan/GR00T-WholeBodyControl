@@ -193,65 +193,14 @@ manager_env:
           adp_samp_failure_rate_max_over_mean: 200
         motion_file: null
         smpl_motion_file: null
-        # 2026-08-31 Robot waist 与经训练端转换后的 SMPL root 配对审计中，以下
-        # 55 条完整 key 的整段中位相对姿态差超过 45 度。使用精确 key 隔离，
-        # 不使用前缀/正则，避免误删同来源中的正常爬行、跪地或舞蹈动作。
-        exclude_motion_keys:
-          - aistpp__gBR_sBM_cAll_d05_mBR1_ch08
-          - aistpp__gJB_sBM_cAll_d09_mJB2_ch07
-          - aistpp__gBR_sFM_cAll_d04_mBR4_ch07
-          - aistpp__gBR_sFM_cAll_d05_mBR5_ch14
-          - aistpp__gHO_sBM_cAll_d21_mHO4_ch07
-          - aioz_gdance__CFmvaQiCW6I_10_0_975_dancer_01
-          - aioz_gdance__FNp36zWB4tE_02_0_1500_dancer_03
-          - aistpp__gWA_sBM_cAll_d27_mWA5_ch08
-          - aistpp__gJB_sBM_cAll_d08_mJB0_ch09
-          - aistpp__gHO_sFM_cAll_d20_mHO1_ch09
-          - aistpp__gJB_sBM_cAll_d08_mJB1_ch09
-          - aistpp__gBR_sBM_cAll_d06_mBR4_ch08
-          - aistpp__gWA_sBM_cAll_d26_mWA5_ch08
-          - aistpp__gJS_sBM_cAll_d01_mJS0_ch10
-          - aistpp__gBR_sBM_cAll_d04_mBR1_ch08
-          - aistpp__gBR_sBM_cAll_d06_mBR2_ch08
-          - aistpp__gBR_sBM_cAll_d06_mBR3_ch08
-          - aistpp__gBR_sBM_cAll_d04_mBR3_ch07
-          - aistpp__gBR_sBM_cAll_d04_mBR3_ch08
-          - aistpp__gBR_sBM_cAll_d06_mBR5_ch07
-          - aistpp__gBR_sBM_cAll_d06_mBR5_ch08
-          - aistpp__gBR_sBM_cAll_d06_mBR4_ch07
-          - aistpp__gBR_sBM_cAll_d04_mBR3_ch10
-          - aistpp__gJB_sBM_cAll_d09_mJB4_ch06
-          - aistpp__gBR_sBM_cAll_d04_mBR2_ch08
-          - aistpp__gBR_sBM_cAll_d04_mBR2_ch07
-          - aioz_gdance__T8ch-m8-pbU_02_0_1710_dancer_01
-          - compas3d__Pair1_song1_take2_leader
-          - aistpp__gBR_sBM_cAll_d06_mBR3_ch07
-          - aistpp__gBR_sFM_cAll_d06_mBR4_ch20
-          - aistpp__gBR_sFM_cAll_d05_mBR4_ch13
-          - aistpp__gMH_sFM_cAll_d22_mMH0_ch01
-          - aistpp__gBR_sBM_cAll_d04_mBR2_ch10
-          - aistpp__gBR_sBM_cAll_d04_mBR1_ch10
-          - aistpp__gBR_sBM_cAll_d06_mBR5_ch10
-          - aistpp__gPO_sFM_cAll_d12_mPO5_ch21
-          - aistpp__gBR_sBM_cAll_d04_mBR1_ch07
-          - aistpp__gBR_sBM_cAll_d06_mBR2_ch07
-          - aistpp__gLO_sFM_cAll_d15_mLO0_ch15
-          - aistpp__gBR_sBM_cAll_d06_mBR3_ch10
-          - aistpp__gWA_sBM_cAll_d25_mWA2_ch03
-          - aistpp__gBR_sFM_cAll_d05_mBR1_ch08
-          - aistpp__gBR_sBM_cAll_d06_mBR3_ch09
-          - aistpp__gBR_sBM_cAll_d06_mBR5_ch09
-          - aistpp__gBR_sBM_cAll_d06_mBR4_ch09
-          - aistpp__gWA_sBM_cAll_d26_mWA4_ch08
-          - aistpp__gBR_sFM_cAll_d06_mBR3_ch17
-          - aistpp__gBR_sBM_cAll_d06_mBR2_ch09
-          - aistpp__gBR_sBM_cAll_d05_mBR1_ch09
-          - aistpp__gBR_sBM_cAll_d05_mBR5_ch09
-          - aistpp__gLH_sFM_cAll_d18_mLH1_ch16
-          - aistpp__gBR_sBM_cAll_d06_mBR4_ch10
-          - aistpp__gLO_sBM_cAll_d15_mLO5_ch04
-          - aistpp__gJS_sFM_cAll_d01_mJS1_ch07
-          - aistpp__gMH_sFM_cAll_d22_mMH1_ch02
+        # 三源训练索引已经逐条审计 Robot/SMPL 配对，不再沿用旧 hq_all_v2 的
+        # 55 条静态隔离清单；坐标异常的 SMPL 在索引中直接降级为 Robot-only。
+        exclude_motion_keys: []
+        # 新大集两侧都已是 50 Hz，仅允许裁掉由独占末帧网格舍入造成的 1 至 2 帧尾差。
+        # 该模式不重采样、不重复帧；帧率不一致或尾差超过上限会在 FK 前立即失败。
+        paired_frame_alignment:
+          mode: trim_trailing
+          max_frame_delta: 2
         # SMPL pose_aa 源字段仍保持 Y-up；训练端在构造根姿态 token 时只转换一次。
         # 同一 PKL 的 smpl_joints 已由数据准备脚本离线 FK 到 Z-up，不再二次旋转。
         smpl_y_up: true

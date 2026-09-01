@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""在启动 BUMI3 SONIC 训练前审计 Robot/SMPL 坐标契约和 55 条隔离清单。
+"""审计旧 hq_all_v2 BUMI3 Robot/SMPL 坐标契约与历史异常配对。
 
 本脚本只读已经构建的 ``robot_all`` 与 ``smpl_all``，不会生成、转换、重采样或
-删除训练数据。Robot 侧严格复现 MotionLib 的 30Hz→50Hz 独占末帧时间网格，分别
-对浮动根和 ``waist_yaw_link`` 局部姿态做 Slerp，再组合成训练 Robot Encoder 使用
-的腰部世界姿态。SMPL 侧严格复现训练命令项的 ``pose_aa`` Y-up→Z-up 左乘旋转和
-SMPL base rotation removal。两侧统一到 Z-up 后，按整段相对旋转角中位数 45 度
-审计，并要求检测结果与 ``sonic_bumi3.yaml`` 中 55 个完整 key 完全一致。
+删除训练数据。Robot 侧严格复现 MotionLib 的 30Hz→50Hz 独占末帧时间网格，
+分别对浮动根和 ``waist_yaw_link`` 局部姿态做 Slerp，再组合成训练 Robot
+Encoder 使用的腰部世界姿态。SMPL 侧严格复现训练命令项的 ``pose_aa``
+Y-up→Z-up 左乘旋转和 SMPL base rotation removal。两侧统一到 Z-up 后，
+按整段相对旋转角中位数 45 度审计。若配置仍声明完整隔离 key，则要求检测
+结果和配置一致；新三源配置不再携带旧静态名单时，脚本仍要求从旧数据中
+独立检出恰好 55 条，用于保留历史数据审计能力。
 
 通过条件还包括：3261 条 Robot、3162 个同名 Robot/SMPL 配对、99 条 Mine-only、
-55 条隔离全部存在且无重复；最终训练候选应为 3206 条，其中 3107 条含 SMPL。
-该检查用于阻止坐标系或隔离列表漂移后误启动训练，但不把静态姿态检查冒充
-Isaac Lab reset/step、奖励曲线或最终动作质量验证。
+历史审计应检出 55 条异常配对，旧数据剩余候选为 3206 条 Robot、
+3107 条 SMPL。新训练不会直接使用这个旧目录，而由三源构建工具逐条决定
+配对状态。该检查不能替代 Isaac Lab reset/step、奖励曲线或最终动作质量
+验证。
 """
 
 from __future__ import annotations
@@ -87,7 +90,7 @@ def _processed_smpl_root_rotation(smpl: dict) -> Rotation:
 
 
 def _load_excluded_keys(config_path: Path) -> list[str]:
-    """从实际 BUMI3 实验配置读取精确隔离 key。"""
+    """读取配置中的可选精确隔离 key；新三源配置允许为空。"""
     cfg = OmegaConf.load(config_path)
     keys = OmegaConf.to_container(
         cfg.manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys,
@@ -111,18 +114,24 @@ def validate(args: argparse.Namespace) -> None:
     if len(smpl_files) != EXPECTED_SMPL_COUNT:
         raise ValueError(f"SMPL 数量 {len(smpl_files)} != {EXPECTED_SMPL_COUNT}")
     if not set(smpl_files).issubset(robot_files):
-        raise ValueError(f"SMPL 存在无 Robot 配对: {sorted(set(smpl_files) - set(robot_files))[:10]}")
+        raise ValueError(
+            "SMPL 存在无 Robot 配对: "
+            f"{sorted(set(smpl_files) - set(robot_files))[:10]}"
+        )
     mine_only = sorted(set(robot_files) - set(smpl_files))
     if len(mine_only) != EXPECTED_MINE_ONLY_COUNT or any(
         not key.startswith("mine__") for key in mine_only
     ):
         raise ValueError(f"Mine-only 契约错误: count={len(mine_only)}")
-    if len(excluded_keys) != EXPECTED_EXCLUDED_COUNT:
-        raise ValueError(f"隔离数量 {len(excluded_keys)} != {EXPECTED_EXCLUDED_COUNT}")
-    absent_robot = sorted(set(excluded_keys) - set(robot_files))
-    absent_smpl = sorted(set(excluded_keys) - set(smpl_files))
-    if absent_robot or absent_smpl:
-        raise ValueError(f"隔离 key 缺失: robot={absent_robot}, smpl={absent_smpl}")
+    if excluded_keys and len(excluded_keys) != EXPECTED_EXCLUDED_COUNT:
+        raise ValueError(
+            f"非空隔离清单数量 {len(excluded_keys)} != {EXPECTED_EXCLUDED_COUNT}"
+        )
+    if excluded_keys:
+        absent_robot = sorted(set(excluded_keys) - set(robot_files))
+        absent_smpl = sorted(set(excluded_keys) - set(smpl_files))
+        if absent_robot or absent_smpl:
+            raise ValueError(f"隔离 key 缺失: robot={absent_robot}, smpl={absent_smpl}")
 
     detected_bad: list[str] = []
     pair_medians: dict[str, float] = {}
@@ -143,24 +152,29 @@ def validate(args: argparse.Namespace) -> None:
         if args.verbose and (index % 250 == 0 or index == len(smpl_files)):
             print(f"[coordinate-audit] {index}/{len(smpl_files)}", flush=True)
 
-    expected_bad = set(excluded_keys)
     actual_bad = set(detected_bad)
-    if actual_bad != expected_bad:
+    if len(actual_bad) != EXPECTED_EXCLUDED_COUNT:
+        raise ValueError(
+            f"旧 hq_all_v2 检出异常配对 {len(actual_bad)} != {EXPECTED_EXCLUDED_COUNT}"
+        )
+    configured_bad = set(excluded_keys)
+    if configured_bad and actual_bad != configured_bad:
         raise ValueError(
             "45 度审计结果与隔离清单不一致: "
-            f"新增={sorted(actual_bad - expected_bad)}, "
-            f"清单但未检出={sorted(expected_bad - actual_bad)}"
+            f"新增={sorted(actual_bad - configured_bad)}, "
+            f"清单但未检出={sorted(configured_bad - actual_bad)}"
         )
 
     retained_pair_medians = [
-        value for key, value in pair_medians.items() if key not in expected_bad
+        value for key, value in pair_medians.items() if key not in actual_bad
     ]
-    retained_robot_count = len(robot_files) - len(expected_bad)
-    retained_smpl_count = len(smpl_files) - len(expected_bad)
+    retained_robot_count = len(robot_files) - len(actual_bad)
+    retained_smpl_count = len(smpl_files) - len(actual_bad)
     print(
         "BUMI3_TRAINING_COORDINATES=PASS "
         f"robot_total={len(robot_files)} smpl_paired={len(smpl_files)} "
-        f"mine_only={len(mine_only)} excluded={len(expected_bad)} "
+        f"mine_only={len(mine_only)} legacy_detected={len(actual_bad)} "
+        f"active_exclusions={len(configured_bad)} "
         f"training_robot={retained_robot_count} training_smpl={retained_smpl_count}"
     )
     print(
@@ -171,7 +185,7 @@ def validate(args: argparse.Namespace) -> None:
         "PAIR_MEDIAN_DEGREES "
         f"retained_median={np.median(retained_pair_medians):.6f} "
         f"retained_max={np.max(retained_pair_medians):.6f} "
-        f"excluded_min={min(pair_medians[key] for key in expected_bad):.6f}"
+        f"legacy_bad_min={min(pair_medians[key] for key in actual_bad):.6f}"
     )
 
 

@@ -83,6 +83,99 @@ def exclude_motion_data_by_exact_keys(data_list, excluded_keys):
     return filtered, matched, missing
 
 
+def resolve_paired_frame_alignment(
+    robot_num_frames: int,
+    robot_fps: float,
+    smpl_data: dict,
+    target_fps: float,
+    alignment_cfg,
+) -> int:
+    """按显式配置校验同源 Robot/SMPL 尾帧差，并返回可共同使用的源帧数。
+
+    默认 ``strict`` 模式完全保留历史 MotionLib 行为，不在加载前改动 Robot 长度。
+    ``trim_trailing`` 专门处理两个已经位于目标帧率、起始时间一致，但因独占末帧时间网格
+    舍入而相差少量尾帧的配对；它只返回两侧较短长度，不插帧、不重复帧，也不允许用裁剪
+    掩盖帧率或 SMPL 字段内部长度错误。
+
+    Args:
+        robot_num_frames: Robot PKL 当前动作的源帧数。
+        robot_fps: Robot PKL 声明的源帧率。
+        smpl_data: 与 Robot 同名配对的 SMPL PKL 字典。
+        target_fps: MotionLib 运行时目标帧率。
+        alignment_cfg: 包含 ``mode`` 与 ``max_frame_delta`` 的可选配置。
+
+    Returns:
+        Robot 和 SMPL 在进入 FK 前共同采用的源帧数。
+
+    Raises:
+        ValueError: 配置非法、帧率不是目标帧率、字段缺失或尾帧差超过上限。
+    """
+
+    cfg = alignment_cfg or {}
+    mode = cfg.get("mode", "strict")
+    if mode == "strict":
+        # 同为目标帧率时，历史 strict 语义要求 Robot/SMPL 原始长度完全一致。
+        # 先在统一切片前检查，避免 SMPL 较长时被 ``[start:end]`` 静默裁掉。
+        smpl_fps = smpl_data.get("fps")
+        if smpl_fps is not None and np.isclose(
+            float(robot_fps), float(target_fps)
+        ) and np.isclose(float(smpl_fps), float(target_fps)):
+            temporal_lengths = {
+                field: len(smpl_data[field])
+                for field in ("pose_aa", "smpl_joints", "transl")
+                if field in smpl_data
+            }
+            mismatched = {
+                field: length
+                for field, length in temporal_lengths.items()
+                if length != int(robot_num_frames)
+            }
+            if mismatched:
+                raise ValueError(
+                    "strict 模式要求同为目标帧率的 Robot/SMPL 长度完全一致，"
+                    f"robot={robot_num_frames}, smpl={mismatched}"
+                )
+        return int(robot_num_frames)
+    if mode != "trim_trailing":
+        raise ValueError(
+            "paired_frame_alignment.mode 只支持 strict 或 trim_trailing，"
+            f"实际为 {mode!r}"
+        )
+
+    max_frame_delta = cfg.get("max_frame_delta", 0)
+    if isinstance(max_frame_delta, bool) or not isinstance(max_frame_delta, int):
+        raise ValueError("paired_frame_alignment.max_frame_delta 必须是非负整数")
+    if max_frame_delta < 0:
+        raise ValueError("paired_frame_alignment.max_frame_delta 不能小于 0")
+
+    smpl_fps = float(smpl_data.get("fps", float("nan")))
+    if not np.isclose(float(robot_fps), float(target_fps)) or not np.isclose(
+        smpl_fps, float(target_fps)
+    ):
+        raise ValueError(
+            "trim_trailing 只允许对齐已经处于目标帧率的配对，"
+            f"robot_fps={robot_fps}, smpl_fps={smpl_fps}, target_fps={target_fps}"
+        )
+
+    required_fields = ("pose_aa", "smpl_joints", "transl")
+    missing_fields = [field for field in required_fields if field not in smpl_data]
+    if missing_fields:
+        raise ValueError(f"SMPL 配对缺少时间字段: {missing_fields}")
+    smpl_lengths = {field: len(smpl_data[field]) for field in required_fields}
+    if len(set(smpl_lengths.values())) != 1:
+        raise ValueError(f"SMPL 时间字段长度不一致: {smpl_lengths}")
+
+    smpl_num_frames = next(iter(smpl_lengths.values()))
+    frame_delta = int(smpl_num_frames) - int(robot_num_frames)
+    if abs(frame_delta) > max_frame_delta:
+        raise ValueError(
+            "Robot/SMPL 尾帧差超过允许范围，"
+            f"robot={robot_num_frames}, smpl={smpl_num_frames}, "
+            f"delta={frame_delta}, max_frame_delta={max_frame_delta}"
+        )
+    return min(int(robot_num_frames), int(smpl_num_frames))
+
+
 def interpolate_translation_data(
     data,
     source_fps,
@@ -255,6 +348,22 @@ class MotionLibBase:
         self.motion_fps_scale = self.m_cfg.get("motion_fps_scale", 1.0)
         self._sim_fps = 1 / self.m_cfg.get("step_dt", 1 / 50)
         self.target_fps = self.m_cfg.get("target_fps", 50)
+        self.paired_frame_alignment_cfg = self.m_cfg.get(
+            "paired_frame_alignment", {"mode": "strict", "max_frame_delta": 0}
+        )
+        # 在初始化阶段用一个最小合成配对校验配置，避免非法模式等到多进程加载后才报错。
+        resolve_paired_frame_alignment(
+            robot_num_frames=1,
+            robot_fps=self.target_fps,
+            smpl_data={
+                "fps": self.target_fps,
+                "pose_aa": np.zeros((1, 72), dtype=np.float32),
+                "smpl_joints": np.zeros((1, 24, 3), dtype=np.float32),
+                "transl": np.zeros((1, 3), dtype=np.float32),
+            },
+            target_fps=self.target_fps,
+            alignment_cfg=self.paired_frame_alignment_cfg,
+        )
         self.adaptive_sampling_cfg = self.m_cfg.get("adaptive_sampling", {})
         self.all_motions_loaded = False
 
@@ -1817,7 +1926,26 @@ class MotionLibBase:
                     curr_file["path"]
                 ).values()  # First value since it's a single item dictionary
 
+            # 先读取同名 SMPL，才能在 Robot FK 前把允许的少量尾帧差收敛到共同长度。
+            # Robot-only 动作在索引阶段保持 ``None``，不会进入该对齐分支。
+            curr_smpl_data = None
+            if smpl_data_list is not None:
+                curr_smpl_data = smpl_data_list[f]
+                if curr_smpl_data is not None and "path" in curr_smpl_data:
+                    curr_smpl_data = joblib.load(curr_smpl_data["path"])
+
+            if "fps" not in curr_file.keys():  # noqa: SIM118
+                curr_file["fps"] = 30.0
+
             seq_len = curr_file["root_trans_offset"].shape[0]
+            if curr_smpl_data is not None:
+                seq_len = resolve_paired_frame_alignment(
+                    robot_num_frames=seq_len,
+                    robot_fps=float(curr_file["fps"]),
+                    smpl_data=curr_smpl_data,
+                    target_fps=float(self.target_fps),
+                    alignment_cfg=self.paired_frame_alignment_cfg,
+                )
             if max_len == -1 or seq_len < max_len:
                 start, end = 0, seq_len
             else:
@@ -1831,8 +1959,6 @@ class MotionLibBase:
             if "action" in curr_file.keys():  # noqa: SIM118
                 self.has_action = True
 
-            if "fps" not in curr_file.keys():  # noqa: SIM118
-                curr_file["fps"] = 30.0
             dt = 1 / curr_file["fps"]  # noqa: F841
 
             B, J, N = pose_aa.shape
@@ -1939,11 +2065,7 @@ class MotionLibBase:
                     use_parallel_fk=self.use_parallel_fk,
                 )
                 if self.smpl_data is not None:
-                    curr_smpl_data = smpl_data_list[f]
                     if curr_smpl_data is not None:
-                        if "path" in curr_smpl_data:
-                            curr_smpl_data = joblib.load(curr_smpl_data["path"])
-
                         if curr_smpl_data["fps"] != self.target_fps:
                             smpl_pose = torch.tensor(curr_smpl_data["pose_aa"][start:end]).float()
                             smpl_pose[:, -6:] = 0.0
@@ -1951,12 +2073,23 @@ class MotionLibBase:
                                 None, smpl_pose[None,], curr_smpl_data["fps"], self.target_fps
                             )[1][0]
                         else:
-                            smpl_pose = torch.tensor(curr_smpl_data["pose_aa"]).float()
+                            # 两侧同为目标帧率时必须复用 Robot 的截段窗口；这既覆盖尾帧对齐，
+                            # 也修复历史代码在随机 max_len 截段时仍加载整段 SMPL 的问题。
+                            smpl_slice = (
+                                slice(start, end)
+                                if np.isclose(float(curr_file["fps"]), float(self.target_fps))
+                                else slice(None)
+                            )
+                            smpl_pose = torch.tensor(curr_smpl_data["pose_aa"][smpl_slice]).float()
                             smpl_pose[:, -6:] = 0.0
-                            # new_seq_len = curr_motion['global_translation'].shape[1]
                             curr_motion["smpl_pose"] = smpl_pose
                         if "smpl_joints" in curr_smpl_data:
-                            smpl_joints = torch.tensor(curr_smpl_data["smpl_joints"]).float()
+                            smpl_joints_data = curr_smpl_data["smpl_joints"]
+                            if curr_smpl_data["fps"] == self.target_fps and np.isclose(
+                                float(curr_file["fps"]), float(self.target_fps)
+                            ):
+                                smpl_joints_data = smpl_joints_data[start:end]
+                            smpl_joints = torch.tensor(smpl_joints_data).float()
                             curr_motion["smpl_joints"] = smpl_joints
                             if (
                                 curr_motion["smpl_joints"].shape[0]
@@ -1978,7 +2111,12 @@ class MotionLibBase:
                                 curr_motion["global_translation"]
                             )
                         if "transl" in curr_smpl_data:
-                            transl = torch.tensor(curr_smpl_data["transl"]).float()
+                            transl_data = curr_smpl_data["transl"]
+                            if curr_smpl_data["fps"] == self.target_fps and np.isclose(
+                                float(curr_file["fps"]), float(self.target_fps)
+                            ):
+                                transl_data = transl_data[start:end]
+                            transl = torch.tensor(transl_data).float()
                             curr_motion["smpl_transl"] = transl
                             assert (
                                 curr_motion["smpl_transl"].shape[0]

@@ -449,22 +449,14 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert motion_lib_cfg["robot_type"] == "bumi3"
     assert motion_lib_cfg["asset"]["assetFileName"] == "bumi3.xml"
     assert motion_lib_cfg["wrist_mujoco_dof_indices"] == []
+    # 三源索引已经逐条审计并在清单层降级异常 SMPL，不得继续误删旧 hq_all_v2
+    # 的 55 个 key；运行时只承担同为 50 Hz 的最多两帧尾差对齐。
     excluded_motion_keys = list(motion_lib_cfg["exclude_motion_keys"])
-    assert len(excluded_motion_keys) == 55
-    assert len(set(excluded_motion_keys)) == 55
-    assert all(not key.endswith(".pkl") for key in excluded_motion_keys)
-    assert not any(key.startswith("mine__") for key in excluded_motion_keys)
-    excluded_source_counts = {
-        prefix: sum(key.startswith(f"{prefix}__") for key in excluded_motion_keys)
-        for prefix in ("aistpp", "aioz_gdance", "compas3d")
+    assert excluded_motion_keys == []
+    assert motion_lib_cfg["paired_frame_alignment"] == {
+        "mode": "trim_trailing",
+        "max_frame_delta": 2,
     }
-    assert excluded_source_counts == {"aistpp": 51, "aioz_gdance": 3, "compas3d": 1}
-    exclusion_fingerprint = hashlib.sha256(
-        "\n".join(sorted(excluded_motion_keys)).encode("utf-8")
-    ).hexdigest()
-    assert exclusion_fingerprint == (
-        "808786f5202af4c8cef08c0aee8ff025468b99d3e3a5ade83f273e2d4aacfd88"
-    )
     # SMPL pose_aa 保存源 Y-up 姿态，训练端只转换一次；smpl_joints 已离线为 Z-up。
     assert motion_lib_cfg["smpl_y_up"] is True
     assert motion_cfg["randomize_wrist_poses"] is False

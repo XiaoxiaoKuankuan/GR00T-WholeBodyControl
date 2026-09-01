@@ -1458,3 +1458,120 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
   不适用。
 - 回滚服务器信任配置时，只需精确删除 root Git config 中这一条
   `safe.directory=/home/liwei/GR00T-WholeBodyControl`；但删除后 root 会再次遇到 ownership 安全拦截。
+
+## 2026-09-01：实现 BUMI3 SONIC 三数据源只读索引与可选尾帧对齐
+
+### 1. 修改起点、授权范围和数据来源
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `4efe77e2bee5fd2752376e59e302761d688b32c2`。修改前本地与
+  `origin/feature/bumi-native-sonic-full-training` 的 ahead/behind 为 `0/0`，
+  `git status --short` 无输出。
+- 用户明确要求实现三数据源联合训练方案、提交并推送当前 feature 分支，再让
+  `noetix-volc` 同分支执行 `git pull --ff-only`。本轮不获得停止或覆盖现有 hq4
+  八卡训练的授权，因此只读核对其进程，不改变 PID、tmux、日志、checkpoint 或运行目录。
+- 服务器只读核对确认新索引目标
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1` 尚不存在，2 TB 数据盘
+  约剩余 1.9 TB；三项实际来源路径为：
+  - `/data/sonic_bumi3/datasets/bumi3_smpl_97660_v1`；
+  - `/data/sonic_bumi3/datasets/hq4_pass50_v1`；
+  - `/data/sonic_bumi3/datasets/hq_all_v2/built/robot_all` 中精确的 `mine__*`。
+- 服务器构建前仍在运行 8 个训练 worker，启动参数指向旧 hq4 PASS50 数据和独立
+  `hq4_pass50_v1_scratch_100k` 实验。本轮提交和后续快进不会替换已经载入进程内存的
+  Python 代码，也不会自动重启该任务。
+
+### 2. MotionLib 尾帧和随机截段修正
+
+- `gear_sonic/utils/motion_lib/motion_lib_base.py` 新增
+  `resolve_paired_frame_alignment`：
+  - 默认 `strict` 保留 G1/H2 的严格行为；同为目标帧率时，在统一切片前要求已有
+    SMPL 时间字段与 Robot 原始长度完全一致，不能把较长 SMPL 静默裁短；
+  - 可选 `trim_trailing` 只接受 Robot/SMPL 都已经是目标帧率、
+    `pose_aa/smpl_joints/transl` 内部长度一致且尾差不超过配置上限的配对；
+  - 返回两侧共同的较短长度，只裁末尾，不重复帧、不插值、不改变起始时间；非法模式、
+    布尔型/负数上限、错帧率、缺字段、内部错长或超过上限均在 FK 前失败。
+- 同名 SMPL 现在先于 Robot 随机截段载入。Robot 和 50 Hz SMPL 共用同一
+  `[start:end]`，修复旧实现在 `max_len` 随机截取 Robot 后仍把整段 SMPL 输入网络的
+  时间错位；`pose_aa`、`smpl_joints`、`transl` 三个字段使用相同窗口。
+- freeze-frame augmentation 继续使用同一 Robot 源帧索引换算到目标帧率，并同步冻结
+  三个 SMPL 字段。Robot-only 动作保持 `curr_smpl_data=None`，不会进入配对对齐逻辑。
+- BUMI3 `sonic_bumi3.yaml` 显式启用 `mode=trim_trailing`、
+  `max_frame_delta=2`。因此 50 Hz 大集可裁 0–2 个尾帧，30 Hz Mine Robot-only 仍由
+  既有 Robot FK 插值到 50 Hz；若未来误把 30 Hz Robot 和 SMPL 配在一起会立即失败，
+  不会用该开关掩盖帧率契约错误。
+
+### 3. 三来源全量构建与审计工具
+
+- 新增 `gear_sonic/tools/build_bumi3_three_source_dataset.py`，文件头以中文详细说明
+  输入、字段级坐标契约、降级边界、原子发布和验证能力。工具默认锁定计划中的来源
+  计数：大集 train `92443`、test `5217`，hq4 Robot `2790`、SMPL `2788`，
+  Mine `99`。
+- 发现阶段递归建立 basename 唯一索引，要求大集 train/test 完整配对、hq4 SMPL 是
+  Robot 子集、三训练来源 key 不冲突、train/test 不交叉。整个 `hq_all_v2` 不进入索引，
+  只接受精确 `mine__` 前缀，避免和 hq4 PASS50 重复训练。
+- 每条 Robot 全量检查外层 key、必要字段、有限值、50/30 Hz 来源契约、
+  `(T,22,3)` pose、`(T,21)` DoF、`(T,4)` root、四元数单位范数和 xyzw 顺序；
+  还统计根倾角和 Z 高度，以来源级中位数/横躺帧比例阻止系统性错误坐标。
+- 每条 SMPL 全量检查 `pose_aa/transl/smpl_joints/fps`、50 Hz、有限值和内部长度，
+  并根据 24 个关节的 XYZ extent 判断 `smpl_joints` 是否以 Z 为人体主轴。
+  `pose_aa/transl` 仍按 Y-up 源字段处理，不对整份 PKL 做错误的统一旋转。
+- 同名配对复现 SONIC 的 SMPL Y-up 到 Z-up 左乘、SMPL base rotation removal，
+  并用 BUMI3 `pose_aa` 的 index 1 计算 `waist_yaw_link` 世界姿态；对全部共同帧计算
+  waist/SMPL 根姿态中位差。帧差超过 2、SMPL 契约错误或中位差超过 45 度时，
+  只把该 SMPL 降级为 Robot-only；Robot 不合格则整次构建失败。
+- 每个实际发布的源文件均写入 SHA256。输出先在目标同级唯一 staging 目录构建，
+  只创建绝对软链接，不复制、不重写、不重采样源 PKL；同时生成 train/test JSONL
+  manifest、`summary.json` 和 `provenance.json`，结构验证通过后才用 `os.replace`
+  原子发布。目标已存在时拒绝覆盖，失败时只清理本工具创建的 staging 目录。
+- `validate` 子命令验证清单、软链接目标、计数、配对状态和 train/test 隔离；正式模式
+  重新计算全部源 SHA256，`--skip-hash-verification` 仅允许调试结构。
+- 配置删除旧 `hq_all_v2` 的 55 条静态 key 清单，设为 `exclude_motion_keys: []`。
+  新三源构建根据当前全量数据重新决定配对状态，避免用旧名单误删同名新数据。
+- `validate_bumi3_training_coordinates.py` 继续作为旧 hq_all_v2 的历史审计工具：新配置
+  清单为空时仍要求从旧目录独立检出恰好 55 条；若未来传入非空完整清单，则继续要求
+  检测集合和配置完全相同。它不再把旧 55 条描述为新三源训练的活跃隔离名单。
+
+### 4. 新增测试与兼容性门禁
+
+- `gear_sonic/tools/test_bumi3_paired_frame_alignment.py` 覆盖 strict 默认值、同帧率
+  strict 错长拒绝、0/1/2 帧双方向裁剪、超过两帧拒绝、帧率错误、缺字段、字段内部
+  错长和非法配置。测试还用轻量假 FK 真正执行 `load_motion_with_skeleton`，验证随机
+  截段和 freeze-frame 后 Robot/SMPL 四项时间数据逐帧一致。
+- `gear_sonic/tools/test_build_bumi3_three_source_dataset.py` 构造缩小的三来源数据，
+  验证 2 帧尾差配对、hq4/Mine Robot-only、旧公开动作不重新进入索引、自然按动作数
+  采样、train/test 隔离、绝对软链接和 SHA256 复核。
+- `validate_bumi3_integration.py` 将 resolved 配置门禁更新为：活跃隔离列表为空，
+  `paired_frame_alignment` 必须精确为 `trim_trailing/2`；G1 `sonic_release`、H2 compose、
+  网络层、FSQ、token、PPO、奖励和控制参数的原有校验保持不变。
+
+### 5. 本地实际验证结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q` 后接本轮两个新测试、
+  两个 BUMI3 数据准备测试、`test_bumi3_sim2sim.py` 和
+  `test_tracking_anchor_semantics.py`：`36 passed in 3.92s`；仅有 1 条已有
+  `DeprecationWarning: invalid escape sequence '\\*'`，未造成失败。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python
+  gear_sonic/tools/validate_bumi3_integration.py`：退出码 `0`，输出
+  `BUMI3 原生 SONIC 集成验证通过`；同时完成 G1/H2/BUMI3 Hydra compose 和 Isaac Sim
+  动态机器人配置导入。实测 resolved 数值为 `sim_dt=0.005`、`decimation=4`、控制频率
+  `50 Hz`、`target_fps=50`、`action_dim=21`、FSQ 总维度 `64`、actor proprioception
+  `690`、tokenizer flat `1262`、critic `1245`、dynamic decoder `754 -> 21`。
+- `git diff --check`：通过。
+- 尝试运行当前 `env_isaaclab` 内的 Black/Ruff，两个模块均未安装，因此没有把格式检查
+  写成通过；新增文件人工限制在 Black 100 字符行宽，语法和 compileall 已通过。
+
+### 6. 尚未执行项、风险与回滚
+
+- 首次代码提交前尚未在服务器执行 100,431 条 train/test 全量数据审计、索引发布和
+  第二次全量哈希复核；这些操作必须先让服务器快进到包含本工具的提交，实际结果会在
+  后续记录中补录，当前不能写成通过。
+- 本地没有三来源真实数据，所以尚未运行 MotionLib 三源真实加载、1-env reset/step、
+  16-env 100-step 或 8 卡 100-iteration smoke。服务器 8 张 GPU 正被用户要求保留的
+  hq4 正式训练占用；不会为了 smoke 停止该任务，最终会明确记录能执行和不能执行的层级。
+- 全量 SHA256 会产生明显磁盘读取；绝对软链接节省容量但依赖三个源目录保持原路径。
+  后续 `validate` 会在源文件内容或链接目标漂移时失败。
+- 本轮没有修改 PPO、网络主体、奖励、事件、终止、机器人资产、关节顺序、
+  `sim_dt`、`decimation` 或控制频率。回滚代码时应同时恢复 MotionLib 对齐函数、
+  BUMI3 两项配置、两个新测试、构建工具及两个验证脚本的对应门禁；发布的数据索引
+  只是源文件软链接，可在确认没有训练使用后单独处理，但不得删除或重写三个源目录。
