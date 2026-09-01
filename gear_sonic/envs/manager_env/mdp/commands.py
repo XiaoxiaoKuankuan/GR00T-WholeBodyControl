@@ -1965,15 +1965,18 @@ class TrackingCommand(CommandTerm):
 
     @property
     def root_rot_dif_l(self) -> torch.Tensor:
-        """Return reference root orientation relative to robot orientation in 6D repr.
+        """返回参考锚点相对于仿真机器人锚点的 6D 姿态差。
 
-        Returns:
-            Tensor of shape ``(num_envs, 6)``.
+        参考侧必须读取 ``cfg.anchor_body`` 指定的刚体；BUMI3 对应
+        ``waist_yaw_link``，不能再使用 MotionLib 第 0 个刚体 ``base_link`` 的浮动根
+        四元数。仿真侧同样读取 ``robot_anchor_quat_w``，从而让训练 tokenizer、奖励、
+        termination、Robot/SMPL 配对检查与 sim2sim 使用完全相同的命名锚点语义。
+
+        返回：
+            形状为 ``(num_envs, 6)`` 的张量。
         """
-        ref_root_quat = self.motion_lib.get_root_quat_w(
-            self.motion_ids, self.motion_start_time_steps + self.time_steps
-        )
-        root_rot_dif_w = quat_mul(quat_inv(self.robot_anchor_quat_w), ref_root_quat)
+        ref_anchor_quat = self.anchor_quat_w
+        root_rot_dif_w = quat_mul(quat_inv(self.robot_anchor_quat_w), ref_anchor_quat)
         # root_heading = self.anchor_heading_quat.view(self.num_envs, 1, 4).repeat(1, 1, 1)
         # root_heading_inv = quat_inv(self.anchor_heading_quat).view(self.num_envs, 1, 4).repeat(1, 1, 1)
         # deheaded_rot_dif_l = quat_mul(quat_mul(root_heading_inv, root_rot_dif_w), root_heading)
@@ -1983,15 +1986,17 @@ class TrackingCommand(CommandTerm):
 
     @property
     def root_rot_dif_l_multi_future(self) -> torch.Tensor:
-        """Return reference root orientation relative to robot for all future frames.
+        """返回各未来帧参考锚点相对于当前仿真机器人锚点的 6D 姿态差。
 
-        Uses the full robot orientation for canonicalization (preserves heading diff).
+        参考四元数通过 ``motion_anchor_body_index`` 选择；BUMI3 因而读取
+        ``waist_yaw_link`` 的 FK 世界姿态，禁止退回 ``base_link`` 根四元数。仿真侧继续
+        使用 ``robot_anchor_quat_w``，保证相对旋转的两个操作数描述同一个命名刚体。
 
-        Returns:
-            Tensor of shape ``(num_envs, num_future_frames * 6)``.
+        返回：
+            形状为 ``(num_envs, num_future_frames * 6)`` 的张量。
         """
-        ref_root_quat = self.motion_lib.get_root_quat_w(
-            self.future_motion_ids, self.future_time_steps
+        ref_anchor_quat = self.anchor_quat_w_multi_future.view(
+            self.num_envs, self.num_future_frames, 4
         )
         root_rot_dif = quat_mul(
             quat_inv(
@@ -1999,7 +2004,7 @@ class TrackingCommand(CommandTerm):
                     1, self.num_future_frames, 1
                 )
             ),
-            ref_root_quat.view(self.num_envs, self.num_future_frames, 4),
+            ref_anchor_quat,
         )
         mat = matrix_from_quat(root_rot_dif)
         root_rot_dif_l_mat = mat[..., :2].reshape(mat.shape[0], -1)

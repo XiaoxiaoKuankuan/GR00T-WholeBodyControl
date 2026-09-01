@@ -320,9 +320,9 @@
         </visual>
         <!-- 简化碰撞：圆柱轴沿 link 局部 Z 轴。 -->
         <collision>
-            <origin rpy="0 0 0" xyz="0 0 -0.08"/>
+            <origin rpy="0 0 0" xyz="0 0 -0.02"/>
             <geometry>
-                <cylinder radius="0.045" length="0.1"/>
+                <cylinder radius="0.03" length="0.08"/>
             </geometry>
         </collision>
         <inertial>
@@ -374,9 +374,9 @@
         </visual>
         <!-- 简化碰撞：圆柱轴沿 link 局部 Z 轴。 -->
         <collision>
-            <origin rpy="0 0 0" xyz="0.008475 0 -0.0694694"/>
+            <origin rpy="0 0 0" xyz="0.008475 0 -0.0894694"/>
             <geometry>
-                <cylinder radius="0.046" length="0.15"/>
+                <cylinder radius="0.025" length="0.13"/>
             </geometry>
         </collision>
         <inertial>
@@ -486,9 +486,9 @@
         </visual>
         <!-- 简化碰撞：圆柱轴沿 link 局部 Z 轴。 -->
         <collision>
-            <origin rpy="0 0 0" xyz="0 0 -0.08"/>
+            <origin rpy="0 0 0" xyz="0 0 -0.02"/>
             <geometry>
-                <cylinder radius="0.045" length="0.1"/>
+                <cylinder radius="0.03" length="0.08"/>
             </geometry>
         </collision>
         <inertial>
@@ -540,9 +540,9 @@
         </visual>
         <!-- 简化碰撞：圆柱轴沿 link 局部 Z 轴。 -->
         <collision>
-            <origin rpy="0 0 0" xyz="0.008475 0 -0.0694694"/>
+            <origin rpy="0 0 0" xyz="0.008475 0 -0.0894694"/>
             <geometry>
-                <cylinder radius="0.046" length="0.15"/>
+                <cylinder radius="0.025" length="0.13"/>
             </geometry>
         </collision>
         <inertial>

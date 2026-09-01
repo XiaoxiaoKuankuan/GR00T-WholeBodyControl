@@ -38,9 +38,31 @@ ASSET_ROOT = REPO_ROOT / "gear_sonic/data/assets/robot_description"
 URDF_PATH = ASSET_ROOT / "urdf/bumi3/bumi.urdf"
 MJCF_PATH = ASSET_ROOT / "mjcf/bumi3.xml"
 MESH_DIR = ASSET_ROOT / "meshes/bumi3"
-REFERENCE_ROOT = Path(
-    "/home/weili/legged_lab/source/NoetixRobot/NoetixRobot/assets/robots/bumi3"
-)
+
+
+def _resolve_reference_root() -> Path:
+    """解析 BUMI3 参考资产目录，兼容本机与训练服务器用户路径。"""
+
+    relative = Path("source/NoetixRobot/NoetixRobot/assets/robots/bumi3")
+    configured = os.environ.get("BUMI3_REFERENCE_ROOT")
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        REPO_ROOT.parent / "legged_lab" / relative,
+        Path("/home/weili/legged_lab") / relative,
+        Path("/home/liwei/legged_lab") / relative,
+        Path("/home/listao/Noetix-Lab") / relative,
+    ]
+    for candidate in candidates:
+        if candidate is not None and (candidate / "bumi.py").is_file():
+            return candidate
+    searched = [str(candidate) for candidate in candidates if candidate is not None]
+    raise FileNotFoundError(
+        "未找到 BUMI3 参考资产；请设置 BUMI3_REFERENCE_ROOT。"
+        f" 已检查: {searched}"
+    )
+
+
+REFERENCE_ROOT = _resolve_reference_root()
 EXP_NAME = "manager/universal_token/all_modes/sonic_bumi3"
 REFERENCE_BUMI_PY_SHA256 = "74aaeca9da615c50e3749e4f103bbf713b83443d9cb16fab08edfd320227c03e"
 REFERENCE_URDF_SHA256 = "174c1747019ced64267e74244bf89f3746856c90c30f88e4f162582ebc486476"
@@ -56,28 +78,28 @@ EXPECTED_CYLINDER_COLLISIONS = {
         "length": 0.12,
     },
     "l_leg_roll_link": {
-        "xyz": (0.0, 0.0, -0.08),
+        "xyz": (0.0, 0.0, -0.02),
         "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.045,
-        "length": 0.1,
+        "radius": 0.03,
+        "length": 0.08,
     },
     "r_leg_roll_link": {
-        "xyz": (0.0, 0.0, -0.08),
+        "xyz": (0.0, 0.0, -0.02),
         "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.045,
-        "length": 0.1,
+        "radius": 0.03,
+        "length": 0.08,
     },
     "l_knee_pitch_link": {
-        "xyz": (0.008475, 0.0, -0.0694694),
+        "xyz": (0.008475, 0.0, -0.0894694),
         "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.046,
-        "length": 0.15,
+        "radius": 0.025,
+        "length": 0.13,
     },
     "r_knee_pitch_link": {
-        "xyz": (0.008475, 0.0, -0.0694694),
+        "xyz": (0.008475, 0.0, -0.0894694),
         "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.046,
-        "length": 0.15,
+        "radius": 0.025,
+        "length": 0.13,
     },
 }
 EXPECTED_COLLISIONLESS_LINKS = {
@@ -427,6 +449,24 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert motion_lib_cfg["robot_type"] == "bumi3"
     assert motion_lib_cfg["asset"]["assetFileName"] == "bumi3.xml"
     assert motion_lib_cfg["wrist_mujoco_dof_indices"] == []
+    excluded_motion_keys = list(motion_lib_cfg["exclude_motion_keys"])
+    assert len(excluded_motion_keys) == 55
+    assert len(set(excluded_motion_keys)) == 55
+    assert all(not key.endswith(".pkl") for key in excluded_motion_keys)
+    assert not any(key.startswith("mine__") for key in excluded_motion_keys)
+    excluded_source_counts = {
+        prefix: sum(key.startswith(f"{prefix}__") for key in excluded_motion_keys)
+        for prefix in ("aistpp", "aioz_gdance", "compas3d")
+    }
+    assert excluded_source_counts == {"aistpp": 51, "aioz_gdance": 3, "compas3d": 1}
+    exclusion_fingerprint = hashlib.sha256(
+        "\n".join(sorted(excluded_motion_keys)).encode("utf-8")
+    ).hexdigest()
+    assert exclusion_fingerprint == (
+        "808786f5202af4c8cef08c0aee8ff025468b99d3e3a5ade83f273e2d4aacfd88"
+    )
+    # SMPL pose_aa 保存源 Y-up 姿态，训练端只转换一次；smpl_joints 已离线为 Z-up。
+    assert motion_lib_cfg["smpl_y_up"] is True
     assert motion_cfg["randomize_wrist_poses"] is False
     assert motion_lib_cfg["motion_file"] is None
     assert motion_lib_cfg["smpl_motion_file"] is None
@@ -451,9 +491,13 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "waist_yaw_link",
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
+        "l_ankle_roll_link",
+        "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body_offset"] == [
         [0.0010007, 0.0, 0.17204],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
     ]
@@ -552,7 +596,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     _validate_reward_compatibility(bumi_manager, release_manager)
     _validate_event_compatibility(bumi_manager, release_manager)
     terminations = bumi_manager["terminations"]
-    assert terminations["foot_pos_xyz"]["params"]["threshold"] == 0.15
+    assert terminations["foot_pos_xyz"]["params"]["threshold"] == 0.20
     assert terminations["foot_pos_xyz"]["params"]["body_names"] == [
         "l_ankle_roll_link",
         "r_ankle_roll_link",
@@ -563,8 +607,6 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert terminations["anchor_pos"]["params"]["root_height_threshold"] == 0.5
     assert terminations["ee_body_pos"]["params"]["threshold"] == 0.12
     assert terminations["ee_body_pos"]["params"]["body_names"] == [
-        "l_ankle_roll_link",
-        "r_ankle_roll_link",
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
     ]
@@ -578,6 +620,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "decimation": decimation,
         "control_frequency": control_frequency,
         "target_fps": motion_lib_cfg["target_fps"],
+        "excluded_motion_count": len(excluded_motion_keys),
         "action_dim": action_dim,
         "token_total_dim": token_total_dim,
         "actor_proprioception_dim": actor_proprioception_dim,
@@ -882,7 +925,8 @@ def _run_environment_smoke(args, simulation_app) -> None:  # noqa: ARG001
 
     overrides = [
         f"num_envs={args.num_envs}",
-        "manager_env.config.terrain_type=plane",
+        # 使用正式 BUMI3 配置的本地 trimesh，避免 plane 依赖可选的 Nucleus USD。
+        "manager_env.config.terrain_type=trimesh",
         f"manager_env.commands.motion.motion_lib_cfg.motion_file={args.motion_file}",
         f"manager_env.commands.motion.motion_lib_cfg.smpl_motion_file={args.smpl_motion_file}",
     ]

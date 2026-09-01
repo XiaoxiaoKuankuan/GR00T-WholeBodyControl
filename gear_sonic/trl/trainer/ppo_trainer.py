@@ -9,6 +9,7 @@ from accelerate import utils as accelerate_utils
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 from transformers import utils as transformers_utils
 from transformers.trainer import *  # noqa: F403
 from trl import models
@@ -416,6 +417,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         )
         self._init_config()
         self._setup_storage()
+        self.tensorboard_writer = None
+        if self.accelerator.is_main_process and self.log_dir is not None:
+            tensorboard_dir = os.path.join(str(self.log_dir), "tensorboard")
+            self.tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
+            # 立即落盘，保证环境或首轮 rollout 之后异常退出时仍有可定位的 event 文件。
+            self.tensorboard_writer.flush()
+            self.accelerator.print(f"TensorBoard logs: {tensorboard_dir}")
 
         if checkpoint is not None:
             self.load_checkpoint(checkpoint, resume=resume)
@@ -1922,6 +1930,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 break
 
         if self.control.should_training_stop:
+            self._close_tensorboard_writer()
             return
 
         # HF trainer specifics
@@ -1932,6 +1941,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         if common.wandb_run_exists():
             wandb.finish()
+        self._close_tensorboard_writer()
 
     def sync_running_mean_std(self):
         """Synchronize observation running mean/std normalizers across all GPU processes.
@@ -2039,7 +2049,25 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             output["step"] = self.state.global_step
             self.state.log_history.append(output)
 
+            if self.tensorboard_writer is not None:
+                for key, value in output.items():
+                    if key == "step" or isinstance(value, (str, bytes)) or value is None:
+                        continue
+                    if isinstance(value, (bool, int, float, np.number)):
+                        self.tensorboard_writer.add_scalar(
+                            key, float(value), self.state.global_step
+                        )
+                # 每个训练迭代刷新一次，便于训练未结束时实时查看曲线和拉取 event。
+                self.tensorboard_writer.flush()
+
         self.control = self.callback_handler.on_log(self.args, self.state, self.control, logs)
+
+    def _close_tensorboard_writer(self) -> None:
+        """在主进程训练结束或提前停止时刷新并关闭 TensorBoard writer。"""
+        if self.tensorboard_writer is not None:
+            self.tensorboard_writer.flush()
+            self.tensorboard_writer.close()
+            self.tensorboard_writer = None
 
     def _gradient_clipping(self):
         """Clip gradients and detect NaN/Inf, skipping the update if found.

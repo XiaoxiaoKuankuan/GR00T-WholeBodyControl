@@ -2,6 +2,460 @@
 
 本文档记录 BUMI3 原生 SONIC 支持的实际修改、机器人参数来源、兼容性边界和验证证据。所有结论区分静态检查、Isaac Sim 配置导入、环境 reset/step 与真实训练；未执行的测试不会表述为已通过。
 
+## 2026-08-28：修复五集合根坐标契约、足底验证和脚部训练闭环
+
+### 1. 修改目标、分支与工作区保护
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`，与同名 origin 分支 ahead `0`、behind
+  `0`。本轮没有执行 commit、push、pull、merge、rebase、stash、reset 或分支切换。
+- 修改前工作区已有 sim2sim 代码、配置、测试、文档、`gear_sonic/pyproject.toml`、
+  `agent.md` 和本记录文件等未提交工作；这些内容全部视为用户受保护修改。本轮没有覆盖、
+  回退或暂存它们，`agent.md` 未由本轮修改。
+- 目标是修复已停止训练所使用的 `hq_all_v1` 数据中公开四库根姿态坐标错误，补足会让
+  横躺/穿地动作静默通过的验证，并让“5point”奖励实际包含双脚；不启动服务器训练，
+  不原地覆盖旧数据，不改 SONIC 网络、PPO、控制频率或其他奖励数值。
+
+### 2. 故障证据与坐标契约结论
+
+- 对服务器现有 3,162 条公开动作和 99 条 Mine 动作进行了只读全帧根倾角审计。旧输出中：
+  - AIOZ-GDANCE 1,978 条：中位根倾角 `87.693°`，`>45°` 帧占 `99.789%`；
+  - AIST++ 963 条：中位 `79.847°`，`>45°` 占 `96.339%`；
+  - CoMPAS3D 72 条：中位 `89.742°`，`>45°` 占 `99.885%`；
+  - FineDance 149 条：中位 `88.348°`，`>45°` 占 `99.088%`；
+  - Mine 99 条：中位 `5.503°`，`>45°` 仅 `0.058%`。
+- 每个源文件本身已携带可区分的契约，不能通过倾角猜测来源：公开四库为
+  `genmo.bumi_legacy_motion.v1`，Mine 为 `genmo.bumi_csv_qpos_xyzw.v1`。原转换器读取根
+  `wxyz` 四元数后直接写出，没有处理公开库的 legacy Y-up 根姿态。
+- 已验证的公开库修正是世界系左乘 `Rx(+90°)`：
+  `q_zup = [sqrt(0.5), sqrt(0.5), 0, 0] ⊗ q_legacy`。全量只读统计应用该修正后，五集合
+  中位倾角依次为 AIOZ `8.441°`、AIST `15.477°`、CoMPAS `9.444°`、FineDance
+  `10.187°`，Mine identity 后仍为 `5.503°`；公开库 `>45°` 比例降为 `0.586%`、
+  `8.770%`、`0.646%`、`2.600%`。AIST 中仍有真实大倾角动作，因此验证采用数据集聚合
+  阈值，不粗暴删除任意单帧 `>45°` 的动作。
+- 只修四元数还不够：公开库 Root-Z 是修正前足底 QP 的结果；Mine 虽然姿态正确，但源
+  元数据明确采用 `legacy_body_origin_min_zero`。抽样 Mine 在当前 BUMI3 MJCF 下足底最低
+  到 `-0.051115 m`。因此 Mine 四元数保持 identity，但所有集合的 Root-Z 都必须在当前
+  SONIC BUMI3 MJCF 下重新对地，不能为让旧数据通过而放宽穿地检查。
+
+### 3. 修改文件与具体内容
+
+- `gear_sonic/tools/prepare_bumi3_sonic_dataset.py`：
+  - 将输出 provenance 升级为 `sonic.bumi3_hq_all.v2`，要求每个源文件存在
+    `source_motion_contract_version`；公开库只接受 legacy 契约并做固定 `Rx(+90°)`，Mine
+    只接受 CSV Z-up 契约并做 identity，契约和数据集不匹配时直接失败，不使用启发式猜测；
+  - 同时更新 `root_rot` 和 `pose_aa[:, 0]`，写出最终 root frame、修正四元数、Root-Z
+    policy 和优化诊断，验证二者的四元数 round trip 一致；
+  - 用当前 `bumi3.xml` 的关节名称和 `jnt_qposadr` 执行 MuJoCo FK，使用
+    `mj_geomDistance(ground, foot_geom)` 计算实际几何足底距离，不用 body origin 或虚构
+    包围盒点替代脚底；
+  - 以足底接触软目标、修正的一/二阶平滑项和每帧硬下界重新求 Root-Z；二阶项只作用于
+    新增修正，不抹平源动作本身的起跳/落地加速度；最终每帧足底穿透最多 `0.002 m`；
+  - 全量 `validate` 新增 source/root 契约、四元数范数、根姿态与 axis-angle 一致性、每段
+    17 帧 FK 抽检、完整序列穿地诊断，以及每数据集根倾角中位数 `<=30°`、`>45°` 比例
+    `<=20%`；shape、有限值、FPS、配对、计数和 SHA256 原检查继续保留；
+  - manifest/provenance 记录 root correction、Root-Z policy、倾角阈值和穿地容差；示例输出
+    改为新目录 `hq_all_v2`，避免误覆盖或继续使用已知错误的 `hq_all_v1`。
+- `gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py`：从 4 项扩展到 6 项；Mine fixture
+  显式声明 Z-up 契约并验证 identity/足底，新增公开 legacy `Rx(+90°)` + Root-Z 回归测试，
+  新增“公开数据伪装成 Mine 契约必须失败”测试。
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：
+  - `reward_point_body` 从实际 3 点扩展为腰、双肘、双踝 5 点，双脚 offset 为零；继续调用
+    原 `tracking_local_vr_5point_error`，其 weight `2.0`、std `0.1` 和实现均未修改；
+  - `foot_pos_xyz` 从 BUMI3 覆盖值 `0.15 m` 恢复到 SONIC/G1 基础值 `0.20 m`，让训练早期
+    能先通过五点奖励纠正脚部，再触发三维脚误差终止；
+  - `ee_body_pos=0.12` 的自适应高度检查、`anchor_pos=0.12`、`anchor_ori_full=0.20`、
+    `feet_acc=-2.5e-6`、力矩限制奖励、其他奖励和全部 domain randomization 保持不变。
+- `gear_sonic/tools/validate_bumi3_integration.py`：锁定最终 5 个 reward body 和 `0.20 m`
+  foot threshold；smoke 不再强制使用依赖可选 Nucleus USD 的 `plane`，改用正式 BUMI3
+  配置的本地生成 `trimesh`。静态集成仍同时 compose `sonic_release` 和 `sonic_h2`。
+- `BUMI3_SONIC_修改记录.md`：新增本节，记录故障证据、变更、实际测试、失败项、风险与
+  回滚方法。
+
+### 4. 真实源动作抽样结果
+
+- 从服务器只读拉取 AIST、AIOZ、FineDance、CoMPAS 和 Mine 各一条源动作，在本地临时
+  目录用最终代码转换并对全部帧做 MuJoCo 几何 FK：
+  - AIST：倾角中位数 `78.001° -> 16.677°`，P95 `27.545°`，足底最低 `-0.002 m`；
+  - AIOZ：`86.894° -> 6.864°`，P95 `15.304°`，足底最低 `-0.002 m`；
+  - FineDance：`83.788° -> 9.018°`，P95 `27.169°`，`>45°` 为 `3.245%`，足底最低
+    `-0.002 m`；
+  - CoMPAS：`82.140° -> 12.992°`，P95 `21.124°`，足底最低 `-0.002 m`；
+  - Mine：倾角保持 `5.963°`，P95 `12.765°`，足底从已知最低 `-0.051115 m` 修正到
+    `-0.002 m`，没有对 Mine 应用公开库姿态旋转。
+- 五条动作的额外动态 Root-Z 最大修正分别为 `0.045675`、`0.071957`、`0.104962`、
+  `0.072836`、`0.033079 m`；最大修正加速度分别为 `4.476`、`3.538`、`6.267`、
+  `5.514`、`1.962 m/s²`。这些值被写入每段输出诊断，便于全量构建后审计离群段。
+- 远端源文件没有被修改；本地临时源副本、单段转换产物和临时日志验证后均已逐文件删除，
+  未进入 Git。
+
+### 5. 实际运行的验证与结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q
+  gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py`：`6 passed`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q
+  gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py gear_sonic/tests/test_bumi3_sim2sim.py`：
+  `11 passed`；只有既有 `<unknown>:4 invalid escape sequence` DeprecationWarning。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python
+  gear_sonic/tools/validate_bumi3_integration.py`：通过；实际解析 `21 DoF/22 bodies`，
+  `sim_dt=0.005`、`decimation=4`、control/target `50 Hz`、action `21`、FSQ token `64`、
+  actor proprioception `690`、tokenizer flat `1262`、critic `1245`、dynamic decoder
+  `754 -> 21`，并通过 G1/H2 compose 与 mapping 检查。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `git diff --check`：通过。
+- 本地环境没有安装独立 Ruff，因此没有把行长人工检查描述为 Ruff 已通过；变更 Python
+  文件按仓库 `115` 字符限制检查，无超长行。
+
+### 6. 动态 smoke 失败项与未运行项
+
+- 使用修正后的 FineDance `001` Robot/SMPL 单段数据运行 1-env、10-step smoke。第一次在
+  scene 创建前失败，因为验证器原先强制 `plane`，本机 `ISAAC_NUCLEUS_DIR=None`，请求了
+  `None/Isaac/Environments/Grid/default_environment.usd`；改用本地 `trimesh` 后该问题消失。
+- 第二次到达 BUMI3 URDF 导入时失败：本地 Isaac Lab 的 `UrdfConverter` 调用
+  `ImportConfig.set_merge_fixed_ignore_inertia`，但当前 Isaac Sim URDF importer 没有该 API；
+  这是本机 Isaac Lab/Isaac Sim 版本不配套。环境未完成创建，因而本轮没有把 reset、step
+  或 NaN/Inf smoke 写成通过；该兼容问题需在正式服务器 `liwei_lab` 环境复核/修复。
+- 未在服务器构建完整 `hq_all_v2`、未运行 3,261/3,162 全量 `validate`、未运行 16-env
+  replay、100 iteration smoke training 或八卡训练：本轮代码尚未获得 commit/push 授权，
+  旧 `hq_all_v1` 又是本次确认的错误产物，不能拿它冒充修复后验证。服务器训练保持停止。
+
+### 7. 兼容性、后续边界与回滚
+
+- `sonic_release`、H2、G1/H2 mapping、Robot+SMPL 双编码器、FSQ、PPO、critic、trainer、
+  `sim_dt`、decimation、history/future frame、SMPL 参数均未修改。只改变 BUMI3 活跃配置的
+  五点名称集合和脚部三维终止阈值。
+- 旧 `hq_all_v1/built` 不得继续用于训练或 ONNX 导出；修复代码默认示例将新产物放到
+  `hq_all_v2`，构建器本身也拒绝覆盖已有 `robot_all/smpl_all`。全量构建通过后仍需先检查
+  每集合倾角摘要、Root-Z 离群诊断和 Isaac reset/step，再允许重新训练。
+- 回滚时只需撤销本节涉及的四个代码/配置/测试文件和本记录节；数据修正未写入服务器，
+  没有远端产物需要删除。回滚到旧转换器只代表恢复代码，不代表旧 `hq_all_v1` 数据正确。
+
+## 2026-08-28：服务器构建 hq_all_v2 并从零重启八卡训练
+
+### 1. 授权、保护边界和服务器现状
+
+- 用户明确要求“在服务器上重新开始训练”，因此本轮只向
+  `noetix-volc` 的 `/home/liwei/GR00T-WholeBodyControl` 同步本次 BUMI3 修复相关文件、
+  构建新数据并启动新实验；没有 commit、push、pull、merge、rebase、stash 或 reset。
+- 本地和服务器分支均为 `feature/bumi-native-sonic-full-training`，HEAD 为
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。服务器同步前是干净工作区；本地既有
+  sim2sim、`agent.md`、`pyproject.toml` 等受保护未提交修改没有被同步、回退或覆盖。
+- 服务器原代码备份为
+  `/data/sonic_bumi3/code_snapshots/pre_hq_all_v2_20260828_131927`；旧 `hq_all_v1`、旧
+  `hq_all_scratch_100k-20260827_170205` 训练目录及 16k checkpoint 均保留，但新训练不读取它们。
+- 服务器 Conda 环境是 `/root/miniconda3/envs/liwei_lab`，PyTorch
+  `2.7.0+cu126`、MuJoCo `3.3.2`、Isaac Sim `5.1.0`。启动前确认 8 张 RTX 4090 D
+  均无训练进程、显存约 `2 MiB`。
+
+### 2. 开训前追加修正
+
+- `gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf`：复核发现当前提交仍是
+  较大的旧腿部圆柱，与用户先前明确参数不一致；因此在正式训练前落实最终值：
+  - 左右 `leg_roll_link`：origin `[0, 0, -0.02]`、radius `0.03`、length `0.08`；
+  - 左右 `knee_pitch_link`：保留之前 origin `[0.008475, 0, -0.0894694]`，radius `0.025`、
+    length `0.13`；
+  - `base_link` 保持 length `0.12`，左右 `leg_pitch/yaw` 继续无 collision。
+  URDF 已重新统一为 CRLF，避免因换行符造成全文件假 diff。
+- `gear_sonic/tools/validate_bumi3_integration.py`：参考资产路径不再写死为
+  `/home/weili`；先读 `BUMI3_REFERENCE_ROOT`，再按仓库同级、`/home/weili`、`/home/liwei`和
+  `/home/listao` 候选路径查找，仍使用原 SHA256 锁定权威版本。服务器自有
+  `legged_lab` 的 `bumi.py/MJCF` SHA 与本集成权威版不同，未修改该参考仓库；只把本机
+  权威快照复制到 `/data/sonic_bumi3/reference_assets/bumi3` 供验证使用。
+- `gear_sonic/tools/prepare_bumi3_sonic_dataset.py`：`_git_commit` 使用精确仓库路径的
+  `git -c safe.directory=...` 读取 HEAD，修复 root 用户读取 `/home/liwei` 普通用户仓库时
+  provenance 被记录为 `unknown` 的问题。该修正不改动作数值，只重写 metadata 和 SHA 清单。
+- `BUMI3_SONIC_修改记录.md`：新增本节，记录服务器同步、新数据、smoke、正式训练与
+  尚未证明的质量边界。
+
+### 3. hq_all_v2 构建与独立全量验证
+
+- 构建命令读取 `hq_all_v1/source_{bumi,smpl,mine}`，只向新目录
+  `/data/sonic_bumi3/datasets/hq_all_v2` 写入，使用 32 workers；日志为
+  `/data/sonic_bumi3/logs/prepare_hq_all_v2_20260828_132309.log`。完整转换、内置全量验证和
+  原子发布均通过，随后再独立执行 `validate` 一次，输出
+  `BUMI3_SONIC_DATASET_VALIDATE=PASS`。
+- 最终数据为 3,261 条 robot、3,162 条 SMPL、99 条 Mine-only，数据集约 `3.7G`。
+  provenance 为 `sonic.bumi3_hq_all.v2`，代码 HEAD 为 `b1c3606...`，公开库修正是
+  `[0.70710678, 0.70710678, 0, 0]`，运行目标 50Hz，足底穿透容差 `0.002 m`。
+- 全量修正后根倾角聚合结果：AIST++ `15.477° / 8.770%`、AIOZ-GDANCE
+  `8.441° / 0.586%`、FineDance `10.187° / 2.600%`、CoMPAS3D `9.444° / 0.646%`、
+  Mine `5.503° / 0.058%`；每组分别为中位倾角和 `>45°` 帧占比。
+- 元数据 SHA256：
+  - `meta/SHA256SUMS`：`2aa75a3ab0c95b999978be4fc29d56d261aee2cf3ad5a3cc39b3f6175c4bd427`；
+  - `meta/manifest.jsonl`：`7c388ae40874d06d195afcf336f5dbc5b2a2de5a48a8e1b0d1f80290c83058da`；
+  - `meta/provenance.json`：`bc8debdb3604164acfeaa8a801438008c86784a8dc3593e339da26b03cca66b6`。
+
+### 4. 实际验证命令和结果
+
+- 本机 `env_isaaclab`：`compileall -q gear_sonic`、数据工具 6 项 pytest 和完整
+  `validate_bumi3_integration.py` 均通过；后者实际解析 21 DoF/22 bodies、映射、执行器、
+  Robot+SMPL 网络和 Hydra 兼容配置。
+- 服务器 `liwei_lab`：`compileall -q gear_sonic`、`pytest
+  gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py` 为 `6 passed`；不启动 Isaac 的资产/Hydra
+  静态部分通过，resolved 为 `sim_dt=0.005`、`decimation=4`、50Hz、action 21、FSQ 64、
+  actor proprioception 690、tokenizer 1262、critic 1245、decoder `754 -> 21`。
+- 服务器直接执行验证器的裸 `SimulationApp` 时，会因 pip IsaacLab 的 source 路径和
+  headless Vulkan 上下文报 `isaaclab.sim`/图形插件错误；未把这次失败写成通过。改用项目
+  正式 `train_agent_trl.py` 入口自身的 `AppLauncher` 后，16 env、2 iterations 真实 smoke
+  完成 768 timesteps，两次 PPO 更新均成功，无 Traceback、OOM、NCCL、NaN/Inf。
+- smoke 配置是 `checkpoint:null`、`auto_load_latest:false`，数据路径为 `hq_all_v2`；
+  日志为 `/data/sonic_bumi3/logs/smoke_hq_all_v2_20260828_134953.log`，产物目录为
+  `/data/sonic_bumi3/smoke/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_hq_all_v2_coordfix_smoke-20260828_134957`。smoke 权重没有作为正式训练初始化。
+
+### 5. 八卡正式从零训练
+
+- tmux：`bumi3_sonic_v2`；日志：
+  `/data/sonic_bumi3/logs/train_hq_all_v2_20260828_135112.log`；实验目录：
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_hq_all_v2_coordfix_scratch_100k-20260828_135120`。
+- resolved 配置明确为 8 processes、每 rank `num_envs=4096`、`100000` iterations、
+  `checkpoint:null`、`auto_load_latest:false`、`resume:false`、`sim_dt=0.005`、`decimation=4`，
+  robot/SMPL 都只读 `hq_all_v2/built`。旧 16k checkpoint 和 smoke 权重均未加载。
+- 截至 `iteration 105`，进程仍在运行；每轮 786,432 timesteps，累计
+  `82,575,360` timesteps，最近吞吐 `220,558 steps/s`、iteration `3.57s`，8 卡各占约
+  `19.7–20.2 GiB`。日志无 Traceback、OOM、NCCL timeout/error、NaN/Inf，`last.pt`
+  已保存，大小 `385,843,368` bytes。
+- 当时 mean reward `0.46244`、mean length `9.5775` steps；主要 termination 分解为
+  `ee_body_pos=0.6108`、`anchor_ori_full=0.2627`、`foot_pos_xyz=0.2028`、
+  `anchor_pos=0.0067`。这只证明从零随机策略的训练通道正常；前 100 iterations 的
+  mean length 仍在约 9–10 steps 波动，没有证明中后期策略质量已恢复。
+- 根据当时 ETA `353,339 s`，动态估计剩余约 `98.1 h`（约 4.1 天）；该值会随
+  采样/更新吞吐变化，不是完成承诺。应在 500/1000/5000 iterations 继续检查 mean length、
+  termination 分解和固定动作回放，不能只看训练 reward 就判定物理质量或真机安全。
+- 服务器仍会打印已知的 `VkResult: ERROR_INCOMPATIBLE_DRIVER`/图形插件告警；
+  本次 headless smoke 和 8 卡正式训练均继续执行 PhysX/CUDA。这不等价于 GUI/相机/渲染
+  已验证，以后若需可视化仍必须单独修复 Vulkan ICD/驱动环境。
+
+### 6. 回滚与继续监控
+
+- 停止新训练可向 `tmux` 会话 `bumi3_sonic_v2` 发送 `Ctrl-C`；不要删除新数据或
+  旧实验来“回滚”代码。代码回滚目标是本节的 URDF、验证器路径解析和 provenance
+  safe-directory 三处追加修正，覆盖前服务器文件可从上述 code snapshot 恢复。
+- 本轮交付时既没有自动停止正式训练，也没有 commit/push 当前未提交工作区。
+
+## 2026-08-28：新增 BUMI3 原生 SONIC MuJoCo sim2sim
+
+### 1. 修改目标、分支与起始状态
+
+- 所属分支：`feature/bumi-native-sonic-full-training`。
+- 起始 HEAD：`b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 修改前本分支相对 `origin/feature/bumi-native-sonic-full-training` 为 ahead `0`、behind
+  `0`；没有执行 pull、commit、push、merge、rebase、stash 或分支切换。
+- 修改前已有且受保护的用户工作区内容为 `BUMI3_SONIC_修改记录.md` 和 `agent.md`；本轮
+  只在记录文档新增本节，没有撤销、覆盖或改写原有记录，`agent.md` 未由本轮修改。
+- 目标是参考现有 G1 SONIC sim2sim 的动作参考、历史观测、ONNX 推理和 MuJoCo PD 闭环，
+  增加可独立运行的 BUMI3 版本；不把 BUMI3 强行接入 G1 专用的 29 电机、Unitree DDS、
+  C++ 硬件 order 和 robot model。
+
+### 2. 配置与资产来源
+
+- 权威参考仓库：`/home/weili/legged_lab`，分支 `main`，HEAD
+  `d555c76e5977af66ef55a104b98e1be486349996`。
+- 参考工作区当前有未提交修改，本轮只读、未修改；其中：
+  - `assets/robots/bumi3/bumi.py` SHA256：
+    `74aaeca9da615c50e3749e4f103bbf713b83443d9cb16fab08edfd320227c03e`；
+  - `assets/robots/bumi3/mjcf/bumi3.xml` SHA256：
+    `041c81e8176c7f375302796deca28b141891a3c097d8e341e8d967b735466edf`。
+- 本仓库实际加载的 BUMI3 MJCF SHA256：
+  `02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe`。验证脚本会把
+  本地 MJCF 与当前参考做完整 XML 语义比较，当前唯一允许的差异是仓库布局导致的
+  `compiler.meshdir`：参考为 `../meshes/`，本地为 `../meshes/bumi3/`。
+- PD、effort、velocity、armature、初始姿态和 action scale 来源于当前本仓库
+  `gear_sonic/envs/manager_env/robots/bumi3.py`，该文件此前已按上述参考 `bumi.py`
+  逐字段验证。本轮没有修改 BUMI3 URDF、MJCF、mesh 或训练配置。
+
+### 3. 修改文件与具体目的
+
+- `gear_sonic/config/sim2sim/bumi3_sonic.yaml`：新增集中、可审计的 BUMI3 sim2sim
+  契约，记录 21 关节 MuJoCo/IsaacLab 顺序、初始姿态、PD、effort/velocity、踝关节
+  armature、时间参数和网络维度。动作缩放不写死，运行时始终按
+  `0.25 * effort_limit / stiffness` 计算。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：新增核心实现：
+  - 通过名称查询每个关节的 `jnt_qposadr`、`jnt_dofadr` 和 motor，不使用
+    `qpos[7:]` 这类隐式顺序；
+  - 支持 SONIC PKL、NPZ 和 G1 `MotionDataReader` 风格 CSV clip；PKL 自动采用
+    MuJoCo DoF + `xyzw` root quaternion，CSV 自动采用策略 DoF + `wxyz`，也可由 CLI
+    显式覆盖；只接受 50 FPS，不在部署端静默重采样；
+  - 复刻 SONIC Robot Encoder 的 10 个 future frames、0.1 秒间隔和训练端
+    `command_multi_future_nonflat` 的实际 flatten 布局；
+  - 默认计算 `robot_start_heading * inverse(reference_start_heading)`，把参考动作起始 yaw
+    对齐到机器人，与 G1 sim2sim 的 `ComputeApplyDeltaHeading` 行为一致，并支持 CLI 关闭；
+  - 按训练 `PolicyCfg` 顺序构造 10 帧 `base_ang_vel / joint_pos_rel / joint_vel /
+    last_action / gravity_dir`，proprioception 为 690 维；
+  - 加载 `eval_agent_trl.py` 导出的 `*_g1.onnx` 联合 Robot Encoder + dynamic decoder，
+    严格验证 `1170 -> 21`；这里 `g1` 仅为网络内部兼容键名；
+  - 用 BUMI3 action scale、PD 和 effort clip 在 `0.005` 秒 MuJoCo step、decimation `4`
+    下闭环执行，并逐步检查 observation/action/torque/qpos/qvel/ctrl 有限值。
+- `gear_sonic/scripts/run_bumi3_sim2sim.py`：新增 Tyro CLI，支持 GUI/headless、实时/最快
+  执行、动作选择、顺序覆盖、起始帧、时长、循环和 validate-only。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py`：新增一键验证；检查参考 MJCF、全部 mesh、
+  `nq/nv/nu/body`、关节和 actuator 顺序、mapping round trip、action scale、armature、
+  480/690/1170/21 维度以及 100 控制周期有限值；可选真实 ONNX 和动作输入。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：新增 4 个回归测试，覆盖映射/维度/action scale、
+  SONIC PKL 顺序、G1 风格 CSV 顺序和无界面 MuJoCo 闭环。
+- `docs/source/getting_started/bumi3_sim2sim.md`：新增环境安装、checkpoint 导出、GUI/
+  headless 运行、动作格式、验证命令和能力边界说明。
+- `gear_sonic/pyproject.toml`：在既有 `sim` extra 中加入 `onnxruntime`，使新的推理入口按
+  文档安装后具备完整依赖；不修改 training/teleop/inference extra。
+- `BUMI3_SONIC_修改记录.md`：新增本次来源、实现、测试、风险和回滚记录。
+
+### 4. 最终顺序、映射与 resolved 契约
+
+BUMI3 MuJoCo 顺序：
+
+`[waist_yaw, l_arm_pitch, l_arm_roll, l_arm_yaw, l_elbow_pitch, r_arm_pitch,
+r_arm_roll, r_arm_yaw, r_elbow_pitch, l_leg_pitch, l_leg_roll, l_leg_yaw,
+l_knee_pitch, l_ankle_pitch, l_ankle_roll, r_leg_pitch, r_leg_roll, r_leg_yaw,
+r_knee_pitch, r_ankle_pitch, r_ankle_roll]`，完整名称均带 `_joint`。
+
+策略/IsaacLab 顺序：
+
+`[l_leg_pitch, r_leg_pitch, waist_yaw, l_leg_roll, r_leg_roll, l_arm_pitch,
+r_arm_pitch, l_leg_yaw, r_leg_yaw, l_arm_roll, r_arm_roll, l_knee_pitch,
+r_knee_pitch, l_arm_yaw, r_arm_yaw, l_ankle_pitch, r_ankle_pitch,
+l_elbow_pitch, r_elbow_pitch, l_ankle_roll, r_ankle_roll]`，完整名称均带 `_joint`。
+
+- IsaacLab → MuJoCo：
+  `[2,5,9,13,17,6,10,14,18,0,3,7,11,15,19,1,4,8,12,16,20]`。
+- MuJoCo → IsaacLab：
+  `[9,15,0,10,16,1,5,11,17,2,6,12,18,3,7,13,19,4,8,14,20]`。
+- 实际 MJCF：`nq=28`、`nv=27`、`nu=21`、robot bodies `22`（MuJoCo `nbody=23`
+  还包含 world body）、mesh `22`。
+- `sim_dt=0.005`、`decimation=4`、control frequency `50 Hz`、target FPS `50`、history
+  `10`、future frames `10`、future stride `5`（0.1 秒）。
+- Robot tokenizer `480`、actor proprioception `690`、联合 ONNX input `1170`、FSQ token
+  `64`、action/output `21`。
+
+### 5. 实际运行的验证与结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q
+  gear_sonic/tests/test_bumi3_sim2sim.py`：`5 passed`，其中新增 90 度参考 yaw 对齐回归测试。
+- `.venv_sim/bin/python -m compileall -q gear_sonic`、`.venv_sim/bin/python -m pytest -q
+  gear_sonic/tests/test_bumi3_sim2sim.py` 和 CLI `--help`：通过；证明独立 Python 3.10
+  MuJoCo 环境可编译、可运行全部 5 个测试并正确生成命令帮助。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python
+  gear_sonic/tools/validate_bumi3_sim2sim.py --steps 100`：通过；实际执行 100 个 50 Hz
+  control steps / 400 个 MuJoCo steps，仿真时间 `2.0 s`，全链路无 NaN/Inf。
+- 使用 ONNX helper 临时生成严格 `1170 -> 21` 的零输出 ONNX，并生成带显式
+  `joint_order=mujoco`、`quaternion_convention=wxyz` 的 50 FPS BUMI3 NPZ：
+  - `.venv_sim/bin/python gear_sonic/tools/validate_bumi3_sim2sim.py --policy
+    /tmp/bumi3-sim2sim-ucYE2d/mock_g1.onnx --motion
+    /tmp/bumi3-sim2sim-ucYE2d/motion.npz --steps 100`：通过，验证了真实 ONNX Runtime
+    session、真实文件加载和 100 周期闭环；
+  - `.venv_sim/bin/python gear_sonic/scripts/run_bumi3_sim2sim.py ... --duration 0.1
+    --headless --no-real-time`：通过，实际运行 5 个控制周期，仿真时间 `0.1 s`。
+  - 上述 `/tmp` 文件仅为接口测试产物，不是训练数据或可交付 checkpoint；验证后已逐文件
+    删除并移除空临时目录，未加入 Git，也没有保留生成数据。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python
+  gear_sonic/tools/validate_bumi3_integration.py`：通过；重新确认 `sonic_bumi3` 与现有 G1/H2
+  Hydra compose、执行器、mapping、时间参数和网络维度兼容检查未回归。
+- `git diff --check`：通过。
+- 使用独立临时 index 显式加入全部已跟踪修改和 6 个未跟踪新增文件后运行
+  `git diff --cached --check`：通过；首次完整统计为 `9 files changed, 1962 insertions,
+  2 deletions`。真实 Git index 在审计前后均为空，未替用户暂存任何文件。
+- 为运行独立 sim 环境验证，在未跟踪的 `.venv_sim` 中安装了 `onnxruntime==1.23.2` 和
+  `pytest==9.1.1`；项目依赖声明只新增 `onnxruntime`，pytest 仅为本地测试工具。
+
+### 6. 未通过/未运行项与原因
+
+- 合并运行新增测试和现有 `gear_sonic/tests/test_input_readers.py` 时，现有测试在 collection
+  阶段失败：它从当前 `gear_sonic.utils.teleop.input_readers` 导入
+  `build_body_pose_sample`，但该函数当前不存在。该失败发生在任何 BUMI3 测试执行前，属于
+  现有 Teleop 测试/实现漂移；本轮不修改无关 Teleop 通用代码。单独运行全部 4 个新增测试
+  已通过。
+- 未使用 `model_step_016000.pt` 导出并回放真实 BUMI3 policy：本机 checkpoint 的 resolved
+  config 指向 `/data/sonic_bumi3/datasets/hq_all_v1/built/robot_all` 和 `smpl_all`，这些训练数据
+  本机不存在；本轮不擅自从其他 BUMI3/G1 数据替代，也不生成训练数据。因而本轮 ONNX
+  Runtime 证据是接口级临时 ONNX，不是训练效果验证。
+- 未运行 GUI viewer：本轮自动验证使用 headless，CLI 的 viewer 分支已完成导入与参数路径
+  检查，但没有把无界面 smoke 描述为 GUI 验证。
+- 未做实机测试：该入口明确不包含 DDS/CAN/硬件安全映射，只用于 MuJoCo sim2sim。
+
+### 7. 兼容性、已知风险与回滚
+
+- 未修改 `gear_sonic/scripts/run_sim_loop.py`、`gear_sonic_deploy` 或 G1/H2 配置；现有 G1
+  C++/DDS sim2sim 行为保持不变。BUMI3 使用新入口，避免 21 DoF 被错误塞入 29 DoF 映射。
+- 本地 BUMI3 MJCF 保持当前 `legged_lab` 数值，只调整了既有 meshdir；训练使用的 URDF
+  有用户指定的简化碰撞，而 MuJoCo MJCF 当前仍是 mesh geometry。该差异是 sim2sim 的一个
+  明确物理域差异，对爬行/跪地效果的影响必须用真实动作和真实 checkpoint 继续评估。
+- 100 周期零策略 smoke 中机器人最终跌倒但数值保持有限；这是零策略不产生平衡动作的预期
+  结果，不能当作 policy 稳定性结论。
+- 回滚时删除本轮 5 个新增代码/配置/测试文件及 1 个新增文档，移除 `pyproject.toml` 中
+  `sim` extra 的 `onnxruntime` 一行，并删除本记录节即可；BUMI3/G1/H2 既有资产和训练代码
+  均不需要回滚。本轮未 commit/push，Git 历史和远端没有变化。
+
+### 8. 统一改用 Conda `env_isaaclab`
+
+- 用户明确要求不使用 `.venv_sim`，后续 BUMI3 训练、ONNX 导出和 sim2sim 统一使用
+  `/home/weili/miniconda3/envs/env_isaaclab`。sim2sim 实现本身从未绑定 `.venv_sim`；此前该
+  环境只用于隔离测试。
+- 检查时 `env_isaaclab` 已有 Python `3.11.15`、MuJoCo `3.3.2`、ONNX Runtime
+  `1.27.0`、NumPy `1.26.4`、PyYAML `6.0.2` 和 joblib `1.5.3`，唯一缺少 CLI 依赖
+  Tyro。
+- 第一次直接安装最新版 `tyro==1.0.16` 时，它把 `typing_extensions` 从 Isaac Sim 5.1
+  要求的 `4.12.2` 升级到 `4.16.0`。发现冲突后立即卸载该 Tyro 和其新增的 typeguard，
+  恢复 `typing_extensions==4.12.2`，并安装与其兼容的 `tyro==0.8.14`；没有把环境留在
+  已知冲突状态。
+- `gear_sonic/pyproject.toml` 的 `sim` extra 同步将 Tyro 固定为 `0.8.14`，避免以后按
+  extra 安装时再次升级 Isaac Sim 的 typing-extensions。文档的全部训练、导出、运行和
+  验证命令也统一改为先 `conda activate env_isaaclab`。
+- 在最终 Conda 环境中实际运行：
+  - CLI `--help`：通过；
+  - `python -m compileall -q gear_sonic`：通过；
+  - `python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py`：`5 passed`；
+  - `python gear_sonic/tools/validate_bumi3_sim2sim.py --steps 100`：通过，400 个 MuJoCo
+    steps 无 NaN/Inf；
+  - `python gear_sonic/tools/validate_bumi3_integration.py`：在恢复 Isaac Sim 依赖版本后再次
+    通过，确认 BUMI3/G1/H2 Hydra、执行器、mapping 和网络维度检查未受 Tyro 安装影响；
+  - 使用临时 `1170 -> 21` ONNX 和 50 FPS NPZ 运行正式 CLI 5 个控制周期：通过，仿真
+    时间 `0.1 s`；临时 ONNX/NPZ 随后已删除。
+- `pip check` 仍报告两个本轮之前就存在的环境问题：IsaacSim kernel 声明
+  `numpy==1.26.0` 而环境为 `1.26.4`，FastAPI 要求 `starlette<0.46.0` 而环境为
+  `0.49.1`。本轮没有改动 NumPy、FastAPI 或 Starlette；当前 Isaac Lab 集成验证和
+  BUMI3 sim2sim 均能运行，但这两个历史依赖漂移不能被描述为整个 Conda 环境完全无冲突。
+
+## 2026-08-27：建立 Git 分支模型与 Agent 安全操作规范
+
+### 修改目标与所属分支
+
+- 所属分支：`feature/bumi-native-sonic-full-training`。
+- 起始 HEAD：`b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 用户要求为 SONIC 和 GENMO 统一建立 `feature/*`、`release/*`、`main` 的职责边界，
+  并特别确认用户已有未提交修改均视为正确修改，Agent 不得擅自丢弃。
+
+### 修改文件与具体内容
+
+- `agent.md`：保留原有 BUMI3 来源、兼容性和强制记录规则，新增以下仓库级约束：
+  - `main` 保持可运行、已验证、可交付；功能开发进入 `feature/*`，发布准备进入
+    `release/*`，线上紧急修复进入 `hotfix/*`。
+  - 规定分支来源、命名、允许修改范围、release 修复回流和语义版本 Tag 生命周期。
+  - 将用户已有未提交修改定义为正确且受保护的内容，禁止 reset、clean、stash、覆盖、
+    回退或混入无关提交。
+  - commit、push、merge、rebase、Tag 和删分支等共享历史操作必须获得用户明确授权。
+  - 强制修改前审计分支、HEAD、工作区和远端差异；逐文件暂存并区分代码、配置、资产、
+    模型及生成数据。
+  - 细化修改记录字段、验证等级、合并审计、发布说明和 GitHub 分支保护要求。
+- `BUMI3_SONIC_修改记录.md`：新增本节，记录规则修改的来源、范围、理由和验证边界。
+
+### 修改理由与兼容性边界
+
+- 本仓库后续主要由 Agent 执行修改，仅定义分支用途不能防止覆盖用户工作区、误提交数据、
+  未经批准改写历史或夸大验证结果，因此将工作区保护、权限边界、提交审计和发布证据纳入
+  同一套规则。
+- 本次只修改 Agent 工作规范和记录文档，不修改 SONIC/BUMI3/G1/H2 的代码、配置、机器人
+  资产、训练数据、Checkpoint、网络结构或运行行为。
+- 回滚时只需撤销本节和 `agent.md` 对应规则文本；不会影响任何模型或训练产物。
+
+### 实际验证结果
+
+- 修改前确认当前分支为 `feature/bumi-native-sonic-full-training`、起始工作区干净且已跟踪
+  同名 origin 分支。
+- `git diff --check`：通过。
+- 未运行 Python、Isaac Sim、动作 replay 或训练测试：本次没有修改任何代码、配置或资产，
+  这些运行级验证与文档规则修改无直接关系，因此不将文档检查描述为功能验证。
+
 ## 2026-08-27：接入五集合 Robot+SMPL 高质量训练数据
 
 ### 修改文件与内容
@@ -404,3 +858,533 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
 - 使用 `UrdfConverterCfg(replace_cylinders_with_capsules=True)` 强制重新生成 USD：通过；随后通过 `Usd.TraverseInstanceProxies()` 读取实际碰撞 prim，五个目标 link 的 Capsule origin/radius/height 与本节表格逐项一致，轴均为 Z。
 - 生成 USD 共 14 个 collider；左右 `leg_pitch_link`、左右 `leg_yaw_link` 仍为零 collider，输出 `ISAAC_TUNED_COLLISION_SMOKE=PASS`。
 - 未运行带爬行/跪地动作数据的环境 replay，原因仍是 BUMI3 robot-motion/SMPL 路径保持 `null`，本轮未擅自选择数据。
+
+## 2026-08-31：修正双肘终止与 BUMI3 sim2sim 参考状态、锚点及碰撞语义
+
+### 1. 起点、授权范围和保护措施
+
+- 分支：`feature/bumi-native-sonic-full-training`。
+- 修改前 HEAD：`b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 用户明确要求：`ee_body_pos` 只检查双肘并保留 `0.12 m`；降低 sim2sim 固定悬空回退高度；修复 Robot Encoder 把 root quaternion 当成 `waist_yaw_link` 锚点姿态的问题；解释终止条件和 Robot/SMPL 异常配对。
+- 工作树在本轮开始前已有 BUMI3 资产、数据准备、sim2sim 和记录文件的未提交改动；本轮没有 reset、clean、stash、checkout、rebase，也没有提交或推送。
+
+### 2. 训练 termination 修改
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：从 `ee_body_pos.params.body_names` 删除左右 `ankle_roll_link`，只保留 `l_elbow_pitch_link`、`r_elbow_pitch_link`；threshold 继续为 `0.12`，adaptive、down threshold、root height threshold 和 termination 实现均未修改。
+- 左右脚仍由独立的 `foot_pos_xyz` 检查，不再同时进入 `ee_body_pos`。该改动减少重复截断，但不被描述为训练失败的唯一根因。
+- `gear_sonic/tools/validate_bumi3_integration.py`：同步锁定 resolved 双肘列表，防止 Hydra 配置回退到双脚+双肘。
+
+### 3. sim2sim 参考状态和初始化高度
+
+- `ReferenceMotion` 新增可选 `root_position_world`。SONIC PKL/NPZ 会读取 `root_trans_offset/root_pos/root_position/root_translation`，含 `qpos` 的 NPZ 可回退到 `qpos[:, :3]`；CSV 若提供 `body_pos.csv` 则读取第一个 body 的位置。
+- reset 不再固定写入 `[0,0,0.65] + 默认关节 + 零速度`，而是使用所选参考帧的 root position、root quaternion、21 关节位置和关节速度；浮动根速度由相邻 MuJoCo qpos 用 `mj_differentiatePos` 求得。
+- `gear_sonic/config/sim2sim/bumi3_sonic.yaml` 的旧动作缺 root translation 时的回退位置改为 `[0,0,0.4744]`。真实 FineDance 首帧实际使用动作自带的约 `0.529/0.538 m`，不是强行改成回退高度。
+- reset 的 10 帧 proprioception history 改为按 Isaac Lab `CircularBuffer` 首次 append 行为用当前状态复制填满，不再以 9 帧零状态开始。
+
+### 4. Robot Encoder 锚点语义修复
+
+- 训练端 `motion_anchor_ori_b_mf_nonflat` 实际读取 `TrackingCommand.root_rot_dif_l_multi_future`，其参考 quaternion 来自 MotionLib 中 `motion_anchor_body_index` 指向的 `waist_yaw_link`，不是浮动根 `base_link`。
+- 旧 sim2sim 在 tokenizer 和起始 heading 对齐中直接使用 `motion.root_quat_wxyz`，因此腰部 yaw 非零时输入语义错误。
+- 新实现逐帧把参考 root 和 21 关节写入一个独立 `MjData`，调用 BUMI3 MJCF FK，缓存 `waist_yaw_link` 的世界 quaternion；未来 10 帧 6D orientation 和起始 heading 对齐均使用该缓存。
+- checkpoint/ONNX 只保存网络权重和张量接口，不保存动作文件、anchor body 名称或 FK 结果。本地 `model_step_070000.pt` 为 368 MiB，含 policy/value/optimizer/trainer state；`env_state_dict` 只有 motion-lib state。`model_step_070000_g1.onnx` 为 53 MiB、输入 1170、输出 21，因此部署端必须自行正确重建观测。
+
+### 5. sim2sim 碰撞语义修复
+
+- 真实 FineDance 首帧在旧 MJCF mesh collision 下 reset 即出现左右 `knee_pitch_link` 与 `ankle_roll_link` 自碰撞，穿透分别约 `24.62/24.87 mm`。首帧 observation 最大绝对值为 `1.08`，一次控制后碰撞冲击把该值推到约 `31`，证明问题不只是初始高度。
+- 运行器现在仅在内存 `MjModel` 中关闭训练 URDF 未启用的 arm pitch、arm yaw、leg pitch、leg yaw mesh collision；把 base、左右 leg roll、左右 knee 的 mesh geom 改为训练 importer 实际使用的 capsule。
+- capsule 的位置、半径和半长严格对应当前 URDF cylinder 与 `replace_cylinders_with_capsules=True`：base `[-0.0013853,0,0.065525], r=0.052, half=0.06`；leg roll `[0,0,-0.02], r=0.03, half=0.04`；knee `[0.008475,0,-0.0894694], r=0.025, half=0.065`。
+- 原始 `bumi3.xml` 未改写；GUI 中上述五个单 geom 会显示成简化 capsule。该取舍避免改变 MotionLib 使用的参考 MJCF，同时优先保证 sim2sim 碰撞动力学接近训练 URDF。
+
+### 6. Robot/SMPL 精确配对审计结论
+
+- 在服务器 `/data/sonic_bumi3/datasets/hq_all_v2/built` 对 3162 个公开 Robot/SMPL 同名配对重新审计；99 个 Mine robot-only 动作没有 SMPL，不计入“异常配对”。
+- 审计严格使用 MotionLib 的 `arange(0,duration,1/50)` 独占末帧时间网格、机器人 root+waist quaternion Slerp、BUMI3 `waist_yaw_link` FK 等价姿态，以及训练端 SMPL Y-up→Z-up 和 base rotation removal。3162 对全部帧数一致，没有时间轴长度错配。
+- 以整段 `median(angle(inv(robot_waist) * smpl_root)) > 45°` 为初筛后得到 55 条，而不是旧的 root-only 近似统计 57 条。55 条中 51 条来自 AIST++、3 条 AIOZ-GDance、1 条 COMPAS；AIST++ 中 33 条为 `gBR` breakdance。
+- 55 条中 41 条至少一侧中位倾角超过 45°：23 条双方均超过、13 条只有机器人 waist 超过、5 条只有 SMPL root 超过。这些主要是倒地、翻滚、breaking 等动作在人类 pelvis 与重定向机器人 base/waist 上的姿态差，不是整库仍存在统一 90° 坐标轴错误。
+- 剩余 14 条双方中位倾角都不超过 45°，但多数已接近 30–45°；只有 `aistpp__gWA_sBM_cAll_d26_mWA4_ch08.pkl` 双方都低于 30°（约 23.4°/23.9°）而相对角中位数仍约 48.6°，应列为优先人工同步回放对象。该审计不自动删除或改写训练数据。
+
+### 7. 修改文件及目的
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：`ee_body_pos` 仅双肘。
+- `gear_sonic/config/sim2sim/bumi3_sonic.yaml`：旧动作固定回退根高降至 `0.4744 m`。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：root translation 加载、参考状态 reset、正确 history 初始化、waist FK anchor、训练 URDF collision runtime override。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：新增 root translation、参考 reset、waist FK、history 和 collision 回归测试。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py`：验证回退根高、FK anchor、collision override，并打印实际 reference reset 来源。
+- `gear_sonic/tools/validate_bumi3_integration.py`：验证 resolved `ee_body_pos` 仅双肘。
+- `docs/source/getting_started/bumi3_sim2sim.md`：说明 checkpoint/ONNX 边界、参考初始化、anchor FK、history 和碰撞契约。
+- `BUMI3_SONIC_修改记录.md`：记录本轮原因、实现、实测数据、测试边界和回滚信息。
+
+### 8. 实际运行的验证及结果
+
+- `git diff --check`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py`：`15 passed`；另有 1 个既有 invalid escape sequence DeprecationWarning。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python gear_sonic/tools/validate_bumi3_integration.py`：通过；resolved `sim_dt=0.005`、`decimation=4`、control 50 Hz、action 21、actor proprioception 690、dynamic decoder `754 -> 21`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- 真实 `model_step_070000_g1.onnx` + `finedance__001_50fps.pkl` 执行 100 个控制周期：接口、1170/21 维度、FK anchor、碰撞覆盖和 NaN/Inf 检查通过；2 秒后 root height 仍降到 `0.066842 m`。
+- 最后一项明确表明当前 70k checkpoint 仍未学会稳定跟踪；本轮已修复部署语义，但不能把有限值 smoke 误报为动作质量通过。训练曲线此前平均 episode 约 `0.79 s`、`ee_body_pos` 聚合触发约 70%，所以该 checkpoint 摔倒与训练质量一致，需要在新 termination 配置下做受控重训/对照实验后再导出新 ONNX。
+
+### 9. 未执行项、风险和回滚
+
+- 未在本轮停止、重启或续训服务器任务；代码配置改变不会追溯修改已有 checkpoint。
+- 未自动筛除 55 条高差异配对，因为其中大量是用户需要的爬行、倒地和 breakdance；应先对 14 条非明显倒地项，尤其唯一双方低于 30° 的样本做 Robot/SMPL 同步可视化，再决定 quarantine。
+- 未证明删除脚部重复 termination 单独即可解决训练。正确验证方法是同一初始权重/seed 做旧配置与新配置短程 A/B，记录左右脚、左右肘的独立误差和首次触发 body；当前聚合 `ee_body_pos` TensorBoard tag 无法反推是哪一个 body。
+- 回滚范围是本节列出的配置、sim2sim、测试、验证和文档局部 diff；工作树无本轮 commit，不能使用破坏其他未提交修改的全局 reset。
+
+## 2026-08-31：隔离 55 条异常配对、增加坐标启动门禁与 TensorBoard
+
+### 1. 起点与授权边界
+
+- 分支：`feature/bumi-native-sonic-full-training`。
+- 修改前 HEAD：`b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 用户明确要求：55 条 Robot/SMPL 异常配对不参与训练；确认原始/训练坐标契约；在服务器从头启动 8 卡训练；必须产生 TensorBoard event 文件。
+- 本轮开始前工作树已有 BUMI3 数据、碰撞、sim2sim 和记录文件的未提交改动。本轮未执行 reset、clean、stash、checkout、rebase、commit 或 push，也未覆盖无关改动。
+
+### 2. 55 条异常动作的精确隔离
+
+- `sonic_bumi3.yaml` 在 `motion_lib_cfg.exclude_motion_keys` 中逐条保存 55 个完整 key：AIST++ 51 条、AIOZ-GDance 3 条、CoMPAS3D 1 条；不含 99 条 Mine-only 动作。
+- `motion_lib_base.py` 新增 `exclude_motion_data_by_exact_keys`，在正则过滤、前缀删除和随机限量之前执行完整 key 匹配。它不复用 `remove_motion_keys` 的前缀语义，也不原地修改完整动作索引。
+- MotionLib 会记录 requested、matched、missing、remaining。完整训练集的预期日志为 `requested=55, matched=55, missing=0, remaining=3206`；对单动作导出/回放则允许清单中其他 key 缺失并明确 warning，避免破坏既有评估入口。
+- `validate_bumi3_integration.py` 锁定数量、唯一性、来源计数和排序后 SHA256 指纹 `808786f5202af4c8cef08c0aee8ff025468b99d3e3a5ade83f273e2d4aacfd88`。
+- `test_prepare_bumi3_sonic_dataset.py` 新增精确匹配、无前缀误删、原字典不被修改、重复 key 拒绝测试。
+
+### 3. 原始数据和训练输入的坐标契约
+
+- 四个公开 Robot 库源契约为 `genmo.bumi_legacy_motion.v1`：世界上轴是 `+Y`。数据准备阶段对根四元数世界系左乘 `Rx(+90°)`，统一写成 SONIC/MuJoCo `+Z` 上轴；21 个关节按 BUMI3 MuJoCo actuator 名称重排；根高按当前 BUMI3 MJCF 双脚 FK 优化。Robot 文件仍以 30 Hz 保存，MotionLib 按独占末帧的时间网格插值为 50 Hz。
+- Mine Robot 源契约为 `genmo.bumi_csv_qpos_xyzw.v1`：已经是 `+Z` 上轴，因此根姿态使用 identity 修正；关节顺序和根高仍按同一 BUMI3 契约校验。Mine 只有 Robot 动作，没有 SMPL 配对。
+- 公开 SMPL 的 `pose_aa` 保留源 `+Y` 上轴并以 50 Hz 保存。训练命令项在构造 SMPL 根姿态 token 时左乘 `Rx(+90°)` 一次，再移除 `[0.5,0.5,0.5,0.5]` SMPL base rotation；`smpl_y_up=true` 因此是正确且必要的，不能改成 false。
+- 同一个 SMPL 文件中的 `smpl_joints` 已在数据准备阶段使用转换后的 Z-up 根姿态做 FK，训练观测不再对 joint positions 做第二次 Y→Z 转换。也就是说，源文件保留可追溯契约，但进入两个 Encoder 的实际姿态/关节张量都已经在 Z-up 语义下。
+
+### 4. 训练前坐标门禁
+
+- 新增 `gear_sonic/tools/validate_bumi3_training_coordinates.py`。该脚本只读数据，不生成、改写、筛选或重采样任何文件。
+- Robot 侧复现 MotionLib 30→50 Hz 时间网格，并对 root 与 `waist_yaw_link` 局部姿态分别 Slerp 后组合腰部世界姿态；SMPL 侧复现训练时 Y-up→Z-up 和 base rotation removal。
+- 门禁要求 3261 Robot、3162 同名配对、99 Mine-only、55 个隔离 key 全部存在；重新计算的 `median(angle(inv(robot_waist) * processed_smpl_root)) > 45°` 集合必须与配置中的 55 条完全一致。通过后预期训练候选为 3206 Robot，其中 3107 条有 SMPL。
+
+### 5. TensorBoard 原生写入
+
+- `ppo_trainer.py` 在 rank 0 为每个实验创建 `<experiment_dir>/tensorboard/` 的 `SummaryWriter`，初始化时立即 flush，保证即使环境或首轮 rollout 失败也能定位 event 文件。
+- 每次 PPO 日志迭代把已有的数值指标按 `global_step` 写入并 flush；字符串路径等非标量不会写入。正常结束和提前停止都会关闭 writer；其他 GPU 不重复写 event。
+- 该改动不改变 PPO、网络、奖励、控制频率、batch 或优化器，只新增旁路可视化记录。
+
+### 6. 已完成的本地验证
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py`：`8 passed`；有 1 个既有 invalid escape sequence DeprecationWarning。
+- `git diff --check`：通过。
+
+### 7. 待本节后续补录
+
+- 尚需把本轮文件同步到 `noetix-volc:/home/liwei/GR00T-WholeBodyControl`，运行全量坐标门禁和 BUMI3 集成验证，再启动新的 8 卡 scratch 训练。
+- 只有确认 MotionLib 日志命中 55/55、首轮真实 PPO 指标、8 张 4090 均有计算负载、训练日志无 traceback/NaN/Inf、且新实验目录内存在可解析 TensorBoard event 后，才把“训练已重启”记录为完成。
+
+### 8. 服务器全量门禁和 8 卡 scratch 启动结果
+
+- 同步目标：`noetix-volc:/home/liwei/GR00T-WholeBodyControl`。仅同步本轮明确涉及的配置、MotionLib、trainer、测试、验证脚本和记录文件；没有目录级删除、Git reset/clean 或参考仓库修改。
+- 首次多源 `rsync` 错误地把 6 个代码文件平铺到远端仓库根目录。核对文件名/大小后仅删除这 6 个由本轮刚创建的根目录副本，再以 `rsync -R` 同步到正确包路径；实际包内文件在纠正前未被该错误传输覆盖，其他根目录文件未动。
+- 服务器 `/root/miniconda3/envs/liwei_lab/bin/python -m compileall -q gear_sonic`：通过。
+- 服务器数据契约单测：`8 passed`，同一既有 invalid escape sequence warning。
+- 服务器全量坐标门禁：通过。实际输出为 `robot_total=3261 smpl_paired=3162 mine_only=99 excluded=55 training_robot=3206 training_smpl=3107`；保留配对相对角中位数 `13.636874°`、最大 `44.710664°`，隔离集合最小 `45.181285°`。
+- 远端 `validate_bumi3_integration.py` 未通过外部参考 provenance 检查：`/home/liwei/legged_lab` 的 `bumi.py` 和 MJCF 已不同于本地锁定参考版本。只读核对确认本仓库实际训练 URDF/MJCF 哈希与本地通过集成验证的文件完全一致；训练不动态导入远端参考仓库。没有为了通过检查而修改 `legged_lab` 或放宽哈希门禁。
+
+实际启动命令使用 Accelerate 8 个进程、每个 rank 4096 个环境、100000 PPO iterations：
+
+```bash
+/root/miniconda3/envs/liwei_lab/bin/accelerate launch --num_processes=8 \
+  gear_sonic/train_agent_trl.py \
+  +exp=manager/universal_token/all_modes/sonic_bumi3 \
+  +resume=false checkpoint=null auto_load_latest=false \
+  use_wandb=false headless=True num_envs=4096 \
+  base_dir=/data/sonic_bumi3/runs \
+  exp_var=hq_all_v2_coordfix_q55_scratch_100k \
+  algo.config.num_learning_iterations=100000 \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file=/data/sonic_bumi3/datasets/hq_all_v2/built/robot_all \
+  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=/data/sonic_bumi3/datasets/hq_all_v2/built/smpl_all
+```
+
+- tmux：`sonic_bumi3_q55_8gpu`。
+- 启动日志：`/data/sonic_bumi3/launch_logs/sonic_bumi3_q55_8gpu_20260831_135526.log`。
+- 实验目录：`/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_hq_all_v2_coordfix_q55_scratch_100k-20260831_135533`。
+- resolved config 已确认 `checkpoint: null`、`resume: false`、`auto_load_latest: false`，日志没有 checkpoint 加载记录，属于从头训练。
+- 8 个 rank 均打印 `requested=55, matched=55, missing=0, remaining=3206`，证明隔离实际生效而非只写进 YAML。
+- 观察到第 12 iteration：约 `226842–231005 steps/s`；第 12 轮 mean reward `0.50039`、mean length `11.18375`。这是随机初始化最早期指标，只能证明训练循环工作，不能据此判断收敛质量。
+- 检查时 8 张 RTX 4090 显存约 `19.7–20.7 GiB`，GPU 利用率约 `74%–89%`；8 个 worker 均存活。
+- 训练日志未发现 traceback、AssertionError、RuntimeError、OOM、NCCL error 或 NaN/Inf。Isaac headless 初始化存在既有 Vulkan/GPU Foundation renderer 报错，但各 rank 均继续完成场景、MotionLib、DDP 和 PPO 训练初始化。
+- TensorBoard event：`<实验目录>/tensorboard/events.out.tfevents.1788155827.noetix.3046464.0`。EventAccumulator 成功解析 `122` 个 scalar tags；检查时已有 13 个 step，`objective/rewards=0.5022393`、`objective/length=11.48`、`fps=229372`，证明不是空文件或仅创建目录。
+
+## 2026-08-31：BUMI3 SONIC sim2sim 参考影子与训练 termination 复查
+
+### 1. 起点、参考范围和保护措施
+
+- 分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：`b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 本轮开始前 sim2sim 核心、入口、测试、验证和文档均为工作区内已有的未跟踪文件；本轮在其现有实现上增量加入参考影子，没有 reset、clean、stash、覆盖其他用户文件，也没有 commit/push。
+- 用户指定参考 `/home/weili/legged_lab/scripts/sim2sim_mimic_vision_4340.py`。本轮只复用“独立参考 FK data + 半透明 decorative geom”的可视化思路；没有复制 BUMI3_4340 的执行器、关节限位、初始高度、映射、奖励或其他机器人参数。实际影子继续使用本仓库 BUMI3 SONIC contract、21 DoF 名称映射和当前 `bumi3.xml`。
+
+### 2. 服务器 termination 实际复查
+
+- 训练会话仍为 `sonic_bumi3_q55_8gpu`，检查时 8 个 worker 存活，日志无 traceback/OOM/NCCL/NaN。
+- TensorBoard rank-0 曲线：`objective/length` 从 step 1 的 `11.865` 增至 step 1000 的 `34.19`，但 step 4503 又降至 `24.10`，即平均 episode 约 `0.482 s`；`objective/rewards` 同期为 `0.52251 -> 2.14561 -> 1.50061`，没有保持单调改善。
+- step 4503 termination：`anchor_pos=0.26003`、`anchor_ori_full=0.06537`、`ee_body_pos=0.53400`、`foot_pos_xyz=0.44933`。当前 `ee_body_pos` 已只包含双肘，因此高触发率不能再归因于双脚重复计数；双肘和双脚位置仍是主要失败项，anchor position 也在恶化，而 anchor orientation 已相对较低。
+- termination term 可以同一 episode 同时触发，所以上述比例不可相加当成概率分布；但短 episode、双肘/双脚高触发以及 length/reward 回落共同证明当前训练仍未稳定学会跟踪。
+
+### 3. 参考影子实现
+
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：新增独立 `reference_visual_data`。每帧用动作文件的 root position、root quaternion 和 21 个关节构造完整 MuJoCo qpos，只施加与 Robot Encoder 一致的可选起始 heading 对齐，再执行 `mj_forward`。
+- 参考 root Z 不跟随真实机器人，也不在显示层做贴地或高度覆盖。如果训练参考横躺/穿地，红色影子会原样显示，避免参考脚本中 `align_reference_height_to_robot=True` 掩盖问题。
+- 参考 geom 写入 passive viewer 的 `user_scn`，统一红色 tint、默认 alpha `0.32`，category 为 `mjCAT_DECOR`；不进入 contact、collision、actuator 或 MuJoCo 积分。
+- 新增 `reference_pose_diagnostics`：打印参考帧 root height、base/`waist_yaw_link` 上轴对世界 +Z 的倾角和最低 body origin 高度。站立通常接近 0°，侧躺通常接近 90°。
+- `gear_sonic/scripts/run_bumi3_sim2sim.py`：默认开启影子，新增 `--reference-alpha` 和 `--no-show-reference`，启动前打印 `BUMI3_REFERENCE_POSE`。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：新增直立/90°侧躺诊断、参考高度不跟随实际机器人、marker 数量/有限值/透明度/decorative category 回归测试。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py`：验证独立参考 FK、22 个影子 geom、alpha 和 physics=false 契约。
+- `docs/source/getting_started/bumi3_sim2sim.md`：记录不透明实际机器人/红色参考影子的视觉含义、判读方式和 CLI。
+
+### 4. 真实参考和旧 checkpoint 验证
+
+- `finedance__001_50fps.pkl` 首帧：root height `0.538330 m`，base/waist tilt 均为 `0.755295°`，明确为直立参考，不是横躺。
+- `finedance__001` 全 4879 帧：base/waist tilt 中位数 `9.019°`、P95 `27.0182°`、最大 `93.8133°`、超过 45° 帧占 `3.2794%`。少量高倾角帧属于动作内容，整段不是统一横躺。
+- `finedance__002` 全 5179 帧：中位数 `11.4468°`、P95 `54.1611°`、最大 `81.7806°`、超过 45° 帧占 `8.0711%`；该动作包含更多大倾角片段，但中位参考仍为直立。
+- 使用旧 `model_step_070000_g1.onnx` + `finedance__001_50fps.pkl` 做 100 控制步真实 smoke：参考首帧 tilt `0.7553°`，实际机器人 2 秒后 root height `0.066842 m`。至少对该轨迹，摔倒不能归因于参考首帧横躺，说明需要继续检查 checkpoint 学习质量、SONIC 双编码器/解码器训练语义、奖励/termination 和部署动力学，而不是继续做统一 90° 根坐标修正。
+
+### 5. 实际测试及结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py`：`11 passed`。
+- `git diff --check`：通过。
+- `validate_bumi3_sim2sim.py --skip-smoke`：通过；影子 `22` geoms、alpha `0.32`、physics false，静态参考 base/waist tilt `0°`。
+- 真实 ONNX+参考 100-step validation：通过接口、顺序、影子 FK 和有限值检查；不把 2 秒后摔倒误报为动作质量通过。
+- GUI passive viewer 实际启动 2 个控制步：通过，`viewer.user_scn` 影子写入和同步没有 API/runtime error；该短运行只验证渲染链路，不代表人工完成整段视觉验收。
+- Ruff 未运行：当前 `env_isaaclab` 没有安装 `ruff`（`No module named ruff`），未为本轮擅自改变环境依赖。
+
+### 6. 风险和回滚
+
+- 当前只对本地已有两条 FineDance 50 Hz 轨迹做完整倾角统计；全库训练坐标门禁此前已通过 3162 对配对检查，但“动作语义是否合理”仍需选取代表性站立、爬行、跪地和翻滚片段人工观察红色影子。
+- 影子只影响 GUI user scene；关闭方式为 CLI `--no-show-reference`，代码回滚范围仅是本节列出的 sim2sim、测试、验证和文档增量。训练进程未重启，影子修改不会改变正在运行的 Isaac Lab 训练。
+
+## 2026-08-31：参考影子“散架”渲染修正
+
+### 1. 问题现象与确认原因
+
+- 用户实际截图显示红色参考机器人各 link 视觉上分离，并出现大量 capsule 形状；这不是指定参考脚本的显示效果。
+- 第一个实现只建了独立 `MjData`，但仍复用已执行 `_apply_training_collision_contract()` 的动力学 `self.model`。该模型已把 base、左右 leg-roll 和左右 knee 的唯一 mesh geom 替换成训练 URDF capsule，因而不能用来画完整参考外观。
+- 第一个实现还直接使用 `geom_xpos/geom_xmat` 和模型数组重建 marker，没有像参考脚本一样先调用 `mjv_updateScene` 获取渲染器已解析的 `MjvGeom`。
+- 对照 `/home/weili/legged_lab/scripts/sim2sim_mimic_vision_4340.py` 后确认，参考实现的关键是独立 `ref_model + ref_data + ref_scene`，而不只是第二个 data。
+
+### 2. 代码修改
+
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：从原始 BUMI3 MJCF 单独重新加载 `reference_visual_model`，不对它施加训练碰撞体或 armature 运行时覆盖；参考 FK、base/`waist_yaw_link` 姿态诊断和 anchor 四元数均改为使用该独立模型。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：每帧调用 `mjv_updateScene(reference_visual_model, reference_visual_data, ...)`，只复制其中的 22 个 robot `MjvGeom`，不自行推断 mesh 姿态/尺寸。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：写入 viewer scene 时复制 `type/pos/mat/size/rgba/dataid/matid` 及其他渲染字段，再单独设为 `mjCAT_DECOR`。不再调用会二次解释 capsule size 的 `mjv_initGeom`。
+- 离屏像素检查又发现预分配 `MjvGeom.label` 未清空时会把随机字节渲染为字符；现已显式复制参考 label（当前为空字符串）。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：回归测试改为与独立 `mjv_updateScene` 结果逐 geom 对比 `pos/mat/size/dataid/matid/label`；同时断言动力学 base 为 capsule、红色参考 base 仍为原始 mesh。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py`：新增独立 ref model、完整有限 marker 字段和 base mesh/capsule 隔离校验；输出明确标记 `render_source:independent_ref_model_mjv_updateScene`。
+- `docs/source/getting_started/bumi3_sim2sim.md`：记录独立 ref model 与最终 `MjvGeom` 复制契约，说明为何不能复用已替换碰撞体的动力学 model。
+
+### 3. 实际验证
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py`：`11 passed`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke`：`PASS`；输出 `geoms:22` 且 `render_source:independent_ref_model_mjv_updateScene`。
+- 使用真实 `model_step_070000_g1.onnx` + `finedance__001_50fps.pkl` 运行 100 个控制步，再用 MuJoCo EGL 离屏渲染同一 user-scene geom 复制链。修正后红色参考为完整、连通、直立的 22 个原始 mesh，无随机字符；白色机器人同时已倒地，root height 为 `0.0668425 m`。这个画面现在能正确区分“参考姿态”与“policy/部署闭环失败”。
+- 此修改只影响 sim2sim 可视化，没有改动 ONNX 观测、控制、训练数据、奖励、termination 或服务器训练进程。
+
+## 2026-08-31：纠正 sim2sim 碰撞来源为 BUMI3 XML
+
+### 1. 用户纠正与最终契约
+
+- 用户明确纠正：sim2sim 在 MuJoCo 内运行，碰撞必须使用 `bumi3.xml`，与 Isaac Lab URDF 无关。
+- 本节取代本文档前面“sim2sim 在内存中复刻训练 URDF collision”的旧结论。旧结论是错误的，不再是当前代码行为。
+- 最终白色 policy 机器人就是 `self.model/self.data`：MuJoCo 从 `bumi3.xml` 加载的同一组 geom 同时用于碰撞、动力学和渲染，不隐藏、不替换、不叠加 policy 可视代理。
+- 红色参考从同一 `bumi3.xml` 单独加载 `ref_model/ref_data/ref_scene`，只用于持有参考 qpos 和绘制 decorative marker，不参与物理。
+- Isaac Lab URDF 的 cylinder→capsule、禁用 collision link 等契约不再进入 sim2sim Python。如需改变 MuJoCo 碰撞，应显式修改并审核 XML。
+
+### 2. 代码修改
+
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：删除 `BUMI3_URDF_DISABLED_COLLISION_BODIES`、`BUMI3_URDF_CAPSULE_COLLISIONS`、`_apply_training_collision_contract()` 及初始化调用。运行时不再改写 `geom_type/dataid/pos/quat/size/contype/conaffinity`。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：撤销中途尝试的“隐藏动力学 geom + 用 user scene 额外绘制白色 policy mesh”方案。GUI 现在由 MuJoCo 直接渲染 XML 动力学模型，user scene 只包含红色参考。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：用 `test_runtime_visual_and_collision_geoms_match_original_xml` 取代 URDF collision 测试。测试重新加载 XML，逐数组比较 `geom_type/bodyid/contype/conaffinity/condim/dataid/group/priority/pos/quat/size/friction/solref/solimp/margin/gap/rgba`，并断言 22 个 robot geom 均保留 XML mesh。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py`：删除 capsule/禁用 link 断言和白色可视代理断言，改为同样的 XML geom 数组指纹校验；输出 `collision_source:bumi3_xml` 和 `render_source:dynamics_bumi3_xml`。
+- `gear_sonic/scripts/run_bumi3_sim2sim.py`：resolved 输出改为 `policy_visual_and_collision: direct_bumi3_xml_dynamics_model`。
+- `docs/source/getting_started/bumi3_sim2sim.md`：删除“运行时复刻 URDF 碰撞”说明，明确 sim2sim 不读取、不复刻、不覆盖 URDF collision。
+
+### 3. 实际验证和结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py`：`11 passed`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke`：通过；22 个 policy geom 全部来自 XML，输出 `physics:true` 和 `collision_source:bumi3_xml`。
+- 真实 `model_step_070000_g1.onnx` + `finedance__001_50fps.pkl` 100 控制步：接口/有限值/XML 碰撞指纹验证通过；2 秒后 policy root height 为 `0.084035 m`，仍然摔倒。
+- MuJoCo EGL 离屏像素检查：白色 policy 是完整 XML mesh 且直接由动力学 scene 渲染；红色参考是完整 XML mesh 的 decorative 影子。画面不再出现 URDF capsule 代理。
+- GUI 真实入口运行 5 个控制步并正常退出；X11 在程序结束后打印 `NV-GLX missing` 环境警告，本次命令退出码仍为 0，不把该警告当作 GPU GUI 稳定性证明。
+- `git diff --check`：通过；搜索已确认 sim2sim 代码和文档中不再存在 `_apply_training_collision_contract`、`BUMI3_URDF_CAPSULE_COLLISIONS`、`training_urdf_runtime_override` 或 policy 可视代理路径。本轮未 commit/push，未改动服务器训练。
+
+## 2026-09-01：2790 条 HQ4 PASS-only BUMI3 严格 50 Hz 数据准备（阶段一）
+
+### 1. 起点、授权范围与保护措施
+
+- 分支仍为 `feature/bumi-native-sonic-full-training`，起始 HEAD 仍为 `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`；工作区已有的大量用户修改全部保留，没有 reset、clean、stash、commit 或 push。
+- 本轮数据源只使用服务器2的 `/data0/user/liwei/robot_retargeter_bumi3_hq4_zup_v1`；唯一白名单只接受质量报告 `/data0/user/liwei/datasets/bumi_quality_robot_retargeter_30hz_v1/quality_report.jsonl` 中同时满足 `status=PASS` 和 `quality_accepted=true` 的条目，数量必须恰好为 2790。REVIEW/REJECT 即使文件存在也不会进入输出。
+- 4090 原目录在本阶段尚未替换；先构建独立数据集、全量验证和安全传输，最终只会通过保留时间戳备份的 rename/symlink 发布，保证可回滚。
+- SSH 密码只用于本轮交互式认证，没有写入仓库、转换脚本、日志或数据 provenance。
+
+### 2. 新增代码与目的
+
+- 新增 `gear_sonic/tools/prepare_bumi3_pass50_dataset.py`：
+  - 从质量报告建立严格、唯一、哈希锁定的 2790 条 PASS manifest；
+  - 比较 retargeter MJCF 与本仓库 SONIC MJCF 的 22-body/21-joint 核心名称、树结构、body pose、joint origin/axis/range 和 actuator 顺序，不一致立即拒绝构建；
+  - 采用 `arange(0,(T-1)/30,1/50)` 的独占末帧时间网格，把位置/关节位置线性插值到 50 Hz，把 wxyz body 四元数做最短弧 SLERP；
+  - 从 50 Hz 结果重新计算 joint velocity/acceleration/jerk、body linear/angular velocity，并按双 `ankle_roll_link` 的低位与水平/垂直速度滞回重新计算接触；
+  - 输出 SONIC 实际读取的 50 Hz robot PKL，同时把导数量和接触保存到独立 audit NPZ；PASS 原始 NPZ 只允许建立硬链接，跨文件系统或退化成复制会失败；
+  - `pair-smpl` 不只要求同名、50 Hz 和严格同帧数，还复现训练的 SMPL Y-up→Z-up 与 base rotation removal，并比较 Robot `waist_yaw_link` 世界姿态。中位相对角超过 45 度的条目保留为 robot-only，避免把坐标语义异常配对送入 SMPL Encoder。
+- 新增 `gear_sonic/tools/test_prepare_bumi3_pass50_dataset.py`：用合成的匀速平移/绕 Z 轴旋转动作覆盖完整 build/validate/pair 路径，验证 PASS-only、硬链接 inode、线性插值、SLERP、四元数范数、派生速度以及 SMPL 坐标配对门禁。
+
+### 3. 服务器2真实构建结果
+
+- 质量报告实际为 3154 行；严格白名单为 2790 条，组成：`aioz_gdance=1884`、`aistpp=750`、`finedance=88`、`compas3d=68`。
+- retargeter MJCF SHA256 为 `fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3`，SONIC MJCF SHA256 为 `02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe`；二者整体文件不同，但过滤 retargeter 辅助 marker 后，核心运动学门禁通过，核心 SHA256 为 `b65b51c4775a91658aa95e48eda220b3ff75b99451491b4ef175ce18d7d0bed2`。
+- 发布目录：`/data0/user/liwei/datasets/sonic_bumi3_hq4_pass50_v1`。原始源帧总数 `3,043,605`，严格 50 Hz 目标总帧数 `5,069,508`；2790 条全部 finite，root quaternion 最大单位范数误差 `2.220446049250313e-16`。
+- 左右脚平均接触占比分别为 `0.5534127` 和 `0.5653995`。PASS raw 硬链接目录表观大小约 3.4 GiB、robot PKL 约 1.1 GiB、audit NPZ 约 3.3 GiB、meta 约 4.2 MiB；抽样 inode 和全量 validator 都确认 raw 是原文件硬链接，不是复制。
+- provenance 固定质量报告 SHA256 `d3bc24fb62600a71339625ef233bf0eb267d05296d45a3701a298d92b5cfb798`，并记录源/目标 MJCF 哈希、时间网格、插值方法、派生量和接触重算规则。
+
+### 4. 阶段一实际验证
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tools/test_prepare_bumi3_pass50_dataset.py`：`3 passed`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- `git diff --check`：通过。
+- 服务器2构建内置全量验证：`BUMI3_PASS50_BUILD=PASS`，`robot_count=2790`，`total_target_frames=5069508`。
+- 服务器2独立再次执行 full validate：`BUMI3_PASS50_VALIDATE=PASS`，逐条反序列化 2790 个 robot PKL，并逐条检查 2790 个 raw 硬链接和 2790 个 audit NPZ。
+
+### 5. 仍待阶段二补录
+
+- 4090 端训练子集传输、逐条 training-only 校验、SMPL key/frame/坐标语义配对、旧目录时间戳备份与替换、8 卡 scratch 启动及 TensorBoard 真实 event/首轮指标将在传输和运行验证结束后补录；在这些证据出现前不把训练写成“已成功重启”。
+
+## 2026-09-01：2790 条 HQ4 PASS-only 发布、SMPL 配对与八卡重训（阶段二）
+
+### 1. 传输、校验和发布
+
+- 只把服务器2输出中的 `built/robot_all`（约 1.1 GiB）和 `meta`（约 4.2 MiB）传到 4090；3.4 GiB raw 硬链接和 3.3 GiB audit NPZ 留在服务器2，避免重复跨机传输。传输目标先使用 `/data/sonic_bumi3/datasets/.hq4_pass50_v1.transfer.20260901` staging。
+- 最初在单流传输仍运行时过早执行了 validation，因只看到 24 个已落盘文件而产生预期的 `manifest.jsonl` missing。检查本地与两端 tar PID 后确认是校验竞态，不是 tar 已成功结束；没有发布不完整目录。随后按目标端实际文件大小生成缺失清单，用四个独立 SSH master 传输不重叠且总字节均衡的分片。
+- 四个分片均返回 `MULTI_SHARD_0..3=PASS`。4090 端独立运行 training-only validator，逐条反序列化 2790 个 PKL，结果为 `BUMI3_PASS50_VALIDATE=PASS {"robot_count": 2790, "total_target_frames": 5069508}`。
+- 独立发布目录为 `/data/sonic_bumi3/datasets/hq4_pass50_v1`。旧 `/data/sonic_bumi3/datasets/hq_all_v1/built/robot_all` 的 3261 条文件完整移动到 `/data/sonic_bumi3/datasets/hq_all_v1/built/robot_all.pre_hq4_pass50_20260901_110141`；原路径现为指向新 2790 条目录的符号链接。没有删除旧数据，回滚只需停止新训练、删除该符号链接并把备份目录改回 `robot_all`。
+
+### 2. SMPL 严格配对结果
+
+- 配对源仍为 `/data/sonic_bumi3/datasets/hq_all_v1/built/smpl_all`，新目录为 `/data/sonic_bumi3/datasets/hq4_pass50_v1/built/smpl_all`。通过项使用同文件系统硬链接，抽样确认源/目标 `st_dev + inode` 完全相同。
+- 2790 条 Robot 中 2788 条通过 key、`fps=50`、三项 SMPL 字段严格同帧数以及 Robot-waist/processed-SMPL-root 中位相对角不超过 45 度的全部门禁；保留配对的中位角总体中位数 `16.112373°`，最大 `42.886849°`。
+- 两条仅因坐标语义门禁降为 robot-only：`aistpp__gLO_sBM_cAll_d15_mLO5_ch04=48.422173°`、`aistpp__gWA_sBM_cAll_d27_mWA5_ch08=61.399928°`。训练代码对无 SMPL 配对的 Robot 动作使用既有零 SMPL fallback，没有删除这两条 PASS Robot 数据。
+- 完整逐条结果保存在新数据集 `meta/smpl_pairing_report.jsonl`，汇总保存在 `meta/smpl_pairing_summary.json`。
+
+### 3. Hydra resolved 配置与启动命令
+
+- 实际 compose 输出保存为 `/data/sonic_bumi3/datasets/hq4_pass50_v1/meta/resolved_training_config.yaml`。解析确认：`checkpoint=null`、`resume=false`、`auto_load_latest=false`、`num_envs=4096/rank`、`num_learning_iterations=100000`、`target_fps=50`、`exclude_motion_keys=[]`、`sim_dt=0.005`、`decimation=4`，控制频率为 50 Hz。
+- 新质量报告已重新验证机器人本体，因此旧 55 条 Robot/SMPL 异常清单不再作为 Robot 过滤器；其与新 2790 PASS 的交集为 11 条。启动时显式覆盖为空，保证 Robot 唯一白名单确实是 2790 PASS；SMPL 是否启用只由本轮新配对门禁决定。
+- 八卡从头训练命令：
+
+```bash
+/root/miniconda3/envs/liwei_lab/bin/accelerate launch --num_processes=8 \
+  gear_sonic/train_agent_trl.py \
+  +exp=manager/universal_token/all_modes/sonic_bumi3 \
+  +resume=false checkpoint=null auto_load_latest=false \
+  use_wandb=false headless=True num_envs=4096 \
+  base_dir=/data/sonic_bumi3/runs \
+  exp_var=hq4_pass50_v1_scratch_100k \
+  algo.config.num_learning_iterations=100000 \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file=/data/sonic_bumi3/datasets/hq4_pass50_v1/built/robot_all \
+  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=/data/sonic_bumi3/datasets/hq4_pass50_v1/built/smpl_all \
+  ++manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys=[]
+```
+
+- 训练 tmux：`sonic_bumi3_hq4_pass50_8gpu`；启动日志：`/data/sonic_bumi3/launch_logs/sonic_bumi3_hq4_pass50_8gpu_20260901_110307.log`；实验目录：`/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_hq4_pass50_v1_scratch_100k-20260901_110314`。
+
+### 4. 真实运行证据和当前边界
+
+- 4090 `liwei_lab` 环境运行 `python -m pytest -q gear_sonic/tools/test_prepare_bumi3_pass50_dataset.py`：`3 passed`；本地 `env_isaaclab` 同一测试为 `3 passed`，本地 `compileall -q gear_sonic` 与 `git diff --check` 均通过。
+- 8 个 rank 均打印 `Loaded 2790 motions` 和 `requested=0, matched=0, missing=0, remaining=2790`；运行时 Action Manager shape 为 `21`，policy observation 为 `690`，critic observation 为 `1245`。
+- tokenizer 只有 `encoder_index`、Robot 两项输入和 SMPL 两项输入；运行时只初始化 `g1` 与 `smpl` encoder。FSQ 输出为 `64`（2 tokens × 32），没有 Teleop encoder/tokenizer/loss。
+- 运行时 physics step `0.005 s`、environment step `0.02 s`；奖励表确认 `feet_acc=-2.5e-6`、`torque_limits=-0.01`，termination 表确认 `ee_body_pos`、`foot_pos_xyz` 是两个独立项。
+- TensorBoard event 已真实生成并解析：`tensorboard/events.out.tfevents.1788231887.noetix.3236527.0`，含 122 个 scalar tags。step 1→51：reward `0.61743→0.57356`、mean length `10.97→10.326`、value loss `0.08377→0.01805`；step 51 吞吐约 `239275 steps/s`。早期 reward/length 尚未改善，必须继续观察而不能把训练链路正常等同于策略已开始收敛。
+- 检查时 8 张 RTX 4090 显存约 `19.9–20.3 GiB`，利用率约 `85%–90%`；日志未发现 traceback、AssertionError、RuntimeError、CUDA OOM、NCCL 或 NaN。已有 headless Vulkan/renderer 报错与该服务器此前多卡训练相同，所有 rank 在这些日志后继续完成场景、MotionLib、网络、DDP 和 PPO iteration。
+- 这些 51 个 iteration 只证明数据加载、Isaac 环境、双 Encoder、PPO、TensorBoard 和八卡计算链路工作；随机初始化早期 termination 仍高，不能据此宣称动作已收敛或 sim2sim 不再摔倒，后续必须持续看 length/reward/termination 曲线并用新 checkpoint 做参考影子 sim2sim。
+
+### 5. TensorBoard 服务和查看方式
+
+- 服务器原 6006 端口已有其他 TensorBoard，未终止或覆盖用户进程。本实验单独在 tmux `tensorboard_bumi3_hq4_pass50` 的 `127.0.0.1:6016` 运行 TensorBoard 2.20.0。
+- 本地端口转发：`ssh -N -L 6016:127.0.0.1:6016 noetix-volc`，浏览器打开 `http://127.0.0.1:6016/`。
+- 训练查看：`ssh noetix-volc -t 'tmux attach -t sonic_bumi3_hq4_pass50_8gpu'`；脱离 tmux 使用 `Ctrl-b` 后按 `d`。
+
+## 2026-09-01：补充 Git 中文提交说明与 SONIC 训练服务器约束
+
+### 1. 修改范围与理由
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`；修改前与上游 ahead `0`、behind `0`。
+- `agent.md`：把原有“推荐提交消息”规则收紧为 Git 提交标题和正文必须使用详细中文说明，
+  并要求明确写出具体改动、修改理由、影响边界、实际验证、未执行项及原因，避免模糊或仅列
+  文件名的提交记录。
+- `agent.md`：新增 SONIC 训练服务器章节，固定使用 SSH Host 别名 `noetix-volc`，并记录
+  用户指定的 HostName、用户、端口、IdentityFile、IdentitiesOnly 和 keepalive 参数。
+- 修改理由：保证 Git 历史可由中文直接审计，并避免后续 SONIC 训练误连其他服务器。
+
+### 2. 兼容性、验证与回滚
+
+- 本轮只修改规则文档和本记录，没有修改训练代码、配置、数据、模型或服务器状态；没有连接
+  `noetix-volc`，也没有执行 commit、push、merge、rebase、stash、reset 或训练操作。
+- 实际验证：使用文本检索核对新增规则和 7 项 SSH 配置字段，并执行 `git diff --check`。
+- 未运行代码测试：本轮没有代码行为变化，单元测试、仿真和训练均不适用。
+- 风险：SSH 配置中的私钥路径要求执行环境已有 `~/.ssh/noetix-8.pem` 且权限正确；本轮未验证
+  密钥存在性或远端可达性。
+- 回滚：只需删除 `agent.md` 的对应规则增量和本节记录；不得影响同文件内其他已有未提交内容。
+
+## 2026-09-01：补充代码注释必须使用详细中文的约束
+
+### 1. 修改内容与理由
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- `agent.md`：新增强制规则，要求新增、改写及受当次代码修改影响的注释全部使用详细中文，
+  并准确说明代码目的、关键逻辑、输入输出、边界条件或必要的设计理由。
+- 同时禁止新增仅复述代码字面行为、含义模糊或只有英文的注释；未涉及的历史注释不进行批量
+  改写，避免把无关格式变化混入功能修改。
+- 修改理由：让后续代码的关键意图和约束可以直接用中文审查、维护与追溯。
+
+### 2. 验证、影响与回滚
+
+- 本轮只修改规则文档和本记录，没有修改任何运行代码、训练配置、数据、模型或服务器状态；
+  没有执行 commit、push、远程连接或训练操作。
+- 实际验证：文本检索确认规则已写入 `agent.md`，并执行 `git diff --check`。
+- 未运行代码测试：本轮没有代码行为变化，单元测试、仿真和训练均不适用。
+- 回滚：删除 `agent.md` 第 6 条规则及本节记录即可，不应改动同文件内其他已有内容。
+
+## 2026-09-01：修正 Robot Encoder 的 BUMI3 waist 锚点姿态语义
+
+### 1. 现象、根因与修正边界
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`；修改前与上游 ahead `0`、behind `0`。
+- 工作区已有 BUMI3 资产、数据处理、sim2sim 和训练调整等未提交改动；本轮仅编辑
+  锚点调用链、对应回归测试及本记录，没有 reset、stash、clean 或覆盖其他现有改动。
+- `sonic_bumi3.yaml` 虽然已将 `anchor_body` 配成 `waist_yaw_link`，但 Robot Encoder 的姿态
+  输入实际经过 `motion_anchor_ori_b_mf_nonflat -> root_rot_dif_l_multi_future`，
+  原实现在参考侧直接调用 `MotionLib.get_root_quat_w()`，得到的是第 0 个刚体
+  `base_link` 的浮动根四元数；仿真侧则使用 `robot_anchor_quat_w`，即
+  `waist_yaw_link`。因此原始计算实际是
+  `inverse(sim_waist) * reference_base`，当 `waist_yaw_joint` 非零时两侧刚体语义不一致。
+- 本记录早期第 886 行曾误写“参考 quaternion 已来自
+  `motion_anchor_body_index`”；该结论是根据配置和辅助属性做的错误推断，没有跟到
+  `root_rot_dif_l_multi_future` 末端实现。本节的生产代码差异和回归测试证据取代
+  那条旧记录，不再把原始状态说成已修正。
+- 本修正不改网络层、token 数、观测维度、控制频率、奖励、PPO 或数据，只把
+  Robot Encoder 的参考姿态改为与仿真侧同名的 `waist_yaw_link` FK 姿态。
+
+### 2. 文件级修改
+
+- `gear_sonic/envs/manager_env/mdp/commands.py`：
+  - `root_rot_dif_l` 从 `get_root_quat_w(...)` 改为读取 `self.anchor_quat_w`；
+  - `root_rot_dif_l_multi_future` 从多未来帧根四元数改为读取
+    `self.anchor_quat_w_multi_future`，并恢复为 `[num_envs, num_future_frames, 4]`；
+  - 修正后单帧和 Robot Encoder 实际使用的多未来帧均计算
+    `inverse(sim_waist) * reference_waist`；
+  - 保留 `root_rot_dif_*` 属性名以兼容旧配置，只修正其内部语义；新增中文注释
+    明确 BUMI3 禁止把 `base_link` 根姿态代替 `waist_yaw_link` 的 FK 姿态。
+- `gear_sonic/tests/test_tracking_anchor_semantics.py`：新增不需启动 Isaac Sim 的 AST 契约测试，
+  锁定单帧和多未来帧实现必须读取命名 anchor，且不得重新调用
+  `get_root_quat_w`。文件开头已详细说明 BUMI3 `base_link`/`waist_yaw_link` 差异和
+  采用 AST 的原因。
+- sim2sim 生产代码本轮无需再改：
+  `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py` 已使用 `bumi3.xml` 独立 FK 每帧
+  `waist_yaw_link` 的参考世界姿态，且用当前 policy robot 的同名 waist 姿态求相对旋转；
+  `gear_sonic/config/sim2sim/bumi3_sonic.yaml` 中 `anchor_body_name` 也已是
+  `waist_yaw_link`。
+
+### 3. 兼容性与 checkpoint 影响
+
+- G1 的配置 anchor 与其根刚体语义等价，所以返回数值不变；H2 和其他机器人从此也统一
+  遵循各自配置的 `anchor_body`，旧的配置键和观测属性名没有变化。
+- 当前正在服务器上运行的训练进程以及已生成 checkpoint 不会自动获得本地修正；
+  其 Robot Encoder 已经按旧的 base/waist 混合语义训练。要评估这个修正，必须将当前
+  代码同步到 4090 服务器后从头训练；本轮没有连接服务器、停止训练或启动新任务。
+- 维度契约保持不变：`sim_dt=0.005`、`decimation=4`、控制/target FPS `50 Hz`、
+  `action_dim=21`、FSQ 总维度 `64`、actor proprioception `690`、dynamic decoder
+  `754 -> 21`。
+
+### 4. 实际验证和未执行项
+
+- 首次尝试在普通 `pytest` 中直接导入 `TrackingCommand` 做行为测试，收集阶段因未启动
+  Isaac Sim `SimulationApp` 而报 `ModuleNotFoundError: No module named 'pxr'`。这是测试运行环境
+  限制，不是锚点逻辑断言失败；因此把新测试改为可在普通 Python 中运行的 AST
+  契约检查。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q
+  gear_sonic/tests/test_tracking_anchor_semantics.py`：`2 passed in 0.06s`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q
+  gear_sonic/tests/test_bumi3_sim2sim.py`：`11 passed in 2.52s`；其中现有数值测试会将
+  `waist_yaw_joint` 设为 `0.4 rad`，验证 sim2sim Robot Encoder 参考姿态来自 waist FK，
+  而非 identity root quaternion。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q
+  gear_sonic/envs/manager_env/mdp/commands.py gear_sonic/tests/test_tracking_anchor_semantics.py`：通过。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python
+  gear_sonic/tools/validate_bumi3_integration.py`：通过，输出 `BUMI3 原生 SONIC 集成验证通过`，
+  并确认 21 DoF、22 bodies、上述频率和网络维度契约均未变。
+- 未执行 1-env Isaac Lab reset/step：当前本地 BUMI3 训练数据路径为 `null`/由 CLI 指定，
+  validation 脚本明确输出 `smoke: 未请求（需显式提供现有 BUMI3/SMPL 数据）`；本轮不把未运行
+  的仿真 smoke 写为通过。
+- 本轮没有 commit、push、merge、rebase、stash、reset，也没有修改远程数据或训练进程。
+
+### 5. 回滚方式
+
+- 如需回滚本轮锚点修正，只恢复 `commands.py` 中两个 `root_rot_dif_l*` 属性的原实现，
+  删除 `test_tracking_anchor_semantics.py` 和本节记录即可；不得回滚或覆盖工作区中其他
+  BUMI3 资产、数据、配置、sim2sim 和训练改动。
+
+## 2026-09-01：强制中文注释与修改后 GitHub/训练服务器同步闭环
+
+### 1. 用户规则与文件修改
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`；修改前本地与上游 ahead `0`、behind `0`。
+- `agent.md` 将代码注释规则明确扩展到行内注释、块注释、docstring 和 TODO；说明
+  标识符、API 名和必要专有名词可保留原文，但解释句必须使用完整中文，不得
+  新增只有英文或没有中文语义的注释。
+- `agent.md` 记录用户对当前开发分支的持续非破坏性授权：每次修改完成后，必须
+  更新记录、验证、逐文件暂存、使用详细中文提交、推送 GitHub，并在
+  `noetix-volc` 同分支执行 `git pull --ff-only`。该授权不包含 merge、rebase、Tag、
+  删分支、force push 或改写历史。
+- 闭环规则显式保留安全边界：如果本地或服务器有用户独立未提交修改、分支不一致、
+  非快进历史或网络故障，必须保留现场并报告，禁止通过 stash、reset、force push
+  或自行合并来强行完成。
+
+### 2. 服务器同步前的只读核对
+
+- 已通过 SSH Host `noetix-volc` 连接，服务器仓库为
+  `/home/liwei/GR00T-WholeBodyControl`，分支为
+  `feature/bumi-native-sonic-full-training`，HEAD 同样为
+  `b1c3606ce96f00a01745cb8382f8bfa0b9b4d780`。
+- 服务器仓库所有者不是 SSH 的 `root` 用户，Git 报 `dubious ownership`。本轮不修改全局
+  Git 配置，远端检查与同步命令只使用单次参数
+  `-c safe.directory=/home/liwei/GR00T-WholeBodyControl`。
+- 服务器存在 8 个已跟踪改动和 3 个未跟踪数据工具文件。逐文件 SHA256 核对后，
+  10 个代码/配置/测试文件与本地完全相同；服务器的
+  `BUMI3_SONIC_修改记录.md` 为本地记录前 `107075` 字节的严格字节前缀，
+  无服务器独有后缀。这些文件是之前部署但未提交的同一批改动，不是新的服务器分叉。
+- 正式同步时必须在 GitHub 推送后再根据远端目标 commit 复核所有这些路径；只有确认
+  工作树内容已完整包含在目标 commit 中、没有独有修改后，才可清除重复工作树状态
+  并执行快进拉取。
+
+### 3. 本地验证结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m compileall -q gear_sonic`：通过。
+- 下列四组测试合并运行：`24 passed in 3.92s`；存在 1 条历史
+  `DeprecationWarning: invalid escape sequence '\\*'`，未造成测试失败。
+  - `gear_sonic/tools/test_prepare_bumi3_sonic_dataset.py`；
+  - `gear_sonic/tools/test_prepare_bumi3_pass50_dataset.py`；
+  - `gear_sonic/tests/test_bumi3_sim2sim.py`；
+  - `gear_sonic/tests/test_tracking_anchor_semantics.py`。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python gear_sonic/tools/validate_bumi3_integration.py`：
+  通过，输出 `BUMI3 原生 SONIC 集成验证通过`；实测为 21 DoF、22 bodies、
+  `sim_dt=0.005`、`decimation=4`、控制/target FPS `50 Hz`、`action_dim=21`、
+  FSQ `64`、actor proprioception `690`、dynamic decoder `754 -> 21`。
+- integration validation 启动 Isaac Sim 时输出了已知的 CPU topology、powersave、IOMMU 和
+  deprecated extension 警告，但进程退出码为 `0`并完成全部静态/Hydra 契约验证。
+- validation 中 1-env smoke 仍显式未请求，原因是本地没有通过 CLI 提供现有
+  BUMI3/SMPL 数据目录；本轮不把它记为已通过。
+
+### 4. 待本轮操作完成后补录
+
+- 当前累积 BUMI3 原生 SONIC、数据准备、训练坐标校验、sim2sim、waist 锚点修正、
+  规则与详细记录将逐文件暂存，使用详细中文提交并推送 GitHub；实际 commit SHA、
+  push 结果、服务器重复改动处置和 `git pull --ff-only` 证据将在操作完成后另行补录。

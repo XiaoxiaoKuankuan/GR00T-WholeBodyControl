@@ -49,6 +49,40 @@ def is_navigation_motion(motion_key):
     )
 
 
+def exclude_motion_data_by_exact_keys(data_list, excluded_keys):
+    """按完整动作 key 精确隔离训练样本，并返回可审计的匹配结果。
+
+    这里故意不复用 ``remove_motion_keys`` 的前缀语义：异常 Robot/SMPL 配对必须
+    逐条点名，避免一个较短前缀误删同舞种或同视频中的其他正常动作。函数始终
+    返回新的字典，不原地修改 MotionLib 的原始索引，便于后续验证请求数、命中数
+    和缺失 key。
+
+    Args:
+        data_list: 以动作 key 为索引的 MotionLib 数据字典。
+        excluded_keys: 要隔离的完整 key 序列；``None`` 表示不隔离。
+
+    Returns:
+        ``(filtered, matched, missing)``，后二者均按 key 排序。
+    """
+    if excluded_keys is None:
+        return dict(data_list), [], []
+    if isinstance(excluded_keys, str):
+        excluded_keys = [excluded_keys]
+    else:
+        excluded_keys = list(excluded_keys)
+
+    if any(not isinstance(key, str) or not key for key in excluded_keys):
+        raise ValueError("exclude_motion_keys 必须只包含非空字符串")
+    if len(excluded_keys) != len(set(excluded_keys)):
+        raise ValueError("exclude_motion_keys 含重复动作 key")
+
+    excluded_set = set(excluded_keys)
+    matched = sorted(excluded_set.intersection(data_list))
+    missing = sorted(excluded_set.difference(data_list))
+    filtered = {key: value for key, value in data_list.items() if key not in excluded_set}
+    return filtered, matched, missing
+
+
 def interpolate_translation_data(
     data,
     source_fps,
@@ -415,7 +449,28 @@ class MotionLibBase:
 
             print(f"Loaded {len(self._motion_data_load)} motion files")  # noqa: T201
 
-        data_list = self._motion_data_load
+        # 从完整索引复制后再做筛选，避免修改原始 MotionLib 数据字典。
+        data_list = dict(self._motion_data_load)
+
+        exclude_motion_keys = self.m_cfg.get("exclude_motion_keys", None)
+        data_list, excluded_matched, excluded_missing = exclude_motion_data_by_exact_keys(
+            data_list, exclude_motion_keys
+        )
+        if exclude_motion_keys is not None:
+            logger.info(
+                "Exact motion exclusion: requested={}, matched={}, missing={}, remaining={}",
+                len(list(exclude_motion_keys))
+                if not isinstance(exclude_motion_keys, str)
+                else 1,
+                len(excluded_matched),
+                len(excluded_missing),
+                len(data_list),
+            )
+            if excluded_missing:
+                logger.warning(
+                    "Exact motion exclusion keys absent from this motion source: {}",
+                    excluded_missing,
+                )
 
         filter_motion_keys = self.m_cfg.get("filter_motion_keys", None)
         if filter_motion_keys is not None:
