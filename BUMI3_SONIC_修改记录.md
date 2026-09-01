@@ -1575,3 +1575,80 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
   `sim_dt`、`decimation` 或控制频率。回滚代码时应同时恢复 MotionLib 对齐函数、
   BUMI3 两项配置、两个新测试、构建工具及两个验证脚本的对应门禁；发布的数据索引
   只是源文件软链接，可在确认没有训练使用后单独处理，但不得删除或重写三个源目录。
+
+### 7. 首次服务器全量审计、SHA 复核和历史审计结果
+
+- 提交 `851eda706649ec8296736bbfc654668d6b2b00be` 已推送 GitHub；服务器仓库在
+  同一 feature 分支、工作区干净的前提下由 `4efe77e` 执行普通
+  `git pull --ff-only`，正常 fast-forward 到 `851eda7`。两端均未执行 force push、
+  merge、rebase、stash、reset 或 clean。
+- 服务器 `liwei_lab` 同步后执行和本地相同的 6 组相关测试：
+  `36 passed in 6.62s`；`compileall -q gear_sonic` 与 `git diff --check` 通过。
+- 在独立 tmux `bumi3_three_source_build` 执行全量 build。发现记录数精确为
+  `100549 = 95332 train + 5217 test`，逐条审计完成后原子发布到用户指定目录；
+  构建内结构验证输出 `BUMI3_THREE_SOURCE_VALIDATE=PASS`。
+- 首次真实汇总不是计划前的估计值：train Robot `95332` 全部通过；可配对 SMPL
+  `95132`，Robot-only `200`。其中预期无 SMPL 为 hq4 `2` 加 Mine `99`，另有
+  大集 train `99` 条 waist/SMPL 根姿态中位差超过 45 度而降级。它们的帧差为
+  `0:44`、`-1:50`、`-2:5`，所以不是尾帧裁剪制造的异常；角差范围约
+  `45.0421°` 至 `177.3349°`。hq4 的 2788 条配对全部通过，test 的 5217 条
+  全部通过。
+- 自然按动作条数的实测来源概率为：大集 `0.96969538035497`、hq4
+  `0.029266143582427726`、Mine `0.0010384760626022743`，没有增加来源权重。
+- 来源级坐标实测：Robot 根倾角 clip 中位数分别约为大集 train `6.0823°`、
+  test `6.0210°`、hq4 `8.2705°`、Mine `5.6613°`；各含 SMPL 来源的
+  `smpl_joints` 人体主轴均为 Z。通过配对的根姿态中位差数据集内中位数为
+  大集 train `9.6749°`、test `8.8959°`、hq4 `16.1124°`。
+- 在独立 tmux `bumi3_three_source_hash` 调用不带跳过参数的正式 `validate`，
+  第二遍重新计算 `100549/100549` 个 Robot/test manifest 条目的源 SHA256；输出
+  `BUMI3_THREE_SOURCE_VALIDATE=PASS`。该结果证明发布后的链接、清单、第一次记录
+  的哈希和第二次独立读取一致。
+- 更新后的旧数据历史工具对 `hq_all_v2` 全量 3162 对运行，输出
+  `BUMI3_TRAINING_COORDINATES=PASS`：仍独立检出 55 条历史异常，活跃配置隔离数为 0，
+  正常保留集合中位角 `13.636874°`、最大 `44.710664°`，历史异常最小
+  `45.181285°`。这证明清空新配置静态名单没有破坏旧数据审计能力。
+
+### 8. 数据资产/关节顺序门禁补强及原因
+
+- 服务器当前 `/home/liwei/legged_lab` 并不是本集成锁定的参考快照：其 `bumi.py`
+  SHA256 为 `41e39f9c...5037`，手臂 velocity limit 已由 12 改为 30；其
+  `bumi3.xml` SHA256 为 `8639f0da...580`，waist 轴为 `-Z` 且 arm-roll 限位不同。
+  本地用户明确指定的 `/home/weili/legged_lab` 对应 SHA 仍是验证器锁定的
+  `74aaeca9...03e`、`041c81e8...edf`。本轮没有修改任何 legged_lab 文件。
+- 大集自身归档了 `/meta/bumi3.source.xml`，SHA256 为
+  `db4f51fc64030a99a69f0592852c4436e5495eebf8941f89c727a1410a20c1a4`；其报告明确
+  记录 DoF/body 双重重排和 waist_yaw 取反。程序化解析确认它使用 waist `+Z`、
+  正确 arm-roll 限位，并与当前 SONIC MJCF 的 21 关节遍历顺序、轴、限位完全一致；
+  两份 XML 的总体 SHA 不同仅因为归档版使用 `pelvis` 名称和另一套 mesh 相对路径。
+- hq4 provenance 的 `target_mjcf_sha256` 和 hq_all_v2 Mine provenance 的
+  `mjcf_sha256` 均为当前 SONIC MJCF
+  `02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe`。
+- 根据上述现场，继续只检查 `dof.shape == 21` 不足以抵御另一套 BUMI3 轴符号或
+  同维度错序。本轮再次修改 `build_bumi3_three_source_dataset.py`：
+  - 从当前 MJCF body 遍历自动读取 21 个名称、单位轴和限位，并断言名称精确等于
+    BUMI3 MuJoCo 顺序；
+  - 构建前验证大集归档 MJCF 的关节顺序/轴/限位，验证 hq4 和 Mine provenance
+    的目标 MJCF SHA，并把全部路径、SHA、顺序、轴和限位写入 summary/provenance；
+  - 每条 Robot 对全部帧执行
+    `pose_aa[:,1:,:] == dof[:,:,None] * current_mjcf_axes`，容差 `1e-6`。这会同时锁住
+    pose 节点顺序、dof 顺序、关节轴和 waist 取反结果；真实三来源分层抽查误差均为 0；
+  - 检查可选 `start_time/time_offset/timestamps` 等字段。实际 PKL 没有显式时间字段，
+    因此两侧都按“数组 index 0 等于 0 秒”解释，只允许裁末尾；未来若任一来源声明
+    不同非零起点，该 SMPL 会降级为 Robot-only，不能用尾帧对齐掩盖头部偏移。
+- `test_build_bumi3_three_source_dataset.py` 增加真实 MJCF/provenance 的缩小版门禁、
+  waist 使用负 Z 时 Robot 致命拒绝、同名 Robot/SMPL 时间起点差 0.02 秒时只降级
+  SMPL 的测试。补强后六组本地相关测试为 `38 passed in 3.99s`，compileall 和
+  `git diff --check` 再次通过。
+
+### 9. 仿真 smoke 现场边界
+
+- 首次服务器 1-env smoke 尚未创建环境，就在 `_validate_asset_provenance` 被服务器
+  漂移后的 `/home/liwei/legged_lab/bumi.py` SHA 拦截，退出码为 1。因此这次结果只能
+  记为“参考路径错误，仿真未执行”，不能记为 MotionLib、reset 或 step 失败。
+- 本轮将以不修改 legged_lab 的方式，把本地锁定参考文件复制到独立临时验证目录并通过
+  `BUMI3_REFERENCE_ROOT` 显式指定后重跑。临时目录只服务验证，不参与训练资产加载；
+  训练和 MotionLib 仍以仓库 `gear_sonic/.../bumi3.xml` 为准。
+- 原 hq4 八卡任务在本轮开始时确实有 8 个 worker；之后于 iteration 4855、日志时间
+  `15:31:43` 停止，`last.pt` 时间为 `15:31:26`。日志末尾没有 Python traceback，
+  dmesg/journal 未检出 OOM、killed process 或 GPU Xid。本 Agent 没有调用 kill、发送
+  信号、关闭其 tmux、删除进程或覆盖实验目录；停止原因目前不能从日志确认。

@@ -51,6 +51,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from typing import Any
+import xml.etree.ElementTree as ET
 
 import joblib
 import numpy as np
@@ -65,6 +66,33 @@ ROBOT_POSE_NODES = 22
 ROBOT_NUM_DOF = 21
 SMPL_NUM_JOINTS = 24
 MAX_AUDIT_FRAMES_PER_CLIP = 256
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CURRENT_MJCF_PATH = REPO_ROOT / "gear_sonic/data/assets/robot_description/mjcf/bumi3.xml"
+
+BUMI3_MUJOCO_DOF_NAMES = [
+    "waist_yaw_joint",
+    "l_arm_pitch_joint",
+    "l_arm_roll_joint",
+    "l_arm_yaw_joint",
+    "l_elbow_pitch_joint",
+    "r_arm_pitch_joint",
+    "r_arm_roll_joint",
+    "r_arm_yaw_joint",
+    "r_elbow_pitch_joint",
+    "l_leg_pitch_joint",
+    "l_leg_roll_joint",
+    "l_leg_yaw_joint",
+    "l_knee_pitch_joint",
+    "l_ankle_pitch_joint",
+    "l_ankle_roll_joint",
+    "r_leg_pitch_joint",
+    "r_leg_roll_joint",
+    "r_leg_yaw_joint",
+    "r_knee_pitch_joint",
+    "r_ankle_pitch_joint",
+    "r_ankle_roll_joint",
+]
 
 DEFAULT_DATA_ROOT = Path("/data/sonic_bumi3/datasets")
 DEFAULT_LARGE_ROOT = DEFAULT_DATA_ROOT / "bumi3_smpl_97660_v1"
@@ -91,6 +119,42 @@ class SourceRecord:
     expected_robot_fps: float
 
 
+def _load_mjcf_joint_contract(path: Path) -> tuple[list[str], np.ndarray, np.ndarray]:
+    """按 MJCF body 遍历顺序读取 21 个关节的名称、轴和限位。"""
+
+    if not path.is_file():
+        raise ValueError(f"MJCF 契约文件不存在: {path}")
+    root = ET.parse(path).getroot()
+    names: list[str] = []
+    axes: list[np.ndarray] = []
+    ranges: list[np.ndarray] = []
+    for body in root.findall(".//worldbody//body"):
+        joints = body.findall("joint")
+        if not joints:
+            continue
+        if len(joints) != 1:
+            raise ValueError(f"{path} body={body.get('name')} 含多个关节")
+        joint = joints[0]
+        name = joint.get("name")
+        axis_text = joint.get("axis")
+        range_text = joint.get("range")
+        if not name or axis_text is None or range_text is None:
+            raise ValueError(f"{path} 关节缺少 name/axis/range: {ET.tostring(joint)}")
+        axis = np.fromstring(axis_text, sep=" ", dtype=np.float64)
+        joint_range = np.fromstring(range_text, sep=" ", dtype=np.float64)
+        if axis.shape != (3,) or joint_range.shape != (2,):
+            raise ValueError(f"{path} 关节 {name} 的 axis/range 维度错误")
+        axis_norm = np.linalg.norm(axis)
+        if not np.isclose(axis_norm, 1.0, atol=1e-8):
+            raise ValueError(f"{path} 关节 {name} 的 axis 不是单位向量: {axis}")
+        names.append(name)
+        axes.append(axis / axis_norm)
+        ranges.append(joint_range)
+    if names != BUMI3_MUJOCO_DOF_NAMES:
+        raise ValueError(f"{path} BUMI3 MuJoCo 关节顺序错误: {names}")
+    return names, np.stack(axes), np.stack(ranges)
+
+
 def _sha256(path: Path) -> str:
     """流式计算大文件 SHA256，避免一次性读取完整 PKL。"""
 
@@ -99,6 +163,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+CURRENT_DOF_NAMES, CURRENT_DOF_AXES, CURRENT_DOF_RANGES = _load_mjcf_joint_contract(
+    CURRENT_MJCF_PATH
+)
+CURRENT_MJCF_SHA256 = _sha256(CURRENT_MJCF_PATH)
 
 
 def _sample_indices(num_frames: int) -> np.ndarray:
@@ -136,12 +206,74 @@ def _require_count(label: str, actual: int, expected: int) -> None:
         raise ValueError(f"{label} 数量 {actual} != 预期 {expected}")
 
 
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """读取来源 provenance，并要求顶层为 JSON 字典。"""
+
+    if not path.is_file():
+        raise ValueError(f"来源 provenance 不存在: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"来源 provenance 顶层不是字典: {path}")
+    return payload
+
+
+def _validate_source_asset_contracts(
+    large_root: Path, hq4_root: Path, mine_robot_dir: Path
+) -> dict[str, Any]:
+    """验证三来源的 MJCF 指纹及大集归档的关节顺序、轴和限位。"""
+
+    large_source_mjcf = large_root / "meta/bumi3.source.xml"
+    large_names, large_axes, large_ranges = _load_mjcf_joint_contract(large_source_mjcf)
+    if large_names != CURRENT_DOF_NAMES:
+        raise ValueError("大集归档 MJCF 的关节顺序与当前 SONIC BUMI3 不一致")
+    if not np.allclose(large_axes, CURRENT_DOF_AXES, atol=1e-8):
+        raise ValueError("大集归档 MJCF 的关节轴与当前 SONIC BUMI3 不一致")
+    if not np.allclose(large_ranges, CURRENT_DOF_RANGES, atol=1e-8):
+        raise ValueError("大集归档 MJCF 的关节限位与当前 SONIC BUMI3 不一致")
+
+    hq4_provenance_path = hq4_root / "meta/provenance.json"
+    hq4_provenance = _read_json_object(hq4_provenance_path)
+    if hq4_provenance.get("target_mjcf_sha256") != CURRENT_MJCF_SHA256:
+        raise ValueError(
+            "hq4 PASS50 的目标 MJCF 与当前 SONIC BUMI3 不一致: "
+            f"{hq4_provenance.get('target_mjcf_sha256')} != {CURRENT_MJCF_SHA256}"
+        )
+
+    hq_all_root = mine_robot_dir.parents[1]
+    mine_provenance_path = hq_all_root / "meta/provenance.json"
+    mine_provenance = _read_json_object(mine_provenance_path)
+    if mine_provenance.get("mjcf_sha256") != CURRENT_MJCF_SHA256:
+        raise ValueError(
+            "Mine Robot 来源 MJCF 与当前 SONIC BUMI3 不一致: "
+            f"{mine_provenance.get('mjcf_sha256')} != {CURRENT_MJCF_SHA256}"
+        )
+
+    return {
+        "current_mjcf_path": str(CURRENT_MJCF_PATH),
+        "current_mjcf_sha256": CURRENT_MJCF_SHA256,
+        "large_source_mjcf_path": str(large_source_mjcf),
+        "large_source_mjcf_sha256": _sha256(large_source_mjcf),
+        "hq4_provenance_path": str(hq4_provenance_path),
+        "hq4_provenance_sha256": _sha256(hq4_provenance_path),
+        "mine_provenance_path": str(mine_provenance_path),
+        "mine_provenance_sha256": _sha256(mine_provenance_path),
+        "mujoco_dof_names": CURRENT_DOF_NAMES,
+        "mujoco_dof_axes": CURRENT_DOF_AXES.tolist(),
+        "mujoco_dof_ranges": CURRENT_DOF_RANGES.tolist(),
+    }
+
+
 def discover_records(args: argparse.Namespace) -> tuple[list[SourceRecord], dict[str, Any]]:
     """发现三来源文件，并验证配对集合、拆分和跨来源 key 唯一性。"""
 
     large_root = args.large_root.resolve()
     hq4_root = args.hq4_root.resolve()
     mine_robot_dir = args.mine_robot_dir.resolve()
+    asset_contracts = _validate_source_asset_contracts(
+        large_root=large_root,
+        hq4_root=hq4_root,
+        mine_robot_dir=mine_robot_dir,
+    )
 
     large_train_robot = _index_pkls(large_root / "train/robot_filtered")
     large_train_smpl = _index_pkls(large_root / "train/smpl_filtered")
@@ -246,6 +378,7 @@ def discover_records(args: argparse.Namespace) -> tuple[list[SourceRecord], dict
         "mine_robot_only": len(mine_robot),
         "train_unique_keys": len(train_keys),
         "test_unique_keys": len(large_test_robot),
+        "asset_contracts": asset_contracts,
     }
     return records, discovery
 
@@ -290,6 +423,23 @@ def _load_robot(path: Path, expected_key: str, expected_fps: float) -> tuple[dic
     if not math.isclose(fps, expected_fps, abs_tol=1e-8):
         raise ValueError(f"Robot fps={fps}，预期 {expected_fps}")
 
+    # BUMI3 的 pose_aa 第 1 至 21 节点应逐帧等于当前 MJCF 对应轴乘以同序 dof。
+    # 该恒等式同时锁住 MuJoCo 关节顺序、轴符号和 waist_yaw 取反结果，避免只检查
+    # 21 维 shape 却把另一套 BUMI3 顺序或 waist -Z 数据送入训练。
+    expected_local_pose = dof[:, :, None] * CURRENT_DOF_AXES[None, :, :]
+    pose_dof_axis_error = np.linalg.norm(pose_aa[:, 1:, :] - expected_local_pose, axis=-1)
+    pose_dof_axis_error_max = float(np.max(pose_dof_axis_error))
+    if pose_dof_axis_error_max > 1e-6:
+        max_frame, max_joint = np.unravel_index(
+            int(np.argmax(pose_dof_axis_error)), pose_dof_axis_error.shape
+        )
+        raise ValueError(
+            "Robot pose_aa/dof/MJCF 关节顺序或轴符号不一致: "
+            f"max_error={pose_dof_axis_error_max}, frame={max_frame}, "
+            f"joint={CURRENT_DOF_NAMES[max_joint]}"
+        )
+    time_origin, time_origin_mode = _declared_time_origin(robot)
+
     indices = _sample_indices(frames)
     sampled_root = root_xyzw[indices]
     norm_error = float(np.max(np.abs(np.linalg.norm(sampled_root, axis=1) - 1.0)))
@@ -310,6 +460,9 @@ def _load_robot(path: Path, expected_key: str, expected_fps: float) -> tuple[dic
         "robot_sha256": _sha256(path),
         "root_quat_norm_error_max": norm_error,
         "root_pose_abs_dot_min": float(np.min(root_pose_dot)),
+        "pose_dof_axis_error_max": pose_dof_axis_error_max,
+        "robot_time_origin_seconds": time_origin,
+        "robot_time_origin_mode": time_origin_mode,
         "root_tilt_median_degrees": float(np.median(root_tilt)),
         "root_tilt_gt45_ratio": float(np.mean(root_tilt > 45.0)),
         "root_height_median_m": float(np.median(root_trans[indices, 2])),
@@ -350,6 +503,7 @@ def _load_smpl(path: Path) -> tuple[dict, dict]:
     fps = float(smpl["fps"])
     if not math.isclose(fps, TARGET_FPS, abs_tol=1e-8):
         raise ValueError(f"SMPL fps={fps}，预期 {TARGET_FPS}")
+    time_origin, time_origin_mode = _declared_time_origin(smpl)
 
     indices = _sample_indices(frames)
     sampled_joints = joints[indices]
@@ -362,8 +516,31 @@ def _load_smpl(path: Path) -> tuple[dict, dict]:
         "smpl_sha256": _sha256(path),
         "smpl_joint_extent_xyz_median": extents.tolist(),
         "smpl_joint_dominant_axis": int(np.argmax(extents)),
+        "smpl_time_origin_seconds": time_origin,
+        "smpl_time_origin_mode": time_origin_mode,
     }
     return smpl, stats
+
+
+def _declared_time_origin(data: dict) -> tuple[float, str]:
+    """读取可选时间起点；没有时间字段时按数组第 0 帧即 0 秒的目录契约处理。"""
+
+    scalar_fields = ("start_time", "start_time_sec", "time_offset", "time_offset_sec")
+    for field in scalar_fields:
+        if field in data:
+            value = np.asarray(data[field], dtype=np.float64)
+            if value.size != 1 or not np.isfinite(value).all():
+                raise ValueError(f"时间起点字段 {field} 必须是有限标量")
+            return float(value.reshape(-1)[0]), f"explicit:{field}"
+    for field in ("timestamps", "times", "time"):
+        if field in data:
+            value = np.asarray(data[field], dtype=np.float64).reshape(-1)
+            if value.size == 0 or not np.isfinite(value).all():
+                raise ValueError(f"时间数组字段 {field} 必须是非空有限数组")
+            if value.size > 1 and np.any(np.diff(value) <= 0.0):
+                raise ValueError(f"时间数组字段 {field} 必须严格递增")
+            return float(value[0]), f"explicit:{field}[0]"
+    return 0.0, "implicit:index0=0s"
 
 
 def _pair_median_degrees(robot: dict, smpl: dict) -> float:
@@ -423,6 +600,18 @@ def audit_record(record: SourceRecord) -> dict[str, Any]:
 
     frame_delta = int(row["smpl_frames"]) - int(row["robot_frames"])
     row["frame_delta_smpl_minus_robot"] = frame_delta
+    time_origin_delta = float(row["smpl_time_origin_seconds"]) - float(
+        row["robot_time_origin_seconds"]
+    )
+    row["time_origin_delta_smpl_minus_robot_seconds"] = time_origin_delta
+    if not math.isclose(time_origin_delta, 0.0, abs_tol=1e-8):
+        row.update(
+            {
+                "status": "ROBOT_ONLY_PAIR_TIME_ORIGIN_MISMATCH",
+                "reason": f"Robot/SMPL 时间起点相差 {time_origin_delta} 秒",
+            }
+        )
+        return row
     if not math.isclose(float(row["robot_fps"]), TARGET_FPS, abs_tol=1e-8):
         row.update(
             {
@@ -616,6 +805,10 @@ def _publish_index(
                 "mode": "trim_trailing",
                 "max_frame_delta": MAX_PAIR_FRAME_DELTA,
             },
+            "time_origin": (
+                "同名数组均从第0帧开始；若PKL声明时间字段则要求两侧起点完全一致"
+            ),
+            "asset_contracts": summary["discovery"]["asset_contracts"],
             "smpl_coordinate_contract": {
                 "pose_aa_and_transl": "Y-up",
                 "smpl_joints": "Z-up",

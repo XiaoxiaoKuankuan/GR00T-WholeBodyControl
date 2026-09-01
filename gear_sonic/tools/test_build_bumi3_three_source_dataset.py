@@ -13,9 +13,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 
 import joblib
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 
 from gear_sonic.tools import build_bumi3_three_source_dataset as build_tool
@@ -86,6 +88,22 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     _write_robot(mine_dir / "mine__self.pkl", frames=9, fps=30.0)
     _write_robot(mine_dir / "aistpp__must_not_reenter.pkl", frames=9, fps=30.0)
 
+    large_source_mjcf = large / "meta/bumi3.source.xml"
+    large_source_mjcf.parent.mkdir(parents=True)
+    shutil.copy2(build_tool.CURRENT_MJCF_PATH, large_source_mjcf)
+    hq4_provenance = hq4 / "meta/provenance.json"
+    hq4_provenance.parent.mkdir(parents=True)
+    hq4_provenance.write_text(
+        json.dumps({"target_mjcf_sha256": build_tool.CURRENT_MJCF_SHA256}),
+        encoding="utf-8",
+    )
+    mine_provenance = tmp_path / "hq_all_v2/meta/provenance.json"
+    mine_provenance.parent.mkdir(parents=True)
+    mine_provenance.write_text(
+        json.dumps({"mjcf_sha256": build_tool.CURRENT_MJCF_SHA256}),
+        encoding="utf-8",
+    )
+
     args = argparse.Namespace(
         large_root=large,
         hq4_root=hq4,
@@ -134,3 +152,53 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
         large / "train/robot_filtered/nested/large_train.pkl"
     ).resolve()
     assert smpl_link.resolve() == (large / "train/smpl_filtered/large_train.pkl").resolve()
+
+
+def test_robot_pose_dof_axis_gate_rejects_waist_sign_mismatch(tmp_path: Path) -> None:
+    """关节轴门禁必须拒绝 dof 为正但 waist pose 使用负 Z 轴的数据。"""
+
+    robot_path = tmp_path / "bad_waist_sign.pkl"
+    _write_robot(robot_path, frames=6, fps=50.0)
+    payload = joblib.load(robot_path)
+    payload[robot_path.stem]["dof"][:, 0] = 0.2
+    payload[robot_path.stem]["pose_aa"][:, 1, 2] = -0.2
+    joblib.dump(payload, robot_path)
+    row = build_tool.audit_record(
+        build_tool.SourceRecord(
+            key=robot_path.stem,
+            split="train",
+            source="unit",
+            robot_path=str(robot_path),
+            smpl_path=None,
+            expected_robot_fps=50.0,
+        )
+    )
+    assert row["status"] == "ROBOT_INVALID"
+    assert "关节顺序或轴符号不一致" in row["reason"]
+
+
+def test_pair_time_origin_gate_downgrades_only_smpl(tmp_path: Path) -> None:
+    """同名两侧声明不同时间起点时保留 Robot，并把该 SMPL 降级。"""
+
+    robot_path = tmp_path / "time_mismatch.pkl"
+    smpl_path = tmp_path / "smpl/time_mismatch.pkl"
+    _write_robot(robot_path, frames=6, fps=50.0)
+    _write_smpl(smpl_path, frames=6)
+    robot_payload = joblib.load(robot_path)
+    robot_payload[robot_path.stem]["start_time"] = 0.0
+    joblib.dump(robot_payload, robot_path)
+    smpl_payload = joblib.load(smpl_path)
+    smpl_payload["start_time"] = 0.02
+    joblib.dump(smpl_payload, smpl_path)
+    row = build_tool.audit_record(
+        build_tool.SourceRecord(
+            key=robot_path.stem,
+            split="train",
+            source="unit",
+            robot_path=str(robot_path),
+            smpl_path=str(smpl_path),
+            expected_robot_fps=50.0,
+        )
+    )
+    assert row["status"] == "ROBOT_ONLY_PAIR_TIME_ORIGIN_MISMATCH"
+    assert row["time_origin_delta_smpl_minus_robot_seconds"] == pytest.approx(0.02)
