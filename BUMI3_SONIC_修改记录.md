@@ -1652,3 +1652,37 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
   `15:31:43` 停止，`last.pt` 时间为 `15:31:26`。日志末尾没有 Python traceback，
   dmesg/journal 未检出 OOM、killed process 或 GPU Xid。本 Agent 没有调用 kill、发送
   信号、关闭其 tmux、删除进程或覆盖实验目录；停止原因目前不能从日志确认。
+
+### 10. 增强门禁重建结果与 AppLauncher 启动修正
+
+- 关节/时间门禁提交 `02dd0131e0873d2ffb027f681902e6a6702b1f58` 已推送并在
+  服务器同分支再次 `git pull --ff-only`。同步后服务器新增测试结果为
+  `14 passed in 2.24s`，`py_compile` 通过。
+- 重建前确认没有进程引用新三源索引，将首次由 `851eda7` 生成的目录完整移动到
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1.pre_joint_contract_851eda7`。
+  这是可恢复改名，不是删除；其清单和报告仍保留。随后用增强门禁重新构建用户指定的
+  原目标 `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1`。
+- 增强重建再次审计 `100549/100549` 条并通过；所有真实 Robot 的全帧
+  `pose_aa/dof/current-MJCF-axis` 最大误差均未超过 `1e-6`，否则构建会整体失败。
+  配对状态和首次结果完全一致：train Robot `95332`、paired SMPL `95132`、
+  Robot-only `200`、test paired `5217`。
+- 新 summary/provenance 实际写入：当前 MJCF SHA
+  `02874afb...bfe`、大集归档 MJCF SHA `db4f51fc...c1a4`、hq4 provenance SHA
+  `246464d36e92b41372105ecb7577bada7f47837c822f28d36075b6505ad6ebbc`、Mine
+  provenance SHA
+  `bc8debdb3604164acfeaa8a801438008c86784a8dc3593e339da26b03cca66b6`，以及完整
+  21 关节名称、轴和限位。重建后正式 rehash 又完成 `100549/100549`，输出
+  `BUMI3_THREE_SOURCE_VALIDATE=PASS`。
+- 使用临时锁定参考目录重跑 smoke 后，参考 SHA 门禁已通过，但服务器 pip 版
+  `isaaclab` 顶层包只暴露 `isaaclab.app`，第一次报
+  `ModuleNotFoundError: isaaclab.sim`；手工只加入 core source 后又报
+  `ModuleNotFoundError: isaaclab_contrib`。两次均发生在环境创建前，不能记为 reset/step
+  失败。这也证明用手工拼接单个 PYTHONPATH 不是可靠的训练等价启动方式。
+- `gear_sonic/tools/validate_bumi3_integration.py` 改为使用项目训练入口同款的
+  `isaaclab.app.AppLauncher`，而不是直接构造 `isaacsim.SimulationApp`。AppLauncher
+  负责注册 pip 安装内的 core/contrib/assets 等 source 路径，并注入 physics CUDA
+  device 和 headless kit 参数；验证脚本增加 `--no-window` 且不启用 camera。
+- 本地 `env_isaaclab` 使用 AppLauncher 重新运行完整 integration validation，退出码 0，
+  21 DoF、22 bodies、G1/H2/BUMI3 Hydra 和全部 resolved 网络/频率数值仍通过；输出
+  `smoke: 未请求`。该修改不涉及环境、奖励、训练算法或数据契约，服务器真实 1/16-env
+  smoke 必须等本提交同步后再执行。

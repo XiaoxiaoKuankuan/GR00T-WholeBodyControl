@@ -971,10 +971,21 @@ def main() -> int:
     topology = _validate_xml_and_meshes()
     resolved = _validate_resolved_configs()
 
-    # 必须先启动 SimulationApp，再导入依赖 pxr/PhysX 的 Isaac Lab 配置模块。
-    from isaacsim import SimulationApp
+    # 必须通过 Isaac Lab 官方 AppLauncher 启动应用，再导入依赖 pxr/PhysX 的配置模块。
+    # 直接实例化 SimulationApp 会绕过 pip 版 IsaacLab 的 source 路径注册，并且不会
+    # 注入训练入口所用的 physics CUDA device 参数，服务器与实际训练环境会因此不一致。
+    from isaaclab.app import AppLauncher
 
-    simulation_app = SimulationApp({"headless": True})
+    app_launcher = AppLauncher(
+        headless=True,
+        device=args.device,
+        enable_cameras=False,
+        kit_args=(
+            "--/log/level=error --/log/fileLogLevel=error "
+            "--/log/outputStreamLevel=error --no-window"
+        ),
+    )
+    simulation_app = app_launcher.app
     try:
         mappings = _validate_runtime_robot_config(simulation_app)
         if args.smoke:
