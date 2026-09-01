@@ -1738,3 +1738,132 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
 - 该修正必须再次重建目标索引并重新运行 16-env 100-step；在看到实际退出码 0 前，
   本记录不会把 16-env 写成通过。1-env 的既有通过证据仍有效，因为它随机选中的配对
   没有触发 metadata/FK 长度差。
+
+### 13. 最终三源索引重建、元数据和哈希门禁
+
+- 有效长度修正提交 `ab5dc9db0d346f5f284067e9acd8cc51980f0b71` 已推送 GitHub，
+  `noetix-volc` 在同一 `feature/bumi-native-sonic-full-training` 分支执行普通
+  `git pull --ff-only` 后，本地、GitHub 和服务器 HEAD 完全一致，服务器工作区干净。
+- 最终重建前确认没有构建、验证或训练进程引用目标索引。上一版目录没有删除，而是完整
+  改名保留为
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1.pre_aligned_metadata_86faf55`；
+  另外两次历史重建也分别保存在 `.pre_joint_contract_851eda7` 和
+  `.pre_metadata_02dd013`，需要回滚时仍可核对原报告。
+- 最终 build 在 tmux `bumi3_three_source_final_build` 中完成 `100549/100549` 条全量
+  数值审计并原子发布。正式路径仍为
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1`，日志为
+  `/data/sonic_bumi3/build_logs/bumi3_three_source_final_build_ab5dc9d.log`。
+- 最终计数为 train Robot `95332`、train paired SMPL `95132`、Robot-only `200`、
+  test Robot/SMPL 配对 `5217`。Robot-only 中 `101` 条原本就没有 SMPL，另 `99` 条
+  是 Robot 合格但 SMPL 坐标配对中位角超过 45 度；没有丢弃这些 Robot 动作。
+- `61346` 条合法配对存在末尾网格差，其中 SMPL 相对 Robot 少 1 帧为 `53569` 条、
+  少 2 帧为 `7777` 条。逐条读取 `train_manifest.jsonl` 和 `metadata.pkl` 后确认：
+  所有 PAIRED metadata `length` 均等于 `aligned_source_frames=min(robot, smpl)`；
+  所有 Robot-only metadata 仍等于完整 Robot 帧数，输出 `metadata_alignment=PASS`。
+- 独立 tmux `bumi3_three_source_final_hash` 再次调用不带跳过参数的正式 `validate`，
+  重新读取并计算 `100549/100549` 条 manifest 源文件 SHA256，输出
+  `BUMI3_THREE_SOURCE_VALIDATE=PASS`。日志为
+  `/data/sonic_bumi3/build_logs/bumi3_three_source_final_hash_ab5dc9d.log`。
+- 最终来源自然采样概率仍为：大集 `0.96969538035497`、hq4 PASS50
+  `0.029266143582427726`、Mine Robot-only `0.0010384760626022743`；代码没有增加
+  来源权重，也没有把旧 `hq_all_v2` 四库动作再次加入训练。
+
+### 14. 16 环境和八卡 100 轮真实运行结果
+
+- 服务器使用仓库训练同款 `isaaclab.app.AppLauncher` 执行 16-env、100-step：
+
+```bash
+BUMI3_REFERENCE_ROOT=/tmp/bumi3_reference_02dd013 \
+/root/miniconda3/envs/liwei_lab/bin/python \
+  gear_sonic/tools/validate_bumi3_integration.py \
+  --smoke \
+  --motion-file /data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1/train/robot_all \
+  --smpl-motion-file /data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1/train/smpl_all \
+  --num-envs 16 --iterations 100 --device cuda:0
+```
+
+  实际完成场景、MotionLib、reset 和 100 次 step，输出 `smoke: 通过`；验证器递归检查
+  observation、action 和 reward 均无 NaN/Inf。日志为
+  `/data/sonic_bumi3/build_logs/bumi3_three_source_smoke16_ab5dc9d.log`。
+- 16-env resolved 实测：URDF/MJCF 为 `21 DoF/22 bodies`，`sim_dt=0.005`、
+  `decimation=4`、控制频率 `50 Hz`、`target_fps=50`、`action_dim=21`、FSQ 总维度
+  `64`、actor proprioception `690`、tokenizer flat `1262`、critic observation
+  `1245`、dynamic decoder `754 -> 21`；Isaac/MuJoCo 双向关节和 body mapping 门禁通过。
+- GPU 空闲后，在独立 tmux `sonic_bumi3_three_source_smoke_8gpu` 执行生产规模
+  `8 rank x 4096 env/rank`、从随机初始化开始的 100-iteration smoke；命令没有使用
+  checkpoint、resume 或正式训练目录。8 个 rank 都打印 `Loaded 95332 motions` 并完成
+  environment setup，最终 tmux pane `dead_status=0`，保存了 `last.pt`。
+- 八卡 smoke 累计 `78,643,200` timesteps、`3,276,800` episodes，总耗时
+  `362.55 s`；首轮/末轮吞吐分别为 `159254/218651 steps/s`，运行中 8 卡显存约
+  `15.7--16.6 GiB`、利用率通常约 `87%--89%`。完整日志未发现 traceback、
+  AssertionError、RuntimeError、CUDA OOM、NCCL 或 NaN。
+- smoke 实验主目录为
+  `/data/sonic_bumi3/smoke_runs/TRL_BUMI3_Track/manager/universal_token/all_modes/`
+  `sonic_bumi3_three_source_smoke_100iter_ab5dc9d-20260901_162058`；`last.pt` 大小约
+  391 MB，TensorBoard event 含 `122` 个 scalar tags，100 个 step 的所有 scalar 均有限。
+- TensorBoard 首轮到末轮：reward `0.918509 -> 0.905722`、episode length
+  `14.69625 -> 14.23250`、value loss `0.149846 -> 0.022008`；三项 auxiliary loss tag
+  都真实存在。末轮 termination 分量为 anchor-pos `0.000203`、anchor-ori
+  `0.363922`、双肘 ee-body-pos `0.216858`、双脚 foot-pos `0.494853`、timeout
+  `0.002024`。100 轮只证明端到端计算和数值稳定，不能据此宣称策略已收敛。
+- resolved `config.yaml` 现场解析确认：anchor 是 `waist_yaw_link`；encoder keys 仅
+  `g1/smpl`；tokenizer 数据项仅 `encoder_index`、Robot 两项和 SMPL 两项；aux loss
+  仅 `g1_recon/g1_smpl_latent/reencoded_smpl_g1_latent`；
+  `wrist_mujoco_dof_indices=[]`。活动配置中不存在 Teleop encoder、Teleop tokenizer、
+  Teleop auxiliary loss 或 G1 腕部索引 `[19,20,21,26,27,28]`。
+- 服务器无 X Server 时仍打印既有 Vulkan/GPU Foundation renderer 错误，但随后各 rank
+  都完成 headless PhysX、MotionLib、网络、DDP 和 PPO 100 轮并以 0 退出；因此这些日志
+  记录为无窗口渲染噪声，不伪装成已修复，也不把它们误判为训练失败。
+
+### 15. 正式八卡训练与 TensorBoard 命令
+
+- smoke 发现各 rank 若分别解析 `${timestamp}`，秒边界可能生成两个候选目录；DDP 计算
+  不受影响，但正式任务必须显式给出同一个 `experiment_dir`，保证 checkpoint、Hydra
+  配置和 TensorBoard 只落入一个目录。下面命令先在当前 shell 生成一次唯一目录，再把
+  该固定字符串传给所有 rank：
+
+```bash
+cd /home/liwei/GR00T-WholeBodyControl
+BUMI3_RUN_ID="$(date +%Y%m%d_%H%M%S)"
+BUMI3_EXP_DIR="/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_three_source_scratch_100k-${BUMI3_RUN_ID}"
+BUMI3_LOG="/data/sonic_bumi3/launch_logs/sonic_bumi3_three_source_scratch_100k-${BUMI3_RUN_ID}.log"
+mkdir -p /data/sonic_bumi3/launch_logs
+
+tmux new-session -d -s sonic_bumi3_three_source_8gpu \
+  "/root/miniconda3/envs/liwei_lab/bin/accelerate launch --num_processes=8 \
+    gear_sonic/train_agent_trl.py \
+    +exp=manager/universal_token/all_modes/sonic_bumi3 \
+    +resume=false checkpoint=null auto_load_latest=false \
+    use_wandb=false headless=True num_envs=4096 \
+    base_dir=/data/sonic_bumi3/runs \
+    exp_var=three_source_scratch_100k \
+    experiment_dir=${BUMI3_EXP_DIR} \
+    algo.config.num_learning_iterations=100000 \
+    ++manager_env.commands.motion.motion_lib_cfg.motion_file=/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1/train/robot_all \
+    ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1/train/smpl_all \
+    ++manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys=[] \
+    2>&1 | tee ${BUMI3_LOG}"
+```
+
+- 查看训练 tmux：
+  `ssh noetix-volc -t 'tmux attach -t sonic_bumi3_three_source_8gpu'`；脱离会话使用
+  `Ctrl-b` 后按 `d`。本轮只运行了独立 100 轮 smoke，没有替用户启动 100000 轮正式长训练。
+- 正式训练启动后，可另建 TensorBoard tmux（6017 避开现有 6006/6016）：
+
+```bash
+tmux new-session -d -s tensorboard_bumi3_three_source \
+  "/root/miniconda3/envs/liwei_lab/bin/tensorboard \
+    --logdir /data/sonic_bumi3/runs/TRL_BUMI3_Track \
+    --host 127.0.0.1 --port 6017"
+```
+
+  本地建立隧道：`ssh -N -L 6017:127.0.0.1:6017 noetix-volc`，浏览器访问
+  `http://127.0.0.1:6017/`。
+- 回滚边界：代码可按本轮提交逐项反向提交；数据索引是软链接和元数据，只有确认没有训练
+  使用时才可把当前目录改名并恢复某个 `.pre_*` 备份。三个源数据、现有 hq4 历史实验、
+  本轮 smoke checkpoint 和日志均未删除或覆盖。
+- 最终交付前，本地 `env_isaaclab` 再次运行六组相关 pytest，结果为
+  `38 passed in 3.92s`，仅保留一条已有 invalid escape sequence DeprecationWarning；
+  `python -m compileall -q gear_sonic`、BUMI3/G1/H2 完整 Hydra/资产/网络静态集成门禁和
+  `git diff --check` 均通过。集成门禁输出仍为 `smoke: 未请求`，这是本地命令没有传真实
+  服务器数据的准确说明；真实 1/16-env 和八卡 smoke 证据以上述服务器日志为准。
