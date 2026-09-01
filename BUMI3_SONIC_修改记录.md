@@ -1686,3 +1686,28 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
   21 DoF、22 bodies、G1/H2/BUMI3 Hydra 和全部 resolved 网络/频率数值仍通过；输出
   `smoke: 未请求`。该修改不涉及环境、奖励、训练算法或数据契约，服务器真实 1/16-env
   smoke 必须等本提交同步后再执行。
+
+### 11. 为近十万动作补充 MotionLib 启动元数据
+
+- AppLauncher 修复提交 `ef90ad488d41ce1d428186e10778ae339e879e0a` 已推送并在
+  服务器快进同步。真实 1-env smoke 随后成功创建场景、启动仿真，MotionLib 识别到
+  `95332` 条动作，说明 AppLauncher、IsaacLab 模块、BUMI3 场景和三源目录均已打通。
+- 该 smoke 没有继续到 reset/step：启用 adaptive sampling 时，MotionLib 要为全库建立
+  稳定 bin，但新软链接目录没有 `metadata.pkl`，因此 `init_adaptive_sampling` 退化为
+  逐条打开全部 95332 个 Robot PKL 读取 `length/fps`。进程在约 80 秒时仍以 200% 以上
+  CPU 执行文件扫描；这不是死锁或数据错误，但 8 卡正式训练会让每个 rank 重复扫描，
+  启动延迟和磁盘压力不可接受。
+- 本 Agent 只向自己创建的 tmux `bumi3_three_source_smoke1_final` 发送 Ctrl-C，停止该次
+  未完成 smoke；没有影响用户训练进程。shell 因 Isaac Sim 的信号处理最终记录
+  `SMOKE_EXIT=0`，但本记录明确不把它当作 reset/step 通过证据。
+- `build_bumi3_three_source_dataset.py` 现在根据已经全量审计的 manifest，在 train/test
+  各自 `robot_all/metadata.pkl` 写入最小 `{key: {length, fps}}`。该文件只缓存整数帧数和
+  浮点帧率，不包含动作数组、不复制源文件、不改变采样权重，也不改变任何源 PKL SHA。
+- `validate_index` 新增 metadata 顶层类型、完整 key 集、逐动作 length/fps 与 manifest
+  一致性检查；Robot 软链接计数显式排除 `metadata.pkl`，防止把元数据误算成动作。
+  provenance 增加 `motionlib_metadata=generated_length_and_fps_only`。
+- 缩小版构建测试新增 train metadata 精确内容断言。相关六组本地回归仍为
+  `38 passed in 3.88s`，`compileall -q gear_sonic` 与 `git diff --check` 通过。
+- 该修正需要再次生成目标索引后才能生效；仍采用“完整移动旧索引为可恢复备份，再构建
+  原目标路径”的方式，不会删除已有报告或源数据。完成后的真实 smoke 必须看到
+  MotionLib 从 metadata 获取全库长度，再实际完成 reset/step 才能记为通过。

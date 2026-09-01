@@ -790,6 +790,22 @@ def _publish_index(
                 staging / "meta" / f"{split}_manifest.jsonl",
                 [row for row in published_rows if row["split"] == split],
             )
+            # Adaptive sampling 初始化需要所有动作的帧数和帧率。若目录缺少 metadata.pkl，
+            # 每个训练进程都会逐个打开近十万条源 PKL；这里从已审计结果生成最小索引，
+            # 只缓存 length/fps，不复制或改写任何动作数组。
+            motionlib_metadata = {
+                row["key"]: {
+                    "length": int(row["robot_frames"]),
+                    "fps": float(row["robot_fps"]),
+                }
+                for row in published_rows
+                if row["split"] == split
+            }
+            joblib.dump(
+                motionlib_metadata,
+                staging / split / "robot_all/metadata.pkl",
+                compress=0,
+            )
         _write_json(staging / "meta/summary.json", summary)
         provenance = {
             "contract_version": CONTRACT_VERSION,
@@ -815,6 +831,7 @@ def _publish_index(
                 "runtime_root_conversion": "Y-up_to_Z-up_once_then_remove_smpl_base_rotation",
             },
             "sampling": "uniform_per_motion_natural_source_ratio",
+            "motionlib_metadata": "generated_length_and_fps_only",
         }
         _write_json(staging / "meta/provenance.json", provenance)
         validate_index(staging, workers=args.workers, verify_hashes=False)
@@ -872,6 +889,22 @@ def validate_index(output_root: Path, workers: int, verify_hashes: bool) -> dict
     if set(train_keys) & set(test_keys):
         raise ValueError("manifest train/test 存在 key 交叉")
 
+    for split, rows in (("train", train_rows), ("test", test_rows)):
+        metadata_path = output_root / split / "robot_all/metadata.pkl"
+        metadata = joblib.load(metadata_path)
+        if not isinstance(metadata, dict) or set(metadata) != {row["key"] for row in rows}:
+            raise ValueError(f"{split} MotionLib metadata key 与 manifest 不一致")
+        for row in rows:
+            entry = metadata[row["key"]]
+            expected = {
+                "length": int(row["robot_frames"]),
+                "fps": float(row["robot_fps"]),
+            }
+            if entry != expected:
+                raise ValueError(
+                    f"{split}/{row['key']} MotionLib metadata 错误: {entry} != {expected}"
+                )
+
     for row in all_rows:
         robot_link = output_root / row["robot_link"]
         if not robot_link.is_symlink() or robot_link.resolve() != Path(row["robot_path"]).resolve():
@@ -885,9 +918,21 @@ def validate_index(output_root: Path, workers: int, verify_hashes: bool) -> dict
         elif row.get("smpl_link") is not None:
             raise ValueError(f"{row['key']} Robot-only 条目不应发布 SMPL 链接")
 
-    actual_train_robot = len(list((output_root / "train/robot_all").glob("*.pkl")))
+    actual_train_robot = len(
+        [
+            path
+            for path in (output_root / "train/robot_all").glob("*.pkl")
+            if path.name != "metadata.pkl"
+        ]
+    )
     actual_train_smpl = len(list((output_root / "train/smpl_all").glob("*.pkl")))
-    actual_test_robot = len(list((output_root / "test/robot_all").glob("*.pkl")))
+    actual_test_robot = len(
+        [
+            path
+            for path in (output_root / "test/robot_all").glob("*.pkl")
+            if path.name != "metadata.pkl"
+        ]
+    )
     actual_test_smpl = len(list((output_root / "test/smpl_all").glob("*.pkl")))
     actual_counts = {
         "train_robot_count": actual_train_robot,

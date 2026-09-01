@@ -136,6 +136,13 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
         "large_train": 0.25,
         "mine_robot_only": 0.25,
     }
+    train_metadata = joblib.load(output / "train/robot_all/metadata.pkl")
+    assert train_metadata == {
+        "hq4__paired": {"length": 6, "fps": 50.0},
+        "hq4__robot_only": {"length": 6, "fps": 50.0},
+        "large_train": {"length": 10, "fps": 50.0},
+        "mine__self": {"length": 9, "fps": 30.0},
+    }
 
     train_rows = {row["key"]: row for row in _read_jsonl(output / "meta/train_manifest.jsonl")}
     assert train_rows["large_train"]["status"] == "PAIRED"
