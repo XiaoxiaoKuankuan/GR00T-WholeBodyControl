@@ -639,7 +639,15 @@ def audit_record(record: SourceRecord) -> dict[str, Any]:
             }
         )
         return row
-    row.update({"status": "PAIRED", "reason": None})
+    row.update(
+        {
+            "status": "PAIRED",
+            "reason": None,
+            "aligned_source_frames": min(
+                int(row["robot_frames"]), int(row["smpl_frames"])
+            ),
+        }
+    )
     return row
 
 
@@ -795,7 +803,11 @@ def _publish_index(
             # 只缓存 length/fps，不复制或改写任何动作数组。
             motionlib_metadata = {
                 row["key"]: {
-                    "length": int(row["robot_frames"]),
+                    # 配对动作的 FK 会按 trim_trailing 使用共同短长度；Robot-only
+                    # 不读取 SMPL，必须保留完整 Robot 长度，二者不能混为一谈。
+                    "length": int(
+                        row.get("aligned_source_frames", row["robot_frames"])
+                    ),
                     "fps": float(row["robot_fps"]),
                 }
                 for row in published_rows
@@ -897,7 +909,7 @@ def validate_index(output_root: Path, workers: int, verify_hashes: bool) -> dict
         for row in rows:
             entry = metadata[row["key"]]
             expected = {
-                "length": int(row["robot_frames"]),
+                "length": int(row.get("aligned_source_frames", row["robot_frames"])),
                 "fps": float(row["robot_fps"]),
             }
             if entry != expected:

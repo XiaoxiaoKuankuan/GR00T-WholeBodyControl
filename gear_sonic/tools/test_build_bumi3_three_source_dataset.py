@@ -140,13 +140,14 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     assert train_metadata == {
         "hq4__paired": {"length": 6, "fps": 50.0},
         "hq4__robot_only": {"length": 6, "fps": 50.0},
-        "large_train": {"length": 10, "fps": 50.0},
+        "large_train": {"length": 8, "fps": 50.0},
         "mine__self": {"length": 9, "fps": 30.0},
     }
 
     train_rows = {row["key"]: row for row in _read_jsonl(output / "meta/train_manifest.jsonl")}
     assert train_rows["large_train"]["status"] == "PAIRED"
     assert train_rows["large_train"]["frame_delta_smpl_minus_robot"] == -2
+    assert train_rows["large_train"]["aligned_source_frames"] == 8
     assert train_rows["hq4__robot_only"]["status"] == "ROBOT_ONLY_NO_SMPL"
     assert train_rows["mine__self"]["status"] == "ROBOT_ONLY_NO_SMPL"
     assert "aistpp__must_not_reenter" not in train_rows

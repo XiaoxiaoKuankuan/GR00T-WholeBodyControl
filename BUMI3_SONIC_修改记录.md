@@ -1711,3 +1711,30 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
 - 该修正需要再次生成目标索引后才能生效；仍采用“完整移动旧索引为可恢复备份，再构建
   原目标路径”的方式，不会删除已有报告或源数据。完成后的真实 smoke 必须看到
   MotionLib 从 metadata 获取全库长度，再实际完成 reset/step 才能记为通过。
+
+### 12. 修正配对尾帧裁剪后的 adaptive sampling 有效长度
+
+- metadata 提交 `86faf55f2f4b59bef17f82a7d136944d48aaca36` 已推送并同步服务器。
+  重建前把上一版增强索引完整移动到可恢复目录
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1.pre_metadata_02dd013`，随后
+  重新构建目标路径。train/test metadata 大小约为 5.1 MB/279 KB，配对计数保持
+  `95332/95132/200/5217` 不变，正式第二遍 SHA 再次完成 `100549/100549` 并通过。
+- 带 metadata 的 1-env smoke 退出码为 0，明确输出 `smoke: 通过`：完成场景创建、
+  MotionLib 全库索引、1 条动作加载、环境 setup、reset 和 1 次 step；验证器递归检查
+  observation/action/reward 没有 NaN/Inf。该轮加载日志从 `Loaded 95332 motions` 到
+  `Loading motions with 1 jobs` 不再出现近十万次源 PKL 文件扫描。
+- 16-env、100-step smoke 随机选中 `walk_ff_stop_180_R_002__A047` 后，在 manager
+  初始化阶段 fail-fast：`Adaptive sampling frame count mismatch`，具体为
+  `adp_samp=375, loaded=374`。该条是允许的一帧尾差配对；FK 按
+  `trim_trailing` 使用共同 374 帧，而初版 metadata 错误写入 Robot 原始 375 帧。
+  因此该失败准确定位在 curriculum 长度缓存，不是 NaN、坐标错误或 PhysX 摔倒。
+- `build_bumi3_three_source_dataset.py` 对通过配对新增 `aligned_source_frames`，值为
+  `min(robot_frames, smpl_frames)`；MotionLib metadata 中 PAIRED 使用该有效长度。
+  所有 Robot-only 条目继续使用完整 Robot 帧数，尤其不能让缺失、错坐标或被降级的
+  SMPL 缩短仍可训练的 Robot 数据。
+- 构建测试把两帧尾差合成配对的 metadata 期望从 Robot 原始 10 改为共同 8，并锁定
+  manifest 的 `aligned_source_frames=8`。修正后相关测试 `38 passed in 3.90s`，
+  compileall 和 `git diff --check` 通过。
+- 该修正必须再次重建目标索引并重新运行 16-env 100-step；在看到实际退出码 0 前，
+  本记录不会把 16-env 写成通过。1-env 的既有通过证据仍有效，因为它随机选中的配对
+  没有触发 metadata/FK 长度差。
