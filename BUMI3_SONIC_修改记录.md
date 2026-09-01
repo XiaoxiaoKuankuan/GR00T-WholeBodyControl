@@ -1415,3 +1415,46 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
 - 本次只完成代码 Git 同步，没有停止、重启或恢复服务器上已运行的训练进程。
   旧进程已加载的 Python 模块不会因工作树 `git pull` 自动替换；如要让新的
   `waist_yaw_link` 训练锚点生效，仍需用新代码从头启动新训练。
+
+## 2026-09-01：修复 noetix-volc 的 Git 目录信任并统一分支跟踪
+
+### 1. 问题含义和根因
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `5d97f452751fbe5645929af9bb57e7b92e6a00bf`；本地工作区干净，与上游 ahead `0`、behind `0`。
+- “服务器仓库非 root 用户所有”并不表示没有关联 GitHub。服务器目录
+  `/home/liwei/GR00T-WholeBodyControl` 的顶层所有者是数值 UID/GID `14000032`，
+  当前系统没有该 UID 的用户名映射，因此 `stat` 显示 `owner=UNKNOWN`；`.git` 目录本身
+  属于 root。root 访问顶层所有者不同的仓库时，Git 按安全策略报
+  `detected dubious ownership`。
+- 服务器在修复前已存在正确 GitHub 远端：`origin` 的 fetch/push URL 均为
+  `git@github.com:XiaoxiaoKuankuan/GR00T-WholeBodyControl.git`；服务器并非未关联仓库。
+
+### 2. 实际修复和分支统一
+
+- 在服务器 root 的全局 Git 配置中精确新增：
+  `safe.directory=/home/liwei/GR00T-WholeBodyControl`。没有设置通配符，没有把其他目录
+  加入信任范围，也没有 chown 整个仓库。修复后 root 可以直接运行普通 `git` 命令，
+  不再需要每次传入 `-c safe.directory=...`。
+- 本地和服务器均显式执行了
+  `git branch --set-upstream-to=origin/feature/bumi-native-sonic-full-training
+  feature/bumi-native-sonic-full-training`。两端当前分支、upstream 和 GitHub ref 现在一致：
+  - 当前分支：`feature/bumi-native-sonic-full-training`；
+  - upstream：`origin/feature/bumi-native-sonic-full-training`；
+  - 本地、GitHub、服务器核对时 HEAD：
+    `5d97f452751fbe5645929af9bb57e7b92e6a00bf`；
+  - 两端 ahead/behind：`0/0`；
+  - 两端 `git status --short`：无输出。
+
+### 3. 端到端验证和影响边界
+
+- 本地实际执行普通 `git push --dry-run`，结果为 `Everything up-to-date`，证明当前本地
+  分支可以通过 `origin` SSH URL 访问 GitHub 并使用正确的默认推送目标。
+- 服务器在不传 `-c safe.directory`、不指定远端和分支的情况下，实际执行普通
+  `git pull --ff-only`，结果为 `Already up to date.`，证明 root 目录信任、GitHub SSH
+  访问、origin 和 upstream 全部有效。
+- 本轮修改的是服务器 root Git 配置、两端分支跟踪关系和本记录；没有修改
+  SONIC 源码、训练配置、数据、checkpoint 或运行中的训练进程，因此代码单元测试和仿真
+  不适用。
+- 回滚服务器信任配置时，只需精确删除 root Git config 中这一条
+  `safe.directory=/home/liwei/GR00T-WholeBodyControl`；但删除后 root 会再次遇到 ownership 安全拦截。
