@@ -1388,3 +1388,30 @@ BUMI3 Isaac Lab DoF 顺序来自参考 `bumi.py:joint_names`：
 - 当前累积 BUMI3 原生 SONIC、数据准备、训练坐标校验、sim2sim、waist 锚点修正、
   规则与详细记录将逐文件暂存，使用详细中文提交并推送 GitHub；实际 commit SHA、
   push 结果、服务器重复改动处置和 `git pull --ff-only` 证据将在操作完成后另行补录。
+
+### 5. 实际提交、GitHub 推送和服务器快进结果
+
+- 本地逐文件暂存了 21 个已核对的源码、配置、URDF、测试和 Markdown 文件；
+  没有暂存 checkpoint、ONNX、PKL、NPZ、CSV、视频、日志、缓存或训练输出。
+  `git diff --cached --check` 通过，staged stat 为 `21 files changed, 5864 insertions(+),
+  64 deletions(-)`。
+- 主提交 SHA 为 `c287ac97808dfe0511ed00b875e6fbcfc3313499`，中文标题为
+  `feat: 完成 BUMI3 原生 SONIC 训练与 sim2sim 闭环`。提交正文详细记录了数据、训练、
+  sim2sim、waist 锚点、兼容边界、实际验证和未执行 1-env smoke 的原因。
+- `git push origin feature/bumi-native-sonic-full-training` 成功，GitHub 远端由
+  `b1c3606` 快进到 `c287ac9`，没有 force push 或历史改写。
+- GitHub 推送后，服务器执行 `git fetch` 并确认目标 ref 精确为
+  `c287ac97808dfe0511ed00b875e6fbcfc3313499`。10 个重复代码/配置/测试文件再次与
+  目标 commit 逐字节 SHA256 一致，服务器记录再次通过目标记录严格前缀检查。
+- 为使三个已被目标 commit 完整包含的未跟踪数据工具可恢复，先将它们移动到
+  `/tmp/bumi3_git_sync_backup.FqkxYc`；已跟踪重复改动只在确认目标 commit 已保存同样内容后
+  恢复到旧 HEAD，随后执行非破坏性快进拉取。拉取后三个新文件与备份逐字节
+  `cmp` 通过，因此没有丢失服务器内容。
+- 服务器实际执行
+  `git -c safe.directory=/home/liwei/GR00T-WholeBodyControl pull --ff-only origin
+  feature/bumi-native-sonic-full-training`，结果为 `Updating b1c3606..c287ac9` 和
+  `Fast-forward`。执行后分支正确、HEAD 为 `c287ac9`、`git status --short` 无输出，
+  `SYNC_VERIFY=PASS`。
+- 本次只完成代码 Git 同步，没有停止、重启或恢复服务器上已运行的训练进程。
+  旧进程已加载的 Python 模块不会因工作树 `git pull` 自动替换；如要让新的
+  `waist_yaw_link` 训练锚点生效，仍需用新代码从头启动新训练。
