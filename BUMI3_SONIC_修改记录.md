@@ -2172,3 +2172,34 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `95222`、test Robot/SMPL `5217/5217`，说明旧数据和 checkpoint 清理没有造成当前索引
   断链。额外启动的逐软链接只读扫描因耗时超过终端等待窗口而被精确终止，没有遗留测试
   进程，也没有修改任何数据。
+
+### 9. 启动 base-anchor v2 正式八卡训练
+
+- 正式训练启动时分支为 `feature/bumi-native-sonic-full-training`，本地、GitHub 与服务器
+  SONIC 仓库 HEAD 均为 `031286ff20f10299a46dd6a8d54dbc683d08396f`，工作区干净。
+  服务器没有旧 trainer 或 tmux，会前 8 张 RTX 4090 D 显存均只占约 `2 MiB`、利用率为
+  `0%`，`/data` 约有 `2 TiB` 可用空间；`liwei_lab` 中的 PyTorch `2.7.0+cu126` 能识别
+  8 张 CUDA GPU。
+- 启动前使用刚完成的全量门禁结果：当前 v2 索引 `100575/100575` 个源文件 SHA256 通过，
+  train Robot `95358`、paired SMPL `95222`。正式命令只读取
+  `bumi3_sonic_three_source_base_anchor_v2/train/{robot_all,smpl_all}`，不读取
+  `legged_lab`、旧三源索引或旧 checkpoint。
+- 训练 tmux 为 `sonic_bumi3_base_anchor_v2_8gpu`，正式实验目录为
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_base_anchor_v2_scratch_100k-20260902_164548`，启动日志为
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_base_anchor_v2_scratch_100k-20260902_164548.log`。
+  命令显式设置 `resume=false`、`checkpoint=null`、`auto_load_latest=false`、
+  `num_learning_iterations=100000`、`num_envs=4096` 和单节点 8 个 accelerate rank，属于
+  从头正式训练，不会自动接续任何旧模型。
+- 8/8 个 rank 均完成 4096 环境搭建并进入真实 PPO。首次交付监控时 TensorBoard 已写入
+  `122` 个 scalar；iteration `29`、累计 `22806528` timesteps、吞吐约
+  `272405 steps/s`、mean reward 约 `1.0892`、mean episode length 约 `17.135`。8 张 GPU
+  显存约 `15.9--16.7 GiB`、利用率约 `87%--89%`，Traceback/OOM/NCCL/NaN 扫描为 0。
+  前 29 轮 termination 仍以 `anchor_ori_full≈0.5723` 和
+  `foot_pos_xyz≈0.4841` 为主；这是从零训练的极早期观测，只证明日志链路有效，不能提前
+  宣称策略已经收敛或 sim2sim 已通过。
+- TensorBoard 正式会话为 `tensorboard_bumi3_base_anchor_v2`，服务只监听服务器本机
+  `127.0.0.1:6017`；event 文件已生成并持续增长。该训练和 TensorBoard 均为用户要求保留
+  的正式任务，不属于一次性 smoke，因此不会按测试产物规则删除。首个模型将在默认
+  `save_interval=500` 到达后写入同一正式实验目录；记录本节时尚未到 500 轮，不能把尚未
+  生成的 checkpoint 描述为已保存。
