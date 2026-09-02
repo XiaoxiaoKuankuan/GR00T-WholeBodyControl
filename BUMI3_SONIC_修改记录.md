@@ -2201,5 +2201,7 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - TensorBoard 正式会话为 `tensorboard_bumi3_base_anchor_v2`，服务只监听服务器本机
   `127.0.0.1:6017`；event 文件已生成并持续增长。该训练和 TensorBoard 均为用户要求保留
   的正式任务，不属于一次性 smoke，因此不会按测试产物规则删除。首个模型将在默认
-  `save_interval=500` 到达后写入同一正式实验目录；记录本节时尚未到 500 轮，不能把尚未
-  生成的 checkpoint 描述为已保存。
+  `save_last_frequency=50` 到达后写入并持续覆盖同一正式实验目录中的 `last.pt`；编号
+  `model_step_*.pt` 则按 `save_interval=500` 保存。后续复核到 iteration `71` 时，约
+  `391 MB` 的首个 `last.pt` 已实际存在，但尚未到第一个编号 checkpoint，不能把两类
+  保存频率混为一谈。
