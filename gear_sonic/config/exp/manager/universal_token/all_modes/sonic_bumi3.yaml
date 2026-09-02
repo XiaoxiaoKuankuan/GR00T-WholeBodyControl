@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # BUMI3 原生 SONIC 训练入口。该配置继承发布版 SONIC 的仿真、奖励、事件、
 # termination、PPO、critic 与 trainer，只替换机器人和名称契约，并选择不含
-# Teleop 的 Robot+SMPL 双编码器配置。训练 motion/SMPL 路径必须由 CLI 显式提供，
-# 避免把 G1 数据误用于 21 DoF BUMI3。
+# Teleop 的 Robot+SMPL 双编码器配置。BUMI3 的跟踪锚点统一为浮动根
+# ``base_link``。当前只保留 ``base_link`` 的 COM 随机化，质量、KP/KD、踝关节
+# armature 随机化以及执行器 0～4 个 physics step 的随机延迟均先关闭。训练
+# motion/SMPL 路径必须由 CLI 显式提供，避免把 G1 数据误用于 21 DoF BUMI3。
 
 defaults:
   - /algo: ppo_im_phc
@@ -60,62 +62,32 @@ manager_env:
         body_names:
           - "l_elbow_pitch_link"
           - "r_elbow_pitch_link"
-          - "waist_yaw_link"
+          - "base_link"
 
   events:
+    # 锚点改为浮动根后，保留的 COM 扰动也统一落在 base_link。其余三类新增
+    # 动力学随机化先关闭，避免与无延迟执行器调整同时引入额外训练变量。
     base_com:
       params:
         asset_cfg:
-          body_names: "waist_yaw_link"
-    randomize_rigid_body_mass:
-      params:
-        asset_cfg:
-          body_names: "waist_yaw_link|l_elbow_pitch_link|r_elbow_pitch_link"
-        mass_distribution_params: [0.8, 1.2]
-    randomize_ankle_armature:
-      _target_: isaaclab.managers.EventTermCfg
-      func: gear_sonic.envs.manager_env.mdp:randomize_joint_parameters
-      mode: "reset"
-      params:
-        asset_cfg:
-          _target_: isaaclab.managers.SceneEntityCfg
-          name: "robot"
-          joint_names: [".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
-        armature_distribution_params: [0.9, 1.1]
-        operation: "scale"
-    randomize_actuator_gains:
-      _target_: isaaclab.managers.EventTermCfg
-      func: gear_sonic.envs.manager_env.mdp:randomize_actuator_gains
-      mode: "reset"
-      params:
-        asset_cfg:
-          _target_: isaaclab.managers.SceneEntityCfg
-          name: "robot"
-          joint_names: [".*"]
-        stiffness_distribution_params: [0.8, 1.2]
-        damping_distribution_params: [0.8, 1.2]
-        operation: "scale"
+          body_names: "base_link"
+    randomize_rigid_body_mass: null
+    randomize_ankle_armature: null
+    randomize_actuator_gains: null
 
   terminations:
     foot_pos_xyz:
       params:
-        # 与 SONIC/G1 基础阈值一致；公开数据修正后仍允许策略在早期纠正脚部误差。
-        threshold: 0.20
+        # threshold 不在 BUMI3 重复覆盖，直接继承 G1 基线 0.20 m。
         body_names:
           - "l_ankle_roll_link"
           - "r_ankle_roll_link"
-    anchor_pos:
-      params:
-        threshold: 0.12
     ee_body_pos:
       params:
-        threshold: 0.12
+        # threshold 直接继承 G1 基线 0.15 m，只替换 BUMI3 双肘名称。
         body_names:
           - "l_elbow_pitch_link"
           - "r_elbow_pitch_link"
-    anchor_ori_full:
-      params:
-        threshold: 0.20
 
   config:
     robot:
@@ -124,7 +96,7 @@ manager_env:
 
   commands:
     motion:
-      anchor_body: "waist_yaw_link"
+      anchor_body: "base_link"
       body_names:
         [
           "base_link",
@@ -144,27 +116,23 @@ manager_env:
         ]
       reward_point_body:
         [
-          "waist_yaw_link",
+          "base_link",
           "l_elbow_pitch_link",
           "r_elbow_pitch_link",
-          "l_ankle_roll_link",
-          "r_ankle_roll_link",
         ]
       reward_point_body_offset:
         [
-          [0.0010007, 0.0, 0.17204],
-          [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
         ]
       vr_3point_body:
-        ["l_elbow_pitch_link", "r_elbow_pitch_link", "waist_yaw_link"]
+        ["l_elbow_pitch_link", "r_elbow_pitch_link", "base_link"]
       vr_3point_body_offset:
         [
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
-          [0.0010007, 0.0, 0.17204],
+          [0.0, 0.0, 0.0],
         ]
       num_future_frames: 10
       dt_future_ref_frames: 0.1

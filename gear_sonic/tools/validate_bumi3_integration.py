@@ -7,7 +7,7 @@
 脚本默认完成不依赖训练数据的全部检查：追溯参考 URDF/MJCF 允许的 mesh 路径与
 BUMI3 爬行/跪地碰撞体改动，验证 MJCF 的 22 个可视网格、14 个独立碰撞体和地面
 高度，解析两种机器人描述并检查 mesh、验证 21 DoF/22
-body、双向顺序与 round trip、执行器动作缩放/延迟，以及 Hydra 组合后的时间
+body、双向顺序与 round trip、执行器动作缩放/无延迟，以及 Hydra 组合后的时间
 参数、网络输入维度和 Teleop 清除结果。动态机器人配置检查会启动 headless
 Isaac Sim，以保证导入的是实际 Isaac Lab 配置而非重复维护的常量。提供兼容的
 BUMI3 robot/SMPL motion 路径并加
@@ -465,64 +465,32 @@ def _validate_reward_compatibility(bumi_manager: dict, release_manager: dict) ->
 
 
 def _validate_event_compatibility(bumi_manager: dict, release_manager: dict) -> None:
-    """确认 BUMI3 event 只包含获准的质量、armature 与 PD 增益随机化差异。"""
+    """确认 BUMI3 只保留 base_link COM 扰动并关闭三类域随机化。"""
 
     bumi_events = bumi_manager["events"]
     release_events = release_manager["events"]
-    expected_bumi_only_events = {
+    bumi_only_events = {
         "randomize_ankle_armature",
         "randomize_actuator_gains",
     }
-    assert set(bumi_events) == set(release_events) | expected_bumi_only_events, (
-        "BUMI3 除获准的 armature/PD 增益随机化外出现未授权的 event 项变化"
+    assert set(bumi_events) == set(release_events) | bumi_only_events, (
+        "BUMI3 event 集合出现未授权变化"
     )
 
     for event_name, release_event in release_events.items():
         bumi_event = bumi_events[event_name]
         if event_name == "randomize_rigid_body_mass":
-            bumi_mass = bumi_event["params"]["mass_distribution_params"]
-            release_mass = release_event["params"]["mass_distribution_params"]
-            assert release_mass == [0.8, 2.5], "sonic_release 质量缩放基线发生变化"
-            assert bumi_mass == [0.8, 1.2], "BUMI3 质量缩放范围必须为正负 20%"
-            bumi_event = {
-                **bumi_event,
-                "params": {
-                    **bumi_event["params"],
-                    "mass_distribution_params": release_mass,
-                },
-            }
+            assert bumi_event is None, "BUMI3 质量随机化必须关闭"
+            continue
         assert _without_body_names(bumi_event) == _without_body_names(release_event), (
-            f"BUMI3 event {event_name} 出现未授权的范围、interval 或参数变化"
+            f"BUMI3 event {event_name} 出现未授权的函数、范围或执行时机变化"
         )
 
     assert bumi_events["base_com"]["params"]["asset_cfg"]["body_names"] == (
-        "waist_yaw_link"
+        "base_link"
     )
-    armature_event = bumi_events["randomize_ankle_armature"]
-    assert armature_event["_target_"] == "isaaclab.managers.EventTermCfg"
-    assert armature_event["func"] == (
-        "gear_sonic.envs.manager_env.mdp:randomize_joint_parameters"
-    )
-    assert armature_event["mode"] == "reset"
-    assert armature_event["params"]["asset_cfg"]["name"] == "robot"
-    assert armature_event["params"]["asset_cfg"]["joint_names"] == [
-        ".*_ankle_pitch_joint",
-        ".*_ankle_roll_joint",
-    ]
-    assert armature_event["params"]["armature_distribution_params"] == [0.9, 1.1]
-    assert armature_event["params"]["operation"] == "scale"
-
-    gains_event = bumi_events["randomize_actuator_gains"]
-    assert gains_event["_target_"] == "isaaclab.managers.EventTermCfg"
-    assert gains_event["func"] == (
-        "gear_sonic.envs.manager_env.mdp:randomize_actuator_gains"
-    )
-    assert gains_event["mode"] == "reset"
-    assert gains_event["params"]["asset_cfg"]["name"] == "robot"
-    assert gains_event["params"]["asset_cfg"]["joint_names"] == [".*"]
-    assert gains_event["params"]["stiffness_distribution_params"] == [0.8, 1.2]
-    assert gains_event["params"]["damping_distribution_params"] == [0.8, 1.2]
-    assert gains_event["params"]["operation"] == "scale"
+    assert bumi_events["randomize_ankle_armature"] is None
+    assert bumi_events["randomize_actuator_gains"] is None
 
 
 def _validate_resolved_configs() -> dict[str, int | float]:
@@ -572,7 +540,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert motion_cfg["randomize_wrist_poses"] is False
     assert motion_lib_cfg["motion_file"] is None
     assert motion_lib_cfg["smpl_motion_file"] is None
-    assert motion_cfg["anchor_body"] == "waist_yaw_link"
+    assert motion_cfg["anchor_body"] == "base_link"
     assert motion_cfg["body_names"] == [
         "base_link",
         "waist_yaw_link",
@@ -590,15 +558,11 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body"] == [
-        "waist_yaw_link",
+        "base_link",
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
-        "l_ankle_roll_link",
-        "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body_offset"] == [
-        [0.0010007, 0.0, 0.17204],
-        [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
@@ -606,12 +570,12 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert motion_cfg["vr_3point_body"] == [
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
-        "waist_yaw_link",
+        "base_link",
     ]
     assert motion_cfg["vr_3point_body_offset"] == [
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
-        [0.0010007, 0.0, 0.17204],
+        [0.0, 0.0, 0.0],
     ]
 
     actor_backbone = bumi_algo["config"]["actor"]["backbone"]
@@ -703,11 +667,11 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "l_ankle_roll_link",
         "r_ankle_roll_link",
     ]
-    assert terminations["anchor_pos"]["params"]["threshold"] == 0.12
+    assert terminations["anchor_pos"]["params"]["threshold"] == 0.15
     assert terminations["anchor_pos"]["params"]["threshold_adaptive"] is True
     assert terminations["anchor_pos"]["params"]["down_threshold"] == 0.75
     assert terminations["anchor_pos"]["params"]["root_height_threshold"] == 0.5
-    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.12
+    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.15
     assert terminations["ee_body_pos"]["params"]["body_names"] == [
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
@@ -786,6 +750,7 @@ def _load_reference_bumi_cfg():
 def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # noqa: ARG001
     """在 Isaac Sim 已启动后导入并验证真实 ArticulationCfg。"""
 
+    from isaaclab.actuators import ImplicitActuatorCfg
     import torch
 
     from gear_sonic.envs.manager_env.robots import bumi3
@@ -873,6 +838,10 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
 
     actuators = robot_cfg.actuators
     assert set(actuators) == set(reference_cfg.actuators)
+    for actuator_name, actuator in actuators.items():
+        assert type(actuator) is ImplicitActuatorCfg, (
+            f"执行器 {actuator_name} 必须使用与 G1 相同的无延迟 ImplicitActuatorCfg"
+        )
     assert actuators["legs"].effort_limit_sim == {
         ".*_leg_yaw_joint": 12,
         ".*_leg_roll_joint": 50.0,
@@ -932,8 +901,6 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
             "stiffness",
             "damping",
             "armature",
-            "min_delay",
-            "max_delay",
         ):
             assert getattr(actuator, field_name) == getattr(reference_actuator, field_name), (
                 f"BUMI3 actuator {actuator_name}.{field_name} 与当前参考 bumi.py 不一致"
@@ -964,11 +931,6 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
         )
         assert math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-12), (
             f"action scale 错误: {joint_name}={actual}, expected={expected}"
-        )
-
-    for name, actuator in actuators.items():
-        assert (actuator.min_delay, actuator.max_delay) == (0, 4), (
-            f"执行器 {name} delay 不是 0..4"
         )
 
     # 用最小伪环境验证力矩奖励的阈值、绝对值和平方超额语义。

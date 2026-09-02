@@ -1959,3 +1959,94 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本轮验证只使用已有模型和动作，不创建持久 checkpoint、event、导出、渲染或临时运行
   目录，因此没有一次性测试产物需要删除。回滚时反向提交本节列出的 7 个文件即可；参考
   `legged_lab` 仓库、训练数据和已有正式模型均未修改。
+
+## 2026-09-02：统一 base_link 锚点并收敛 BUMI3 训练变量
+
+### 1. 修改边界与最终决策
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `7cf7616afaecf198199e60453e062d986083db8a`。开始修改前，本地与 GitHub ahead/behind
+  为 `0/0` 且工作区干净；服务器同分支、同 HEAD、工作区干净，没有正在运行的 SONIC
+  trainer。历史 TensorBoard 和数据预检 tmux 不属于训练进程。
+- 用户最终决定将 BUMI3 训练、数据配对审计和 sim2sim 的命名锚点统一为浮动根
+  `base_link`，不再混用 `waist_yaw_link`。所有锚点位置、姿态、线速度、角速度都沿用
+  `TrackingCommand` 的命名 body 索引通路；`waist_yaw_link` 仍是正常机器人刚体和全身
+  tracking body，不做全局重命名或删除。
+- 当前只保留 `base_link` 的 COM 随机化。质量随机化、全关节 KP/KD 随机化、踝关节
+  armature 随机化全部设为 `null`；四组 actuator 从项目自定义的
+  `DelayedImplicitActuatorCfg(min_delay=0,max_delay=4)` 改为与 G1 相同的
+  `ImplicitActuatorCfg`，彻底取消 0～4 个 physics-step 随机延迟。BUMI3 名义质量、
+  COM、KP/KD、armature、力矩/速度限制和 action scale 数值没有改写。
+- termination 不再保留 BUMI3 的严格覆盖：脚部位置继承 G1 的 `0.20 m`，锚点位置继承
+  `0.15 m`，双肘位置继承 `0.15 m`，锚点完整姿态继承 `0.20`；adaptive、
+  `down_threshold` 和 `root_height_threshold` 均继承原 G1 配置。`ee_body_pos` 仍只检查
+  双肘，不重复检查双脚。
+- 强跟踪点从 base/双肘/双脚五个 body 减为 `base_link` 加双肘三个 body，偏移均为零。
+  双脚仍参与原有脚部 termination、feet acceleration 和其他发布版奖励，但不进入该强
+  point-tracking reward，避免同一脚部误差被过度约束。奖励函数、权重、std、PPO、网络、
+  `sim_dt=0.005`、`decimation=4` 和 50 Hz 控制频率没有修改。
+- 明确不修改 MuJoCo Euler 积分器或 Python 显式 PD，因为它们与现有 G1 sim2sim 的
+  基础实现一致。本轮只修正 BUMI3 非对角 `fullinertia` 暴露出的确定性坐标问题：
+  `mj_objectVelocity(local=1)` 返回惯性主轴表达，而训练 `root_ang_vel_b` 使用 link 轴；
+  sim2sim 现在先读世界角速度，再乘 `base_link` 世界旋转转置得到 link 局部角速度。
+
+### 2. 修改文件与目的
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：统一 base
+  anchor、COM/anti-shake/VR/reward 名称，关闭三类域随机化，继承 G1 termination 阈值，
+  将 reward points 缩为三点。
+- `gear_sonic/envs/manager_env/robots/bumi3.py`：四组执行器改用无延迟
+  `ImplicitActuatorCfg`；保留 BUMI3 参考执行器的其余名义参数和按公式生成的 action scale。
+- `gear_sonic/envs/manager_env/mdp/commands.py`：更新通用锚点姿态接口说明，明确 BUMI3
+  配置选择 base，但不在通用实现硬编码机器人类型。
+- `gear_sonic/trl/utils/order_converter.py`：BUMI3 三点 body 名称的第三项改为
+  `base_link`；G1/H2 converter 未修改。
+- `gear_sonic/config/sim2sim/bumi3_sonic.yaml`、
+  `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：部署锚点与训练一致，并修正非对角惯量时
+  base 角速度的 link 坐标表达；没有修改 Euler、PD、力矩裁剪、MJCF 或碰撞。
+- `gear_sonic/tools/build_bumi3_three_source_dataset.py`：配对门禁直接比较 Robot
+  `root_rot/base_link` 与训练处理后的 SMPL 根姿态，不再乘 waist 局部旋转；契约版本升级为
+  `sonic.bumi3.three_source_base_anchor.v2`，默认输出改到独立的
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2`，避免覆盖旧索引。
+- `gear_sonic/tools/validate_bumi3_training_coordinates.py`：旧 hq_all_v2 只读审计也改为
+  base 根锚点；旧 waist 契约下的固定 55 条不再被当作新契约真值，可用
+  `--expected-bad-count` 显式设置门禁。
+- `gear_sonic/tools/validate_bumi3_integration.py`、
+  `gear_sonic/tools/validate_bumi3_sim2sim.py`：锁定 resolved base anchor、三点奖励、G1
+  termination、仅 COM 随机化、无延迟 actuator 和 sim2sim base 锚点。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`、
+  `gear_sonic/tests/test_tracking_anchor_semantics.py`、
+  `gear_sonic/tools/test_build_bumi3_three_source_dataset.py`：锁定腰关节旋转不改变 base
+  锚点/配对结果，并增加非对角惯量下 link 轴角速度回归。
+- `docs/source/getting_started/bumi3_sim2sim.md`：把训练/部署共同锚点、诊断输出和观测来源
+  更新为 base 契约。历史记录中的 waist 结论作为当时版本的审计证据保留，由本节明确取代。
+
+### 3. 本地实际验证结果
+
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q` 运行本次相关的六组
+  BUMI 测试文件，结果为 `41 passed in 4.80s`，仅有一条已有的 invalid escape sequence
+  DeprecationWarning。单独首轮锚点/sim2sim/构建定向测试为 `19 passed in 3.55s`。
+- 直接收集整个 `gear_sonic/tests` 时，被未安装的可选依赖 `msgpack` 阻断于
+  `test_input_readers.py` 导入阶段；该错误发生在测试收集、与本轮 BUMI 修改无关，因此
+  未把它伪装成代码失败，也未擅自改动环境依赖。
+- `validate_bumi3_integration.py --device cpu` 退出码为 0；实际启动 headless Isaac Sim，
+  验证 URDF/MJCF `21 DoF/22 bodies`、无延迟 actuator、BUMI3/G1/H2 Hydra compose、
+  `sim_dt=0.005`、`decimation=4`、50 Hz、`action_dim=21`、FSQ `64`、actor proprioception
+  `690`、tokenizer flat `1262`、critic obs `1245`、dynamic decoder `754 -> 21`。本地未提供
+  服务器三源数据，所以该命令准确输出 `smoke: 未请求`。
+- `validate_bumi3_sim2sim.py --steps 100` 退出码为 0：100 个控制周期 observation、action、
+  torque、qpos、qvel 均为有限值；resolved anchor 为 `base_link`，模型仍为
+  `nq=28,nv=27,nu=21`、22 bodies、22 个可视 mesh 和 14 个 XML 碰撞体。
+- `python -m compileall -q gear_sonic` 与 `git diff --check` 均通过。上述命令未创建训练
+  目录、checkpoint、TensorBoard event、导出或渲染文件，没有本轮一次性测试产物需要清理。
+
+### 4. 待服务器闭环、删除边界与回滚
+
+- 代码提交推送并由服务器 `git pull --ff-only` 后，必须用新 v2 默认路径全量构建和验证
+  base-anchor 三源软链接索引。新索引通过前不得删除三个源数据：
+  `bumi3_smpl_97660_v1`、`hq4_pass50_v1`、`hq_all_v2`。
+- 新索引通过后，按用户授权精确删除旧三源派生索引及其 `.pre_*` 备份、未再引用的
+  `hq_all_v1`、旧 BUMI3 训练 run/checkpoint，以及本地 `models/sonic_bumi3`。删除前必须
+  再次核对无进程引用，实际删除路径、容量和结果将在本节后续记录，不能用计划冒充完成。
+- 代码回滚可反向提交本节对应提交；数据回滚边界以新索引发布和旧目录实际删除记录为准。
+  原始三源 PKL 始终保留，因此即使旧软链接索引被删除，也可用记录的构建命令重新生成。

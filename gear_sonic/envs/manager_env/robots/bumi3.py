@@ -6,16 +6,17 @@
 """BUMI3 在 Isaac Lab 与 SONIC 中使用的原生机器人配置。
 
 本模块只复刻参考 ``Bumi_CFG`` 当前实际生效的 URDF、初始姿态、刚体属性和
-延迟 PD 执行器参数，不依赖 ``NoetixRobot`` Python 包。它同时以关节/刚体名称
+名义 PD 执行器参数，不依赖 ``NoetixRobot`` Python 包。为减少基础训练变量，
+执行器改用与 G1 相同的无延迟 ``ImplicitActuatorCfg``；力矩、速度、KP/KD、
+armature 和动作缩放仍保持 BUMI3 参考数值。它同时以关节/刚体名称
 自动构造 Isaac Lab 与 MuJoCo 的双向顺序映射，并在导入时核对 BUMI3 参考配置
 给出的 21 自由度排列，防止训练数据、运动学模型和仿真关节顺序静默错位。内部仍沿用
 SONIC 的 ``g1`` 编码器/解码器键名；这里的 BUMI3 仅代表机器人载体与顺序契约。
 """
 
 import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
-
-from gear_sonic.envs.manager_env.mdp.actuators import DelayedImplicitActuatorCfg
 
 
 ASSET_DIR = "gear_sonic/data/assets"
@@ -259,7 +260,7 @@ BUMI3_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs": DelayedImplicitActuatorCfg(
+        "legs": ImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_leg_yaw_joint",
                 ".*_leg_roll_joint",
@@ -290,19 +291,15 @@ BUMI3_CFG = ArticulationCfg(
                 ".*_leg_pitch_joint": 3.0,
                 ".*_knee_pitch_joint": 2.0,
             },
-            min_delay=0,
-            max_delay=4,
         ),
-        "waist": DelayedImplicitActuatorCfg(
+        "waist": ImplicitActuatorCfg(
             effort_limit_sim=27.0,
             velocity_limit_sim=9.0,
             joint_names_expr=["waist_yaw_joint"],
             stiffness=53,
             damping=3.4,
-            min_delay=0,
-            max_delay=4,
         ),
-        "feet": DelayedImplicitActuatorCfg(
+        "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim=9.0,
             velocity_limit_sim=12.0,
@@ -312,10 +309,8 @@ BUMI3_CFG = ArticulationCfg(
                 ".*_ankle_pitch_joint": 0.012574,
                 ".*_ankle_roll_joint": 0.009608,
             },
-            min_delay=0,
-            max_delay=4,
         ),
-        "arms": DelayedImplicitActuatorCfg(
+        "arms": ImplicitActuatorCfg(
             joint_names_expr=[
                 ".*_arm_pitch_joint",
                 ".*_arm_roll_joint",
@@ -326,8 +321,6 @@ BUMI3_CFG = ArticulationCfg(
             velocity_limit_sim=12,
             stiffness=8,
             damping=0.4,
-            min_delay=0,
-            max_delay=4,
         ),
     },
 )

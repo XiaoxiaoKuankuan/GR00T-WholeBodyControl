@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""审计旧 hq_all_v2 BUMI3 Robot/SMPL 坐标契约与历史异常配对。
+"""按 base_link 锚点审计旧 hq_all_v2 BUMI3 Robot/SMPL 坐标契约。
 
 本脚本只读已经构建的 ``robot_all`` 与 ``smpl_all``，不会生成、转换、重采样或
 删除训练数据。Robot 侧严格复现 MotionLib 的 30Hz→50Hz 独占末帧时间网格，
-分别对浮动根和 ``waist_yaw_link`` 局部姿态做 Slerp，再组合成训练 Robot
-Encoder 使用的腰部世界姿态。SMPL 侧严格复现训练命令项的 ``pose_aa``
-Y-up→Z-up 左乘旋转和 SMPL base rotation removal。两侧统一到 Z-up 后，
-按整段相对旋转角中位数 45 度审计。若配置仍声明完整隔离 key，则要求检测
-结果和配置一致；新三源配置不再携带旧静态名单时，脚本仍要求从旧数据中
-独立检出恰好 55 条，用于保留历史数据审计能力。
+对浮动根四元数做 Slerp，并直接把 ``base_link`` 世界姿态作为 Robot Encoder
+锚点。SMPL 侧严格复现训练命令项的 ``pose_aa`` Y-up→Z-up 左乘旋转和 SMPL
+base rotation removal。两侧统一到 Z-up 后，按整段相对旋转角中位数 45 度
+审计。若配置声明隔离 key，则要求检测结果与配置精确一致；也可用命令行显式
+指定预期异常数。旧腰部锚点下得到的 55 条历史结果不能再当作 base_link
+契约的固定真值。
 
-通过条件还包括：3261 条 Robot、3162 个同名 Robot/SMPL 配对、99 条 Mine-only、
-历史审计应检出 55 条异常配对，旧数据剩余候选为 3206 条 Robot、
-3107 条 SMPL。新训练不会直接使用这个旧目录，而由三源构建工具逐条决定
-配对状态。该检查不能替代 Isaac Lab reset/step、奖励曲线或最终动作质量
-验证。
+通过条件还包括：3261 条 Robot、3162 个同名 Robot/SMPL 配对和 99 条 Mine-only。
+新训练不会直接使用这个旧目录，而由三源构建工具按同一 base_link 契约逐条
+决定配对状态。该检查不能替代 Isaac Lab reset/step、奖励曲线或最终动作质量验证。
 """
 
 from __future__ import annotations
@@ -38,7 +36,6 @@ DEFAULT_CONFIG = (
 EXPECTED_ROBOT_COUNT = 3261
 EXPECTED_SMPL_COUNT = 3162
 EXPECTED_MINE_ONLY_COUNT = 99
-EXPECTED_EXCLUDED_COUNT = 55
 SOURCE_FPS = 30.0
 TARGET_FPS = 50.0
 PAIR_MEDIAN_THRESHOLD_DEGREES = 45.0
@@ -61,8 +58,8 @@ def _runtime_times(num_source_frames: int) -> tuple[np.ndarray, np.ndarray]:
     return source_times, target_times
 
 
-def _robot_waist_rotation(robot: dict) -> Rotation:
-    """从 30Hz Robot 数据恢复 MotionLib 50Hz 的 waist_yaw_link 世界姿态。"""
+def _robot_base_rotation(robot: dict) -> Rotation:
+    """从 30Hz Robot 数据恢复 MotionLib 50Hz 的 base_link 世界姿态。"""
     root_xyzw = np.asarray(robot["root_rot"], dtype=np.float64)
     pose_aa = np.asarray(robot["pose_aa"], dtype=np.float64)
     if root_xyzw.ndim != 2 or root_xyzw.shape[1] != 4:
@@ -70,12 +67,7 @@ def _robot_waist_rotation(robot: dict) -> Rotation:
     if pose_aa.shape != (len(root_xyzw), 22, 3):
         raise ValueError(f"Robot pose_aa shape 错误: {pose_aa.shape}")
     source_times, target_times = _runtime_times(len(root_xyzw))
-    root_50 = Slerp(source_times, Rotation.from_quat(root_xyzw))(target_times)
-    # BUMI3 MJCF body traversal 中 index 1 是 waist_yaw_link；其 joint axis 为局部 +Z。
-    waist_local_50 = Slerp(
-        source_times, Rotation.from_rotvec(pose_aa[:, 1, :])
-    )(target_times)
-    return root_50 * waist_local_50
+    return Slerp(source_times, Rotation.from_quat(root_xyzw))(target_times)
 
 
 def _processed_smpl_root_rotation(smpl: dict) -> Rotation:
@@ -123,10 +115,6 @@ def validate(args: argparse.Namespace) -> None:
         not key.startswith("mine__") for key in mine_only
     ):
         raise ValueError(f"Mine-only 契约错误: count={len(mine_only)}")
-    if excluded_keys and len(excluded_keys) != EXPECTED_EXCLUDED_COUNT:
-        raise ValueError(
-            f"非空隔离清单数量 {len(excluded_keys)} != {EXPECTED_EXCLUDED_COUNT}"
-        )
     if excluded_keys:
         absent_robot = sorted(set(excluded_keys) - set(robot_files))
         absent_smpl = sorted(set(excluded_keys) - set(smpl_files))
@@ -138,13 +126,13 @@ def validate(args: argparse.Namespace) -> None:
     for index, key in enumerate(sorted(smpl_files), start=1):
         robot = _unwrap_robot(robot_files[key], key)
         smpl = joblib.load(smpl_files[key])
-        robot_waist = _robot_waist_rotation(robot)
+        robot_base = _robot_base_rotation(robot)
         smpl_root = _processed_smpl_root_rotation(smpl)
-        if len(robot_waist) != len(smpl_root):
+        if len(robot_base) != len(smpl_root):
             raise ValueError(
-                f"{key} 50Hz 长度不一致: robot={len(robot_waist)}, smpl={len(smpl_root)}"
+                f"{key} 50Hz 长度不一致: robot={len(robot_base)}, smpl={len(smpl_root)}"
             )
-        relative_degrees = np.degrees((robot_waist.inv() * smpl_root).magnitude())
+        relative_degrees = np.degrees((robot_base.inv() * smpl_root).magnitude())
         median_degrees = float(np.median(relative_degrees))
         pair_medians[key] = median_degrees
         if median_degrees > PAIR_MEDIAN_THRESHOLD_DEGREES:
@@ -153,9 +141,9 @@ def validate(args: argparse.Namespace) -> None:
             print(f"[coordinate-audit] {index}/{len(smpl_files)}", flush=True)
 
     actual_bad = set(detected_bad)
-    if len(actual_bad) != EXPECTED_EXCLUDED_COUNT:
+    if args.expected_bad_count is not None and len(actual_bad) != args.expected_bad_count:
         raise ValueError(
-            f"旧 hq_all_v2 检出异常配对 {len(actual_bad)} != {EXPECTED_EXCLUDED_COUNT}"
+            f"base_link 契约检出异常配对 {len(actual_bad)} != {args.expected_bad_count}"
         )
     configured_bad = set(excluded_keys)
     if configured_bad and actual_bad != configured_bad:
@@ -173,7 +161,7 @@ def validate(args: argparse.Namespace) -> None:
     print(
         "BUMI3_TRAINING_COORDINATES=PASS "
         f"robot_total={len(robot_files)} smpl_paired={len(smpl_files)} "
-        f"mine_only={len(mine_only)} legacy_detected={len(actual_bad)} "
+        f"mine_only={len(mine_only)} base_anchor_detected={len(actual_bad)} "
         f"active_exclusions={len(configured_bad)} "
         f"training_robot={retained_robot_count} training_smpl={retained_smpl_count}"
     )
@@ -185,7 +173,8 @@ def validate(args: argparse.Namespace) -> None:
         "PAIR_MEDIAN_DEGREES "
         f"retained_median={np.median(retained_pair_medians):.6f} "
         f"retained_max={np.max(retained_pair_medians):.6f} "
-        f"legacy_bad_min={min(pair_medians[key] for key in actual_bad):.6f}"
+        "base_anchor_bad_min="
+        f"{min((pair_medians[key] for key in actual_bad), default=float('nan')):.6f}"
     )
 
 
@@ -195,6 +184,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-dir", type=Path, required=True)
     parser.add_argument("--smpl-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--expected-bad-count",
+        type=int,
+        help="可选的 base_link 锚点异常配对预期数；默认只报告实际检测结果",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 

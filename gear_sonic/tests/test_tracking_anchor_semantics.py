@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """验证 TrackingCommand 的参考锚点姿态始终使用配置指定的刚体。
 
-BUMI3 的浮动根是 ``base_link``，而 SONIC 跟踪锚点是 ``waist_yaw_link``。两者在
-``waist_yaw_joint`` 非零时姿态不同，因此 Robot Encoder 不能用 MotionLib root
-quaternion 代替 waist 的 FK quaternion。本测试不创建 Isaac Lab 场景，因为普通
+BUMI3 当前把浮动根 ``base_link`` 同时作为训练和 sim2sim 锚点，以减少腰部 FK
+带来的额外变量；通用命令实现仍必须通过配置索引锚点，不能为 BUMI3 或其他机器人
+硬编码某个 body。本测试不创建 Isaac Lab 场景，因为普通
 ``pytest`` 收集阶段尚未启动 SimulationApp，直接导入 manager-env 模块会缺少 ``pxr``。
 测试改为解析实际生产源码的 AST，锁定单帧和多未来帧属性只能读取命名 anchor，且不得
-重新调用 ``get_root_quat_w``。sim2sim 的数值 FK 行为由相邻的
+绕过配置重新调用 ``get_root_quat_w``。sim2sim 的数值锚点行为由相邻的
 ``test_bumi3_sim2sim.py`` 独立覆盖。
 """
 
@@ -45,7 +45,7 @@ def test_single_frame_relative_orientation_uses_named_anchor() -> None:
 
 
 def test_multi_future_relative_orientation_uses_named_anchor() -> None:
-    """多未来帧 tokenizer 必须读取 waist FK quaternion 序列。"""
+    """多未来帧 tokenizer 必须读取配置命名的锚点四元数序列。"""
 
     attributes = _method_attribute_names("root_rot_dif_l_multi_future")
     assert "anchor_quat_w_multi_future" in attributes

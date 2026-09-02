@@ -1967,10 +1967,10 @@ class TrackingCommand(CommandTerm):
     def root_rot_dif_l(self) -> torch.Tensor:
         """返回参考锚点相对于仿真机器人锚点的 6D 姿态差。
 
-        参考侧必须读取 ``cfg.anchor_body`` 指定的刚体；BUMI3 对应
-        ``waist_yaw_link``，不能再使用 MotionLib 第 0 个刚体 ``base_link`` 的浮动根
-        四元数。仿真侧同样读取 ``robot_anchor_quat_w``，从而让训练 tokenizer、奖励、
-        termination、Robot/SMPL 配对检查与 sim2sim 使用完全相同的命名锚点语义。
+        参考侧必须读取 ``cfg.anchor_body`` 指定的刚体。BUMI3 当前明确配置为
+        ``base_link``，因此参考和仿真两侧都使用浮动根；其他机器人仍可通过配置选择
+        自己的命名锚点。这样训练 tokenizer、奖励、termination、配对检查与
+        sim2sim 始终共享同一锚点语义。
 
         返回：
             形状为 ``(num_envs, 6)`` 的张量。
@@ -1988,9 +1988,9 @@ class TrackingCommand(CommandTerm):
     def root_rot_dif_l_multi_future(self) -> torch.Tensor:
         """返回各未来帧参考锚点相对于当前仿真机器人锚点的 6D 姿态差。
 
-        参考四元数通过 ``motion_anchor_body_index`` 选择；BUMI3 因而读取
-        ``waist_yaw_link`` 的 FK 世界姿态，禁止退回 ``base_link`` 根四元数。仿真侧继续
-        使用 ``robot_anchor_quat_w``，保证相对旋转的两个操作数描述同一个命名刚体。
+        参考四元数通过 ``motion_anchor_body_index`` 选择；BUMI3 当前读取
+        ``base_link`` 根姿态，仿真侧继续使用同名的 ``robot_anchor_quat_w``。该通用
+        路径仍保留其他机器人选择非根锚点的能力，不再在实现中硬编码 BUMI3 腰部。
 
         返回：
             形状为 ``(num_envs, num_future_frames * 6)`` 的张量。

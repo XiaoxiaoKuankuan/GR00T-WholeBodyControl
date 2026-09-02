@@ -251,6 +251,9 @@ def _validate_static_reset_contacts(contract: Bumi3Contract) -> tuple[int, float
 
 def _validate_contract_values(contract: Bumi3Contract) -> None:
     np.testing.assert_allclose(contract.initial_root_position, [0.0, 0.0, 0.4744])
+    assert contract.anchor_body_name == "base_link", (
+        "BUMI3 sim2sim Robot Encoder 锚点必须与训练统一为 base_link"
+    )
     assert contract.policy_to_mujoco.tolist() == [
         2, 5, 9, 13, 17, 6, 10, 14, 18, 0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20
     ]

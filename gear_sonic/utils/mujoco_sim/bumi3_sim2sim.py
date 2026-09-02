@@ -5,9 +5,10 @@
 
 本模块把现有 G1 部署链路中的关键契约改写为可独立验证的 BUMI3 Python 实现：
 按名称读取 21 个关节的 ``jnt_qposadr/jnt_dofadr``，构造与训练一致的 10 帧
-proprioception 历史、10 个 0.1 秒间隔的 Robot Encoder 参考帧；参考锚点姿态通过
-BUMI3 MJCF 正向运动学严格取 ``waist_yaw_link``，不会把浮动根 ``base_link`` 的姿态
-冒充训练锚点。运行器优先从动作加载 root position/quaternion 和关节状态进行 reset，
+proprioception 历史、10 个 0.1 秒间隔的 Robot Encoder 参考帧；训练与 sim2sim
+统一使用浮动根 ``base_link`` 作为 Robot Encoder、位置、姿态和重力方向锚点，避免
+在基础闭环中混用根连杆与腰部连杆。运行器优先从动作加载 root
+position/quaternion 和关节状态进行 reset，
 只在旧动作缺少 root translation 时使用接地附近的固定高度，然后调用
 ``eval_agent_trl.py`` 导出的 ``*_g1.onnx`` 联合模型得到 21 维动作。这里的 ``g1``
 只是 SONIC 为 checkpoint 兼容保留的 Robot Encoder 内部键名，并不使用 G1 资产。
@@ -325,8 +326,8 @@ class ReferenceMotion:
     """已转换到 50 FPS、策略关节顺序和 wxyz 浮动根状态的动作。
 
     ``root_position_world`` 对旧 CSV 可以为空；正常 SONIC PKL/NPZ 应提供训练时使用的
-    root translation。Robot Encoder 的锚点不是这里的 root quaternion，而是在加载
-    BUMI3 MJCF 后由关节姿态正向运动学得到的 ``waist_yaw_link`` 世界姿态。
+    root translation。Robot Encoder 仍通过加载 BUMI3 MJCF 后的命名刚体获取锚点；
+    当前契约将该刚体固定为 ``base_link``，因此腰关节姿态不再改变参考锚点。
     """
 
     joint_pos_policy: np.ndarray
@@ -757,7 +758,7 @@ class Bumi3SonicSim2Sim:
             self.model, mujoco.mjtObj.mjOBJ_BODY, self.contract.anchor_body_name
         )
         if min(self.root_joint_id, self.base_body_id, self.anchor_body_id) < 0:
-            raise ValueError("MJCF 缺少 root joint、base body 或 waist anchor body")
+            raise ValueError("MJCF 缺少 root joint、base body 或配置指定的 anchor body")
         self.root_qpos_address = int(self.model.jnt_qposadr[self.root_joint_id])
 
     def _apply_armature_contract(self) -> None:
@@ -837,7 +838,7 @@ class Bumi3SonicSim2Sim:
         mujoco.mj_forward(self.reference_visual_model, self.reference_visual_data)
 
     def reference_pose_diagnostics(self, frame: int) -> dict[str, float]:
-        """返回参考根/腰部相对世界 Z 轴的倾角，辅助判断参考是否横躺。"""
+        """返回参考 base 与配置锚点相对世界 Z 轴的倾角，辅助判断是否横躺。"""
 
         if not 0 <= frame < self.motion.num_frames:
             raise ValueError(f"reference diagnostics frame 越界: {frame}")
@@ -1022,7 +1023,7 @@ class Bumi3SonicSim2Sim:
         return scene.ngeom
 
     def _compute_reference_anchor_quaternions(self) -> np.ndarray:
-        """用 BUMI3 MJCF FK 计算每帧 ``waist_yaw_link`` 世界姿态。"""
+        """用 BUMI3 MJCF FK 计算每帧配置锚点的世界姿态。"""
 
         scratch = mujoco.MjData(self.reference_visual_model)
         result = np.empty((self.motion.num_frames, 4), dtype=np.float64)
@@ -1078,7 +1079,7 @@ class Bumi3SonicSim2Sim:
         self.motion_frame = start_frame
 
     def _update_reference_heading_alignment(self, start_frame: int) -> None:
-        """把参考 ``waist_yaw_link`` 起始 yaw 对齐到当前锚点 yaw。"""
+        """把参考 ``base_link`` 起始 yaw 对齐到当前根锚点 yaw。"""
 
         self.reference_alignment_frame = start_frame
         if not self.align_reference_heading:
@@ -1103,6 +1104,14 @@ class Bumi3SonicSim2Sim:
         )
 
     def _base_angular_velocity_local(self) -> np.ndarray:
+        """返回 ``base_link`` 连杆坐标系中的根角速度。
+
+        BUMI3 的 ``fullinertia`` 含非对角项，MuJoCo 的
+        ``mj_objectVelocity(..., flg_local=1)`` 会把角速度表达在对角化后的惯性
+        主轴中，而 Isaac Lab 的 ``root_ang_vel_b`` 使用根连杆轴。这里先读取世界
+        角速度，再显式乘以 ``base_link`` 世界旋转的转置，确保训练与 sim2sim
+        使用同一坐标系；该修正不改变积分器、控制频率或 PD 控制方式。
+        """
         velocity = np.zeros(6, dtype=np.float64)
         mujoco.mj_objectVelocity(
             self.model,
@@ -1110,9 +1119,10 @@ class Bumi3SonicSim2Sim:
             mujoco.mjtObj.mjOBJ_BODY,
             self.base_body_id,
             velocity,
-            1,
+            0,
         )
-        return velocity[:3].astype(np.float32)
+        base_rotation_world = self.data.xmat[self.base_body_id].reshape(3, 3)
+        return (base_rotation_world.T @ velocity[:3]).astype(np.float32)
 
     def _anchor_gravity_direction(self) -> np.ndarray:
         anchor_quat = self.data.xquat[self.anchor_body_id]

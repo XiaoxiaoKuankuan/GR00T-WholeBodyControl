@@ -44,7 +44,7 @@ def _write_robot(path: Path, frames: int, fps: float) -> None:
 
 
 def _write_smpl(path: Path, frames: int) -> None:
-    """写入 pose 为 Y-up、关节几何为 Z-up 且与直立 waist 对齐的合成 SMPL。"""
+    """写入 pose 为 Y-up、关节几何为 Z-up 且与直立 base 对齐的合成 SMPL。"""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     y_to_z = Rotation.from_rotvec(np.array([np.pi / 2.0, 0.0, 0.0]))
@@ -210,3 +210,29 @@ def test_pair_time_origin_gate_downgrades_only_smpl(tmp_path: Path) -> None:
     )
     assert row["status"] == "ROBOT_ONLY_PAIR_TIME_ORIGIN_MISMATCH"
     assert row["time_origin_delta_smpl_minus_robot_seconds"] == pytest.approx(0.02)
+
+
+def test_pair_orientation_gate_uses_base_root_not_waist_joint(tmp_path: Path) -> None:
+    """腰关节转动不得改变 base 锚点下 Robot/SMPL 配对是否合格。"""
+
+    robot_path = tmp_path / "waist_rotated.pkl"
+    smpl_path = tmp_path / "smpl/waist_rotated.pkl"
+    _write_robot(robot_path, frames=6, fps=50.0)
+    _write_smpl(smpl_path, frames=6)
+    payload = joblib.load(robot_path)
+    payload[robot_path.stem]["dof"][:, 0] = 1.0
+    payload[robot_path.stem]["pose_aa"][:, 1, 2] = 1.0
+    joblib.dump(payload, robot_path)
+
+    row = build_tool.audit_record(
+        build_tool.SourceRecord(
+            key=robot_path.stem,
+            split="train",
+            source="unit",
+            robot_path=str(robot_path),
+            smpl_path=str(smpl_path),
+            expected_robot_fps=50.0,
+        )
+    )
+    assert row["status"] == "PAIRED"
+    assert row["pair_median_degrees"] == pytest.approx(0.0, abs=1e-5)

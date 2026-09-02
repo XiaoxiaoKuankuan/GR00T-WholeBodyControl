@@ -15,21 +15,21 @@
 22 个 ``pose_aa`` 节点、Z-up 根平移和与 ``pose_aa`` 根姿态一致的 xyzw
 ``root_rot``。SMPL 必须是 50 Hz，``pose_aa``/``transl`` 保持 SMPL Y-up 语义，
 而训练实际读取的 ``smpl_joints`` 必须呈 Z-up 人体轴。配对还会复现 SONIC 的
-SMPL Y-up 到 Z-up 旋转、base rotation removal 和 BUMI3 ``waist_yaw_link`` FK，
-检查两侧根姿态中位差。Robot 合格但 SMPL 缺失、字段错误、尾帧差超过
+SMPL Y-up 到 Z-up 旋转、base rotation removal，并比较 BUMI3 ``base_link``
+浮动根与 SMPL 根姿态中位差。Robot 合格但 SMPL 缺失、字段错误、尾帧差超过
 2 帧或姿态差超过 45 度时，只移除该条 SMPL 软链接并保留为 Robot-only；
 Robot 本身不满足契约则整次构建失败。
 
 构建在输出目录旁的唯一 staging 目录完成，全部检查通过后才原子发布。
 默认输出为
-``/data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1``；若目标已经存在则拒绝
+``/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2``；若目标已经存在则拒绝
 覆盖，避免误删已有训练索引。典型命令：
 
     python gear_sonic/tools/build_bumi3_three_source_dataset.py build \
       --workers 8
 
     python gear_sonic/tools/build_bumi3_three_source_dataset.py validate \
-      --output-root /data/sonic_bumi3/datasets/bumi3_sonic_three_source_v1 \
+      --output-root /data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2 \
       --workers 8
 
 该工具只验证数据静态契约；它不能替代 Isaac Lab reset/step、奖励曲线、
@@ -58,7 +58,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-CONTRACT_VERSION = "sonic.bumi3.three_source_index.v1"
+CONTRACT_VERSION = "sonic.bumi3.three_source_base_anchor.v2"
 TARGET_FPS = 50.0
 MAX_PAIR_FRAME_DELTA = 2
 MAX_PAIR_MEDIAN_DEGREES = 45.0
@@ -98,7 +98,7 @@ DEFAULT_DATA_ROOT = Path("/data/sonic_bumi3/datasets")
 DEFAULT_LARGE_ROOT = DEFAULT_DATA_ROOT / "bumi3_smpl_97660_v1"
 DEFAULT_HQ4_ROOT = DEFAULT_DATA_ROOT / "hq4_pass50_v1"
 DEFAULT_MINE_ROBOT_DIR = DEFAULT_DATA_ROOT / "hq_all_v2/built/robot_all"
-DEFAULT_OUTPUT_ROOT = DEFAULT_DATA_ROOT / "bumi3_sonic_three_source_v1"
+DEFAULT_OUTPUT_ROOT = DEFAULT_DATA_ROOT / "bumi3_sonic_three_source_base_anchor_v2"
 
 DEFAULT_EXPECTED_LARGE_TRAIN = 92443
 DEFAULT_EXPECTED_LARGE_TEST = 5217
@@ -544,7 +544,7 @@ def _declared_time_origin(data: dict) -> tuple[float, str]:
 
 
 def _pair_median_degrees(robot: dict, smpl: dict) -> float:
-    """复现训练端 waist 锚点与 SMPL 根姿态处理，计算整段逐帧中位角差。"""
+    """复现训练端 base 根锚点与 SMPL 根姿态处理，计算整段逐帧中位角差。"""
 
     robot_frames = len(robot["root_rot"])
     smpl_frames = len(smpl["pose_aa"])
@@ -553,17 +553,13 @@ def _pair_median_degrees(robot: dict, smpl: dict) -> float:
     # 仅描述数据集总体方向的根倾角和人体轴统计才允许确定性抽样。
     indices = np.arange(common_frames, dtype=np.int64)
     robot_root = Rotation.from_quat(np.asarray(robot["root_rot"], dtype=np.float64)[indices])
-    robot_waist_local = Rotation.from_rotvec(
-        np.asarray(robot["pose_aa"], dtype=np.float64)[indices, 1]
-    )
-    robot_waist = robot_root * robot_waist_local
     smpl_root_y_up = Rotation.from_rotvec(
         np.asarray(smpl["pose_aa"], dtype=np.float64)[indices, :3]
     )
     y_to_z = Rotation.from_rotvec(np.array([np.pi / 2.0, 0.0, 0.0]))
     smpl_base = Rotation.from_quat(np.array([0.5, 0.5, 0.5, 0.5]))
     processed_smpl_root = y_to_z * smpl_root_y_up * smpl_base.inv()
-    differences = np.degrees((robot_waist.inv() * processed_smpl_root).magnitude())
+    differences = np.degrees((robot_root.inv() * processed_smpl_root).magnitude())
     return float(np.median(differences))
 
 
@@ -635,7 +631,7 @@ def audit_record(record: SourceRecord) -> dict[str, Any]:
         row.update(
             {
                 "status": "ROBOT_ONLY_SMPL_COORDINATE_MISMATCH",
-                "reason": f"waist/SMPL 根姿态中位差 {pair_median:.6f} 度",
+                "reason": f"base/SMPL 根姿态中位差 {pair_median:.6f} 度",
             }
         )
         return row
@@ -837,6 +833,7 @@ def _publish_index(
                 "同名数组均从第0帧开始；若PKL声明时间字段则要求两侧起点完全一致"
             ),
             "asset_contracts": summary["discovery"]["asset_contracts"],
+            "robot_anchor_body": "base_link",
             "smpl_coordinate_contract": {
                 "pose_aa_and_transl": "Y-up",
                 "smpl_joints": "Z-up",

@@ -78,9 +78,10 @@ sim2sim 动力学契约。可以用 ``--reference-alpha 0.5`` 调整透明度，
 marker，否则会丢失渲染级 mesh 变换，并出现各 link 分离的“炸开”画面。
 
 入口还会在推进仿真前打印 ``BUMI3_REFERENCE_POSE``，其中
-``base_tilt_degrees``/``anchor_tilt_degrees`` 是 base/waist 上轴与世界 +Z 的夹角：
-站立通常接近 0°，侧躺通常接近 90°。这项数值检查不替代完整动作可视化，但能避免只凭
-相机角度误判。
+``base_tilt_degrees``/``anchor_tilt_degrees`` 都以当前统一的 ``base_link`` 为对象，
+表示其上轴与世界 +Z 的夹角：站立通常接近 0°，侧躺通常接近 90°。两项暂时保留是为了
+兼容既有诊断输出；它们在当前契约下应一致。这项数值检查不替代完整动作可视化，但能
+避免只凭相机角度误判。
 
 服务器无显示、尽快运行 10 秒：
 
@@ -109,9 +110,9 @@ python gear_sonic/scripts/run_bumi3_sim2sim.py \
 
 运行器会优先用动作中的 `root_trans_offset/root_pos/qpos[:3]`、root quaternion、关节
 位置和关节速度初始化 MuJoCo。旧 CSV 不含 `body_pos.csv` 时才回退到配置中的
-`[0, 0, 0.4744]`，不再固定悬空在 `0.65 m`。Robot Encoder 需要的参考锚点姿态也
-不是直接使用 root quaternion：它会逐帧把 root 和 21 个关节写入 BUMI3 MJCF，通过
-正向运动学读取 `waist_yaw_link` 的世界姿态，与训练端 `anchor_body` 语义保持一致。
+`[0, 0, 0.4744]`，不再固定悬空在 `0.65 m`。Robot Encoder 的参考锚点明确使用
+``base_link``：它等于动作中的浮动根世界四元数；当前 policy 状态也读取 MuJoCo
+``base_link`` 的世界姿态和速度。训练端、数据配对审计和 sim2sim 因而使用同一语义。
 reset 后的 10 帧 proprioception history 会按 Isaac Lab `CircularBuffer` 的首次写入规则，
 用当前状态复制填满，而不是以 9 帧零值开头。
 

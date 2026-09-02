@@ -30,7 +30,7 @@ sonic:
   combined_policy_input_dim: 1170
   action_dim: 21
   action_clip: 20.0
-  anchor_body_name: waist_yaw_link
+  anchor_body_name: base_link
   reference_root_body_name: base_link
   policy_encoder_name: g1
 

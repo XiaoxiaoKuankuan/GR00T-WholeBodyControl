@@ -4,7 +4,7 @@
 """BUMI3 SONIC sim2sim 的回归测试。
 
 测试覆盖名称生成的 IsaacLab/MuJoCo 双向排列、训练 PKL 与部署 CSV 的顺序/浮动根
-状态约定、参考状态 reset、``waist_yaw_link`` FK 锚点语义、1170 维联合 policy 输入、
+状态约定、参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
 闭环。测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
@@ -306,7 +306,9 @@ def test_reset_uses_reference_root_and_joint_state() -> None:
     )
 
 
-def test_robot_encoder_anchor_uses_waist_fk_not_root_quaternion() -> None:
+def test_robot_encoder_anchor_uses_base_root_and_ignores_waist_joint() -> None:
+    """Robot Encoder 使用 base 根锚点，腰关节转动不得改变参考锚点姿态。"""
+
     contract = _contract()
     motion = make_static_reference_motion(contract)
     waist_policy_index = contract.policy_joint_names.index("waist_yaw_joint")
@@ -315,13 +317,7 @@ def test_robot_encoder_anchor_uses_waist_fk_not_root_quaternion() -> None:
     runner = Bumi3SonicSim2Sim(contract, motion, ZeroPolicy(contract))
 
     root_inverse = np.asarray([1.0, 0.0, 0.0, 0.0])
-    waist_relative = runner.reference_anchor_quat_wxyz[0]
-    assert not np.allclose(waist_relative, root_inverse, atol=1e-3)
-    np.testing.assert_allclose(
-        waist_relative,
-        [np.cos(waist_yaw / 2.0), 0.0, 0.0, np.sin(waist_yaw / 2.0)],
-        atol=1e-6,
-    )
+    np.testing.assert_allclose(runner.reference_anchor_quat_wxyz[0], root_inverse, atol=1e-6)
     tokenizer = runner._build_robot_tokenizer()
     orientation = tokenizer[-60:].reshape(10, 6)
     identity_6d = quaternion_to_rotation_6d(root_inverse)
@@ -330,6 +326,49 @@ def test_robot_encoder_anchor_uses_waist_fk_not_root_quaternion() -> None:
         np.repeat(identity_6d[None], 10, axis=0),
         atol=1e-6,
     )
+
+
+def test_base_angular_velocity_uses_link_axes_not_inertia_principal_axes() -> None:
+    """非对角 fullinertia 下角速度仍必须表达在 base_link 连杆坐标系。"""
+
+    contract = _contract()
+    runner = Bumi3SonicSim2Sim(
+        contract,
+        make_static_reference_motion(contract),
+        ZeroPolicy(contract),
+    )
+    runner.data.qpos[runner.root_qpos_address + 3 : runner.root_qpos_address + 7] = [
+        np.cos(np.pi / 8.0),
+        0.0,
+        0.0,
+        np.sin(np.pi / 8.0),
+    ]
+    runner.data.qvel[3:6] = [1.0, 2.0, 3.0]
+    mujoco.mj_forward(runner.model, runner.data)
+
+    velocity_world = np.zeros(6, dtype=np.float64)
+    velocity_inertia = np.zeros(6, dtype=np.float64)
+    mujoco.mj_objectVelocity(
+        runner.model,
+        runner.data,
+        mujoco.mjtObj.mjOBJ_BODY,
+        runner.base_body_id,
+        velocity_world,
+        0,
+    )
+    mujoco.mj_objectVelocity(
+        runner.model,
+        runner.data,
+        mujoco.mjtObj.mjOBJ_BODY,
+        runner.base_body_id,
+        velocity_inertia,
+        1,
+    )
+    base_rotation_world = runner.data.xmat[runner.base_body_id].reshape(3, 3)
+    expected_link_velocity = base_rotation_world.T @ velocity_world[:3]
+    actual = runner._base_angular_velocity_local()
+    np.testing.assert_allclose(actual, expected_link_velocity, atol=1e-6)
+    assert not np.allclose(actual, velocity_inertia[:3], atol=1e-3)
 
 
 def test_reference_pose_diagnostics_distinguishes_upright_and_sideways() -> None:

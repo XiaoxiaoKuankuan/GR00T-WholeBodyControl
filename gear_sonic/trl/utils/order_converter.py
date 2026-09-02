@@ -246,7 +246,7 @@ class Bumi3Converter(IsaacLabMuJoCoConverter):
     VR_3POINTS_BODY_NAMES = [
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
-        "waist_yaw_link",
+        "base_link",
     ]
     FOOT_BODY_NAMES = ["l_ankle_roll_link", "r_ankle_roll_link"]
 
