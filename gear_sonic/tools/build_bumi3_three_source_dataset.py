@@ -170,6 +170,17 @@ CURRENT_DOF_NAMES, CURRENT_DOF_AXES, CURRENT_DOF_RANGES = _load_mjcf_joint_contr
 )
 CURRENT_MJCF_SHA256 = _sha256(CURRENT_MJCF_PATH)
 
+# hq4 PASS50 和 Mine 数据是在碰撞层修正前生成的。该版本与当前版本的关节、质量、
+# 惯量和执行器契约相同，差异仅限已经由集成验证器锁定的可视/碰撞 geom 与地面。
+# 这里只接受该精确历史指纹和当前指纹，不能把任意旧 MJCF 当作兼容来源。
+PRE_COLLISION_MJCF_SHA256 = (
+    "02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe"
+)
+COMPATIBLE_DATA_MJCF_SHA256S = {
+    CURRENT_MJCF_SHA256,
+    PRE_COLLISION_MJCF_SHA256,
+}
+
 
 def _sample_indices(num_frames: int) -> np.ndarray:
     """为姿态统计选取覆盖整段的确定性帧索引，限制单条计算成本。"""
@@ -217,6 +228,19 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _require_compatible_source_mjcf(label: str, source_sha256: Any) -> str:
+    """只接受当前或已审核的碰撞修正前 BUMI3 MJCF 完整指纹。"""
+
+    if not isinstance(source_sha256, str) or source_sha256 not in (
+        COMPATIBLE_DATA_MJCF_SHA256S
+    ):
+        raise ValueError(
+            f"{label} 的 MJCF 指纹不在审核白名单: {source_sha256}; "
+            f"允许值={sorted(COMPATIBLE_DATA_MJCF_SHA256S)}"
+        )
+    return source_sha256
+
+
 def _validate_source_asset_contracts(
     large_root: Path, hq4_root: Path, mine_robot_dir: Path
 ) -> dict[str, Any]:
@@ -233,30 +257,29 @@ def _validate_source_asset_contracts(
 
     hq4_provenance_path = hq4_root / "meta/provenance.json"
     hq4_provenance = _read_json_object(hq4_provenance_path)
-    if hq4_provenance.get("target_mjcf_sha256") != CURRENT_MJCF_SHA256:
-        raise ValueError(
-            "hq4 PASS50 的目标 MJCF 与当前 SONIC BUMI3 不一致: "
-            f"{hq4_provenance.get('target_mjcf_sha256')} != {CURRENT_MJCF_SHA256}"
-        )
+    hq4_mjcf_sha256 = _require_compatible_source_mjcf(
+        "hq4 PASS50 目标", hq4_provenance.get("target_mjcf_sha256")
+    )
 
     hq_all_root = mine_robot_dir.parents[1]
     mine_provenance_path = hq_all_root / "meta/provenance.json"
     mine_provenance = _read_json_object(mine_provenance_path)
-    if mine_provenance.get("mjcf_sha256") != CURRENT_MJCF_SHA256:
-        raise ValueError(
-            "Mine Robot 来源 MJCF 与当前 SONIC BUMI3 不一致: "
-            f"{mine_provenance.get('mjcf_sha256')} != {CURRENT_MJCF_SHA256}"
-        )
+    mine_mjcf_sha256 = _require_compatible_source_mjcf(
+        "Mine Robot 来源", mine_provenance.get("mjcf_sha256")
+    )
 
     return {
         "current_mjcf_path": str(CURRENT_MJCF_PATH),
         "current_mjcf_sha256": CURRENT_MJCF_SHA256,
+        "compatible_data_mjcf_sha256s": sorted(COMPATIBLE_DATA_MJCF_SHA256S),
         "large_source_mjcf_path": str(large_source_mjcf),
         "large_source_mjcf_sha256": _sha256(large_source_mjcf),
         "hq4_provenance_path": str(hq4_provenance_path),
         "hq4_provenance_sha256": _sha256(hq4_provenance_path),
+        "hq4_target_mjcf_sha256": hq4_mjcf_sha256,
         "mine_provenance_path": str(mine_provenance_path),
         "mine_provenance_sha256": _sha256(mine_provenance_path),
+        "mine_mjcf_sha256": mine_mjcf_sha256,
         "mujoco_dof_names": CURRENT_DOF_NAMES,
         "mujoco_dof_axes": CURRENT_DOF_AXES.tolist(),
         "mujoco_dof_ranges": CURRENT_DOF_RANGES.tolist(),

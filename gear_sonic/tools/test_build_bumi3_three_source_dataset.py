@@ -70,6 +70,19 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_source_mjcf_gate_accepts_only_current_and_reviewed_pre_collision_hash() -> None:
+    """数据来源可使用当前或碰撞修正前指纹，但必须拒绝任意未知 MJCF。"""
+
+    assert build_tool._require_compatible_source_mjcf(
+        "当前资产", build_tool.CURRENT_MJCF_SHA256
+    ) == build_tool.CURRENT_MJCF_SHA256
+    assert build_tool._require_compatible_source_mjcf(
+        "历史资产", build_tool.PRE_COLLISION_MJCF_SHA256
+    ) == build_tool.PRE_COLLISION_MJCF_SHA256
+    with pytest.raises(ValueError, match="MJCF 指纹不在审核白名单"):
+        build_tool._require_compatible_source_mjcf("未知资产", "0" * 64)
+
+
 def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     large = tmp_path / "large"
     hq4 = tmp_path / "hq4"

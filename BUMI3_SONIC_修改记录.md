@@ -2050,3 +2050,25 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   再次核对无进程引用，实际删除路径、容量和结果将在本节后续记录，不能用计划冒充完成。
 - 代码回滚可反向提交本节对应提交；数据回滚边界以新索引发布和旧目录实际删除记录为准。
   原始三源 PKL 始终保留，因此即使旧软链接索引被删除，也可用记录的构建命令重新生成。
+
+### 5. 服务器首次 v2 构建的资产指纹门禁修正
+
+- 上述代码提交 `13645ea066720f3b881967f49c867500388a3b19` 已推送 GitHub，服务器
+  同分支通过 `git pull --ff-only` 快进到同一提交且工作区干净。首次执行 v2 build 时，
+  构建器在发现来源阶段、创建目标目录前 fail-fast；日志为
+  `/data/sonic_bumi3/build_logs/bumi3_base_anchor_v2_build_13645ea.log`。
+- 失败原因是 hq4/Mine provenance 保存的目标 MJCF SHA256 为
+  `02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe`，而当前碰撞
+  修正后 MJCF 为 `c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04`。
+  通过 `git show 7cf7616^:.../bumi3.xml | sha256sum` 确认前一个指纹恰好就是碰撞修正前
+  仓库资产；提交 `7cf7616` 只修改已审核的 geom/地面，受保护的质量、惯量、关节、执行器
+  和传感器签名仍由集成验证器逐项锁定。因此该失败是完整 XML 哈希把碰撞层变化误判为
+  轨迹运动学不兼容，不是数据坐标、帧率或关节契约失败。
+- `build_bumi3_three_source_dataset.py` 新增精确白名单：只接受当前完整指纹和上述已审核的
+  碰撞修正前指纹。未知旧版本仍立即失败；大集归档 XML 仍逐项比较 21 个关节名称、遍历
+  顺序、轴和限位，Robot PKL 仍逐条检查 dof/pose 轴符号。summary/provenance 额外记录
+  当前指纹、允许指纹、hq4 实际指纹和 Mine 实际指纹，不能静默放宽。
+- `test_build_bumi3_three_source_dataset.py` 新增当前指纹、碰撞修正前指纹通过以及任意未知
+  指纹拒绝的三向回归。定向测试结果为 `5 passed in 0.15s`，相关文件 compileall 与
+  `git diff --check` 通过。失败 build 未生成目标索引、checkpoint、event 或临时 staging，
+  只保留上面的诊断日志作为本次正式数据构建审计证据。
