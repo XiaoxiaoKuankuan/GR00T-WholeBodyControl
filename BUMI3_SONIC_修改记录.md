@@ -2136,3 +2136,39 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 去耦后本地重新运行集成验证，无任何外部环境变量即可通过；sim2sim 100 控制周期通过，
   BUMI 相关 pytest 为 `42 passed in 5.14s`，compileall 与 `git diff --check` 通过。服务器
   还需在同步该去耦提交后，不设置任何参考路径重跑 1-env smoke，结果将在后续记录补全。
+
+### 8. SONIC 本地资产闭环、服务器复验与旧产物清理
+
+- 去除外部机器人仓库依赖的提交
+  `3ed0b0539965e88d069542c8d5a23284262e8747` 已推送 GitHub，并由服务器 SONIC 仓库
+  `/home/liwei/GR00T-WholeBodyControl` 在同一
+  `feature/bumi-native-sonic-full-training` 分支执行 `git pull --ff-only`。服务器随后使用
+  `env -u BUMI3_REFERENCE_ROOT` 启动 1-env、1-step Isaac Lab smoke，证明没有借助残留环境
+  变量或 `/home/liwei/legged_lab`：MotionLib 实际加载当前 v2 的 `95358` 条训练元数据，reset
+  和 step 均通过，action 为 `21`、policy observation 为 `690`、critic observation 为
+  `1245`，tokenizer 仍只有 `g1` 与 `smpl`。质量、KP/KD、踝关节 armature 随机化均为
+  `None`，执行器没有随机延迟，仅保留 `base_link` COM 随机化。
+- 本轮删除前再次确认没有 `train_agent_trl.py`、`eval_agent_trl.py`、旧 TensorBoard 或其他
+  引用 `/data/sonic_bumi3` 的活跃进程。按用户明确授权永久删除服务器旧三源软链接索引及
+  `.pre_*` 备份、旧 `hq_all_v1`、旧 `/data/sonic_bumi3/runs`（删除前约 `23 GiB`、共
+  `65` 个 checkpoint/event/model 文件）、旧 smoke/export/tensorboard/launch/log/
+  code_snapshot/reference_asset 目录和对应 `/tmp` 参考目录；同时永久删除本地
+  `/home/weili/GR00T-WholeBodyControl/models/sonic_bumi3`（删除前约 `2.0 GiB`，包含旧
+  16000、18000、70000 step checkpoint/ONNX）。这些旧模型与派生产物没有回收站，不能
+  直接恢复，但源 PKL 仍完整保留。
+- 清除历史构建和冒烟日志后，服务器 `build_logs` 只保留当前正式 v2 的
+  `bumi3_base_anchor_v2_build_a1665a4.log` 与
+  `bumi3_base_anchor_v2_hash_a1665a4.log`；本轮 1-env smoke 生成的两份精确
+  `/tmp/isaaclab/logs` 文件也已删除，符合 `agent.md` 中测试结束后清除临时产物的要求。
+- 当前保留的数据只有训练仍需要的三套源和当前联合索引：大集
+  `bumi3_smpl_97660_v1` 约 `29 GiB`、四库 `hq4_pass50_v1` 约 `3.5 GiB`、包含 99 条
+  Mine 来源的 `hq_all_v2` 约 `3.7 GiB`，以及只含软链接/manifest 的
+  `bumi3_sonic_three_source_base_anchor_v2` 约 `946 MiB`。不能删除 `hq_all_v2`，因为
+  当前 v2 索引的 99 条 Mine Robot-only 动作仍精确引用该源；这不是继续使用旧四库训练集。
+- 清理后再次运行完整索引验证，而非只检查目录名：`build_bumi3_three_source_dataset.py
+  validate --output-root /data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2
+  --workers 8` 对 `100575/100575` 个源文件完成 SHA256 复核并输出
+  `BUMI3_THREE_SOURCE_VALIDATE=PASS`。最终计数保持 train Robot `95358`、paired SMPL
+  `95222`、test Robot/SMPL `5217/5217`，说明旧数据和 checkpoint 清理没有造成当前索引
+  断链。额外启动的逐软链接只读扫描因耗时超过终端等待窗口而被精确终止，没有遗留测试
+  进程，也没有修改任何数据。
