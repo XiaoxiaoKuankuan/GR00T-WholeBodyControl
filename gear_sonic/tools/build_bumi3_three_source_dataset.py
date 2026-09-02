@@ -102,8 +102,8 @@ DEFAULT_OUTPUT_ROOT = DEFAULT_DATA_ROOT / "bumi3_sonic_three_source_base_anchor_
 
 DEFAULT_EXPECTED_LARGE_TRAIN = 92443
 DEFAULT_EXPECTED_LARGE_TEST = 5217
-DEFAULT_EXPECTED_HQ4_ROBOT = 2790
-DEFAULT_EXPECTED_HQ4_SMPL = 2788
+DEFAULT_EXPECTED_HQ4_ROBOT = 2816
+DEFAULT_EXPECTED_HQ4_SMPL = 2815
 DEFAULT_EXPECTED_MINE = 99
 
 
@@ -228,6 +228,21 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_key_whitelist(path: Path, label: str) -> set[str]:
+    """读取一行一个动作 key 的固定白名单，并拒绝空值或重复项。"""
+
+    if not path.is_file():
+        raise ValueError(f"{label} 白名单不存在: {path}")
+    keys = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    if any(not key for key in keys):
+        raise ValueError(f"{label} 白名单包含空行: {path}")
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"{label} 白名单包含重复 key: {path}")
+    if not keys:
+        raise ValueError(f"{label} 白名单为空: {path}")
+    return set(keys)
+
+
 def _require_compatible_source_mjcf(label: str, source_sha256: Any) -> str:
     """只接受当前或已审核的碰撞修正前 BUMI3 MJCF 完整指纹。"""
 
@@ -302,8 +317,30 @@ def discover_records(args: argparse.Namespace) -> tuple[list[SourceRecord], dict
     large_train_smpl = _index_pkls(large_root / "train/smpl_filtered")
     large_test_robot = _index_pkls(large_root / "test/robot_filtered")
     large_test_smpl = _index_pkls(large_root / "test/smpl_filtered")
-    hq4_robot = _index_pkls(hq4_root / "built/robot_all")
-    hq4_smpl = _index_pkls(hq4_root / "built/smpl_all")
+    hq4_robot_all = _index_pkls(hq4_root / "built/robot_all")
+    hq4_smpl_all = _index_pkls(hq4_root / "built/smpl_all")
+    configured_hq4_whitelist = getattr(args, "hq4_whitelist", None)
+    hq4_whitelist_path = (
+        Path(configured_hq4_whitelist)
+        if configured_hq4_whitelist is not None
+        else hq4_root / "meta/sonic_train_whitelist.txt"
+    ).resolve()
+    hq4_whitelist = _load_key_whitelist(hq4_whitelist_path, "hq4 SONIC 训练")
+    missing_hq4_robot = sorted(hq4_whitelist - set(hq4_robot_all))
+    if missing_hq4_robot:
+        raise ValueError(f"hq4 白名单 key 缺少 Robot PKL: {missing_hq4_robot[:10]}")
+    if not set(hq4_smpl_all).issubset(hq4_robot_all):
+        raise ValueError(
+            "hq4 存在无 Robot 的 SMPL: "
+            f"{sorted(set(hq4_smpl_all)-set(hq4_robot_all))[:10]}"
+        )
+    hq4_robot = {key: hq4_robot_all[key] for key in sorted(hq4_whitelist)}
+    hq4_smpl = {
+        key: hq4_smpl_all[key]
+        for key in sorted(hq4_whitelist & set(hq4_smpl_all))
+    }
+    hq4_ignored_robot_keys = sorted(set(hq4_robot_all) - hq4_whitelist)
+    hq4_ignored_smpl_keys = sorted(set(hq4_smpl_all) - hq4_whitelist)
     mine_all = _index_pkls(mine_robot_dir)
     mine_robot = {key: path for key, path in mine_all.items() if key.startswith("mine__")}
 
@@ -323,11 +360,6 @@ def discover_records(args: argparse.Namespace) -> tuple[list[SourceRecord], dict
         )
     if set(large_test_robot) != set(large_test_smpl):
         raise ValueError("大集 test Robot/SMPL key 不完全一致")
-    if not set(hq4_smpl).issubset(hq4_robot):
-        raise ValueError(
-            f"hq4 存在无 Robot 的 SMPL: {sorted(set(hq4_smpl)-set(hq4_robot))[:10]}"
-        )
-
     train_sets = {
         "large_train": set(large_train_robot),
         "hq4": set(hq4_robot),
@@ -398,6 +430,15 @@ def discover_records(args: argparse.Namespace) -> tuple[list[SourceRecord], dict
         "large_test_smpl": len(large_test_smpl),
         "hq4_robot": len(hq4_robot),
         "hq4_smpl": len(hq4_smpl),
+        "hq4_all_robot_before_whitelist": len(hq4_robot_all),
+        "hq4_all_smpl_before_whitelist": len(hq4_smpl_all),
+        "hq4_whitelist_path": str(hq4_whitelist_path),
+        "hq4_whitelist_sha256": _sha256(hq4_whitelist_path),
+        "hq4_whitelist_count": len(hq4_whitelist),
+        "hq4_ignored_robot_count": len(hq4_ignored_robot_keys),
+        "hq4_ignored_smpl_count": len(hq4_ignored_smpl_keys),
+        "hq4_ignored_robot_keys": hq4_ignored_robot_keys,
+        "hq4_ignored_smpl_keys": hq4_ignored_smpl_keys,
         "mine_robot_only": len(mine_robot),
         "train_unique_keys": len(train_keys),
         "test_unique_keys": len(large_test_robot),
@@ -1003,6 +1044,14 @@ def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--large-root", type=Path, default=DEFAULT_LARGE_ROOT)
     parser.add_argument("--hq4-root", type=Path, default=DEFAULT_HQ4_ROOT)
+    parser.add_argument(
+        "--hq4-whitelist",
+        type=Path,
+        help=(
+            "一行一个 hq4 动作 key 的 SONIC 固定白名单；默认读取 "
+            "<hq4-root>/meta/sonic_train_whitelist.txt"
+        ),
+    )
     parser.add_argument("--mine-robot-dir", type=Path, default=DEFAULT_MINE_ROBOT_DIR)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))

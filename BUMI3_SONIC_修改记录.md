@@ -2072,3 +2072,30 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   指纹拒绝的三向回归。定向测试结果为 `5 passed in 0.15s`，相关文件 compileall 与
   `git diff --check` 通过。失败 build 未生成目标索引、checkpoint、event 或临时 staging，
   只保留上面的诊断日志作为本次正式数据构建审计证据。
+
+### 6. 锁定服务器当前 2816 条 hq4 PASS 白名单
+
+- 指纹修正提交 `99397122a4d54b4492c2334d0401ec05792ba7c3` 推送并同步服务器后，
+  第二次 build 在计数门禁 fail-fast：当前 `hq4_pass50_v1` 含 Robot `2816`、SMPL
+  `2815`，而旧代码仍锁定历史 `2790/2788`。日志为
+  `/data/sonic_bumi3/build_logs/bumi3_base_anchor_v2_build_9939712.log`，目标 v2 目录仍未
+  创建，tmux 已结束且退出码为 1。
+- 现场检查确认这不是在旧目录里临时多放 26 个文件：当前 `meta/provenance.json` 和
+  `meta/manifest.jsonl` 均于 2026-09-02 13:53 整套更新，provenance 明确声明
+  `pass_count=2816`，质量报告 SHA256 为
+  `2fc2c5865b86d38f656832985a50cd61611cc5979a533bb9a71f4fd65c2c3b20`。与旧 2790
+  manifest 比较，旧集合有 10 条已不在新发布集，新集合新增 36 条，净增 26；因此不能把
+  旧 key 列表直接套到已经替换的源目录，也不能假装仍是原 2790 资产。
+- 按“旧数据删除、使用当前新数据”的边界，服务器从当前 hq4 manifest 原子生成固定
+  `/data/sonic_bumi3/datasets/hq4_pass50_v1/meta/sonic_train_whitelist.txt`，包含 2816 个
+  唯一 key，SHA256 为
+  `85355027e47112b61201e5debe1d581a016bc4a597a99208cd33a1f75e1398f5`；相邻
+  `sonic_train_whitelist.provenance.json` 保存 manifest/provenance/质量报告 SHA 和生成时
+  `2816/2815` 计数。原 Robot/SMPL PKL 没有改写。
+- 构建器现在必须读取上述白名单后再索引 hq4；白名单缺失、空行、重复 key、缺少 Robot
+  或计数不符均立即失败。目录内未来新增但未进入固定 manifest 的 PKL 只记录到
+  `hq4_ignored_*`，不会自动进入训练。默认 hq4 计数随当前发布契约更新为
+  `2816 Robot/2815 SMPL`。
+- 缩小版构建测试额外放入一条白名单外 hq4 Robot/SMPL，并确认最终 manifest 不包含它；
+  定向结果为 `5 passed in 0.17s`，`git diff --check` 通过。该改动不改变大集 92443/5217
+  或 Mine 99 条来源，也不改变逐 PKL 坐标、帧率、关节、配对和 SHA256 门禁。

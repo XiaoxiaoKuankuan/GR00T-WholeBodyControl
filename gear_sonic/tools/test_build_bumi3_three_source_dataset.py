@@ -97,6 +97,8 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     _write_robot(hq4 / "built/robot_all/hq4__paired.pkl", frames=6, fps=50.0)
     _write_smpl(hq4 / "built/smpl_all/hq4__paired.pkl", frames=6)
     _write_robot(hq4 / "built/robot_all/hq4__robot_only.pkl", frames=6, fps=50.0)
+    _write_robot(hq4 / "built/robot_all/hq4__not_whitelisted.pkl", frames=6, fps=50.0)
+    _write_smpl(hq4 / "built/smpl_all/hq4__not_whitelisted.pkl", frames=6)
 
     _write_robot(mine_dir / "mine__self.pkl", frames=9, fps=30.0)
     _write_robot(mine_dir / "aistpp__must_not_reenter.pkl", frames=9, fps=30.0)
@@ -108,6 +110,10 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     hq4_provenance.parent.mkdir(parents=True)
     hq4_provenance.write_text(
         json.dumps({"target_mjcf_sha256": build_tool.CURRENT_MJCF_SHA256}),
+        encoding="utf-8",
+    )
+    (hq4 / "meta/sonic_train_whitelist.txt").write_text(
+        "hq4__paired\nhq4__robot_only\n",
         encoding="utf-8",
     )
     mine_provenance = tmp_path / "hq_all_v2/meta/provenance.json"
@@ -162,6 +168,7 @@ def test_build_and_validate_three_source_index(tmp_path: Path) -> None:
     assert train_rows["large_train"]["frame_delta_smpl_minus_robot"] == -2
     assert train_rows["large_train"]["aligned_source_frames"] == 8
     assert train_rows["hq4__robot_only"]["status"] == "ROBOT_ONLY_NO_SMPL"
+    assert "hq4__not_whitelisted" not in train_rows
     assert train_rows["mine__self"]["status"] == "ROBOT_ONLY_NO_SMPL"
     assert "aistpp__must_not_reenter" not in train_rows
 
