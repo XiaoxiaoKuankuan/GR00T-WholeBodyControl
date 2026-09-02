@@ -3,9 +3,8 @@
 
 """验证 BUMI3 SONIC sim2sim 的资产、顺序、网络输入和闭环有限值。
 
-脚本会解析本仓库与 ``legged_lab`` 当前 BUMI3 MJCF，允许本仓库只改 meshdir、地面和
-明确审核的可视/碰撞 geom，同时严格比较惯量、关节、执行器、传感器等动力学语义；
-随后验证所有 mesh、21 DoF、22 robot bodies、22 个可视网格、14 个碰撞体、静态 reset
+脚本只解析并锁定 SONIC 仓库内 BUMI3 MJCF，不读取任何外部机器人仓库；随后验证
+所有 mesh、21 DoF、22 robot bodies、22 个可视网格、14 个碰撞体、静态 reset
 无自碰撞/陷地、双向排列、动作缩放、PD/armature、SONIC 1170 维输入和 21 维输出，
 并检查红色参考影子只复制不参与物理的 22 个可视 geom、根高不跟随真实机器人。
 默认还会使用静态参考与零动作策略执行 100 个 50 Hz 控制周期（共 400 个 MuJoCo
@@ -36,9 +35,8 @@ from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
 )
 
 
-DEFAULT_REFERENCE_MJCF = Path(
-    "/home/weili/legged_lab/source/NoetixRobot/NoetixRobot/"
-    "assets/robots/bumi3/mjcf/bumi3.xml"
+EXPECTED_LOCAL_MJCF_SHA256 = (
+    "c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04"
 )
 
 EXPECTED_COLLISION_BODIES = {
@@ -72,45 +70,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _protected_xml_signature(element: ET.Element) -> tuple:
-    """构造受保护 MJCF 语义签名，排除本轮获准修改的 geom 与碰撞 default。
-
-    所有 ``geom``（包括地面、可视和碰撞）由专门的碰撞契约逐项验证；这里严格锁定
-    其余资产、body 层级、惯量、关节、site、执行器和传感器，防止修改碰撞时误改
-    legged_lab 参考动力学数值。
-    """
-
-    attributes = dict(element.attrib)
-    if element.tag == "compiler" and "meshdir" in attributes:
-        attributes["meshdir"] = "<BUMI3_MESH_DIR>"
-    text = (element.text or "").strip()
-    return (
-        element.tag,
-        tuple(sorted(attributes.items())),
-        text,
-        tuple(
-            _protected_xml_signature(child)
-            for child in element
-            if child.tag != "geom"
-            and not (
-                child.tag == "default"
-                and child.attrib.get("class") in {"visual", "collision"}
-            )
-        ),
-    )
-
-
-def _validate_mjcf_source(local_path: Path, reference_path: Path) -> None:
-    if not reference_path.is_file():
-        raise FileNotFoundError(f"legged_lab BUMI3 MJCF 不存在: {reference_path}")
-    local_root = ET.parse(local_path).getroot()
-    reference_root = ET.parse(reference_path).getroot()
-    if _protected_xml_signature(local_root) != _protected_xml_signature(reference_root):
-        raise AssertionError(
-            "本地 BUMI3 MJCF 的惯量、关节、执行器或传感器已偏离 legged_lab 参考"
-        )
 
 
 def _validate_meshes(model_path: Path) -> int:
@@ -282,7 +241,9 @@ def _validate_contract_values(contract: Bumi3Contract) -> None:
 
 def validate(args: argparse.Namespace) -> None:
     contract = Bumi3Contract.from_yaml(args.config)
-    _validate_mjcf_source(contract.model_path, args.reference_mjcf)
+    assert _sha256(contract.model_path) == EXPECTED_LOCAL_MJCF_SHA256, (
+        "SONIC 仓库内 BUMI3 MJCF 指纹变化，必须同步审计 sim2sim 契约"
+    )
     mesh_count = _validate_meshes(contract.model_path)
     model = _validate_model(contract)
     visual_geom_ids, collision_geom_ids = _validate_collision_contract(model)
@@ -378,7 +339,6 @@ def validate(args: argparse.Namespace) -> None:
 
     print("BUMI3_SIM2SIM_VALIDATION=PASS")
     print(f"LOCAL_MJCF_SHA256={_sha256(contract.model_path)}")
-    print(f"REFERENCE_MJCF_SHA256={_sha256(args.reference_mjcf)}")
     print(f"MJCF_MODEL=nq:{model.nq},nv:{model.nv},nu:{model.nu},robot_bodies:{model.nbody - 1}")
     print(f"MESH_COUNT={mesh_count}")
     print(
@@ -427,7 +387,6 @@ def validate(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_BUMI3_SIM2SIM_CONFIG)
-    parser.add_argument("--reference-mjcf", type=Path, default=DEFAULT_REFERENCE_MJCF)
     parser.add_argument("--policy", type=Path)
     parser.add_argument("--motion", type=Path)
     parser.add_argument("--motion-key")

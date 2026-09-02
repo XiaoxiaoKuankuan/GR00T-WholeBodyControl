@@ -2099,3 +2099,40 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 缩小版构建测试额外放入一条白名单外 hq4 Robot/SMPL，并确认最终 manifest 不包含它；
   定向结果为 `5 passed in 0.17s`，`git diff --check` 通过。该改动不改变大集 92443/5217
   或 Mine 99 条来源，也不改变逐 PKL 坐标、帧率、关节、配对和 SHA256 门禁。
+
+### 7. v2 全量发布与移除外部机器人仓库验证依赖
+
+- 提交 `a1665a4c5763b7b9cc1619c8029f3e7a2b84b8c2` 推送并同步服务器后，第三次
+  build 对 `100575` 条训练/test 动作完成全量 PKL 数值审计，退出码 0，并原子发布
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2`。独立 hash validate
+  再次逐条复核 `100575/100575` 个源文件 SHA256，输出
+  `BUMI3_THREE_SOURCE_VALIDATE=PASS` 且 tmux dead status 为 0。正式日志分别为
+  `/data/sonic_bumi3/build_logs/bumi3_base_anchor_v2_build_a1665a4.log` 和
+  `bumi3_base_anchor_v2_hash_a1665a4.log`。
+- v2 最终静态计数：train Robot `95358`、paired SMPL `95222`、Robot-only `136`、test
+  Robot/SMPL `5217/5217`。Robot-only 包含 `100` 条没有 SMPL 和 `36` 条 base/SMPL
+  根姿态中位差超过 45 度的配对降级；没有丢弃合格 Robot。来源自然采样比例为大集
+  `0.9694309863881373`、hq4 `0.0295308206967428`、Mine `0.001038192915119864`。
+- 全量坐标统计中，大集 train 合格配对根姿态差中位数总体为约 `7.615°`、最大
+  `44.441°`，Robot clip 根倾角中位数约 `6.082°`；test 对应约 `7.547°/28.310°` 和
+  `6.021°`。hq4 配对根姿态差中位数总体约 `8.824°`、最大 `36.729°`，Robot 根倾角
+  中位数约 `6.880°`。这些结果未发现数据集整体横躺；它们是数据静态门禁，不代替策略
+  收敛证明。
+- 新 v2 执行 1-env、1-step Isaac Lab smoke，实际加载 `95358` 条 MotionLib 元数据并抽取
+  `walking_quip_360_R_002__A430_M`，完成场景、reset 和 step；action shape `21`、policy
+  obs `690`、critic obs `1245`，tokenizer 只有 `g1/smpl` 五项，event 现场显示质量、
+  armature、KP/KD 均为 `None`，只保留 `base_link` COM。输出 `smoke: 通过`，观测、动作、
+  reward 无 NaN/Inf。服务器无图形设备的 Vulkan 报错是既有 headless 渲染噪声，PhysX 和
+  smoke 仍完成。
+- 该 smoke 首次调用暴露出验证器会在启动前读取 `/home/liwei/legged_lab` 的外部参考哈希。
+  这不属于训练运行时依赖：实际 MotionLib、URDF、MJCF 和机器人配置始终从当前 SONIC
+  仓库加载；但把外部仓库放在 smoke 前置门禁仍是错误耦合。按用户要求，
+  `validate_bumi3_integration.py` 已删除外部路径发现、`BUMI3_REFERENCE_ROOT`、动态导入
+  `NoetixRobot/bumi.py` 及逐文件外部比较，改为锁定 SONIC 仓库内 URDF、MJCF 和 mesh
+  bundle 指纹，并继续用显式数值断言验证全部执行器、初始姿态、mapping 和 action scale。
+- `validate_bumi3_sim2sim.py` 同样删除外部 MJCF 参数和比较，只读取仓库内
+  `gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`；sim2sim 使用文档同步说明没有
+  `legged_lab` 或 `NoetixRobot` 依赖。外部仓库当前内容不会被复制、接受或用于训练。
+- 去耦后本地重新运行集成验证，无任何外部环境变量即可通过；sim2sim 100 控制周期通过，
+  BUMI 相关 pytest 为 `42 passed in 5.14s`，compileall 与 `git diff --check` 通过。服务器
+  还需在同步该去耦提交后，不设置任何参考路径重跑 1-env smoke，结果将在后续记录补全。

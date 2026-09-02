@@ -4,8 +4,8 @@
 
 """验证 BUMI3 原生 SONIC 的资产、顺序、执行器和双编码器训练契约。
 
-脚本默认完成不依赖训练数据的全部检查：追溯参考 URDF/MJCF 允许的 mesh 路径与
-BUMI3 爬行/跪地碰撞体改动，验证 MJCF 的 22 个可视网格、14 个独立碰撞体和地面
+脚本默认完成不依赖训练数据的全部检查：锁定 SONIC 仓库内 URDF/MJCF/mesh 指纹与
+BUMI3 爬行/跪地碰撞契约，验证 MJCF 的 22 个可视网格、14 个独立碰撞体和地面
 高度，解析两种机器人描述并检查 mesh、验证 21 DoF/22
 body、双向顺序与 round trip、执行器动作缩放/无延迟，以及 Hydra 组合后的时间
 参数、网络输入维度和 Teleop 清除结果。动态机器人配置检查会启动 headless
@@ -39,35 +39,16 @@ ASSET_ROOT = REPO_ROOT / "gear_sonic/data/assets/robot_description"
 URDF_PATH = ASSET_ROOT / "urdf/bumi3/bumi.urdf"
 MJCF_PATH = ASSET_ROOT / "mjcf/bumi3.xml"
 MESH_DIR = ASSET_ROOT / "meshes/bumi3"
-
-
-def _resolve_reference_root() -> Path:
-    """解析 BUMI3 参考资产目录，兼容本机与训练服务器用户路径。"""
-
-    relative = Path("source/NoetixRobot/NoetixRobot/assets/robots/bumi3")
-    configured = os.environ.get("BUMI3_REFERENCE_ROOT")
-    candidates = [
-        Path(configured).expanduser() if configured else None,
-        REPO_ROOT.parent / "legged_lab" / relative,
-        Path("/home/weili/legged_lab") / relative,
-        Path("/home/liwei/legged_lab") / relative,
-        Path("/home/listao/Noetix-Lab") / relative,
-    ]
-    for candidate in candidates:
-        if candidate is not None and (candidate / "bumi.py").is_file():
-            return candidate
-    searched = [str(candidate) for candidate in candidates if candidate is not None]
-    raise FileNotFoundError(
-        "未找到 BUMI3 参考资产；请设置 BUMI3_REFERENCE_ROOT。"
-        f" 已检查: {searched}"
-    )
-
-
-REFERENCE_ROOT = _resolve_reference_root()
 EXP_NAME = "manager/universal_token/all_modes/sonic_bumi3"
-REFERENCE_BUMI_PY_SHA256 = "74aaeca9da615c50e3749e4f103bbf713b83443d9cb16fab08edfd320227c03e"
-REFERENCE_URDF_SHA256 = "174c1747019ced64267e74244bf89f3746856c90c30f88e4f162582ebc486476"
-REFERENCE_MJCF_SHA256 = "041c81e8176c7f375302796deca28b141891a3c097d8e341e8d967b735466edf"
+EXPECTED_LOCAL_URDF_SHA256 = (
+    "0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955"
+)
+EXPECTED_LOCAL_MJCF_SHA256 = (
+    "c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04"
+)
+EXPECTED_LOCAL_MESH_BUNDLE_SHA256 = (
+    "5d84767fbd21ec22434c1cba8145e4887d4f5910512d5a8efeac50781f3afa26"
+)
 
 # 圆柱轴使用 URDF 的局部 Z 轴。以下数值是用户在 BUMI3 STL 初始包围盒方案上
 # 明确指定的训练碰撞参数；验证脚本锁定这些值，防止后续静默回退或漂移。
@@ -103,12 +84,6 @@ EXPECTED_CYLINDER_COLLISIONS = {
         "length": 0.13,
     },
 }
-EXPECTED_COLLISIONLESS_LINKS = {
-    "l_leg_pitch_link",
-    "r_leg_pitch_link",
-    "l_leg_yaw_link",
-    "r_leg_yaw_link",
-}
 EXPECTED_MJCF_MESH_COLLISIONS = {
     "waist_yaw_link",
     "l_arm_roll_link",
@@ -135,52 +110,16 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _canonical_xml(
-    node: ET.Element,
-    *,
-    omit_collisions: bool = False,
-) -> tuple:
-    """把 XML 转为可比较结构，并将本地 BUMI3 mesh 路径还原为参考路径。"""
+def _mesh_bundle_sha256(root: Path) -> str:
+    """按文件名和内容生成仓库内 BUMI3 mesh 集合的稳定指纹。"""
 
-    attributes = dict(node.attrib)
-    if node.tag == "mesh" and "filename" in attributes:
-        attributes["filename"] = attributes["filename"].replace(
-            "../../meshes/bumi3/", "../meshes/"
-        )
-    children = [
-        _canonical_xml(child, omit_collisions=omit_collisions)
-        for child in node
-        if not (omit_collisions and child.tag == "collision")
-    ]
-    return (
-        node.tag,
-        tuple(sorted(attributes.items())),
-        (node.text or "").strip(),
-        tuple(children),
-    )
-
-
-def _canonical_mjcf_protected(node: ET.Element) -> tuple:
-    """构造排除获准 geom 改动的 MJCF 签名，严格保护其余参考动力学语义。"""
-
-    attributes = dict(node.attrib)
-    if node.tag == "compiler" and "meshdir" in attributes:
-        attributes["meshdir"] = "<BUMI3_MESH_DIR>"
-    children = [
-        _canonical_mjcf_protected(child)
-        for child in node
-        if child.tag != "geom"
-        and not (
-            child.tag == "default"
-            and child.attrib.get("class") in {"visual", "collision"}
-        )
-    ]
-    return (
-        node.tag,
-        tuple(sorted(attributes.items())),
-        (node.text or "").strip(),
-        tuple(children),
-    )
+    digest = hashlib.sha256()
+    for path in sorted(candidate for candidate in root.iterdir() if candidate.is_file()):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _parse_vector(value: str) -> tuple[float, ...]:
@@ -191,15 +130,10 @@ def _parse_vector(value: str) -> tuple[float, ...]:
 
 def _validate_urdf_collision_policy(
     urdf_root: ET.Element,
-    reference_root: ET.Element,
 ) -> None:
-    """验证仅按用户指定增删碰撞，并核对五个 BUMI3 简化圆柱。"""
+    """只根据 SONIC 仓库契约核对五个圆柱、九个 mesh 和无碰撞 link。"""
 
     local_links = {node.attrib["name"]: node for node in urdf_root.findall("link")}
-    reference_links = {
-        node.attrib["name"]: node for node in reference_root.findall("link")
-    }
-    assert set(local_links) == set(reference_links), "本地/参考 URDF link 集合不一致"
 
     for link_name, local_link in local_links.items():
         collisions = local_link.findall("collision")
@@ -218,13 +152,21 @@ def _validate_urdf_collision_policy(
             assert _parse_vector(origin.attrib["rpy"]) == expected["rpy"]
             assert math.isclose(float(cylinder.attrib["radius"]), expected["radius"])
             assert math.isclose(float(cylinder.attrib["length"]), expected["length"])
-        elif link_name in EXPECTED_COLLISIONLESS_LINKS:
-            assert not collisions, f"{link_name} 按 BUMI3 碰撞策略不得包含 collision"
+        elif link_name in EXPECTED_MJCF_MESH_COLLISIONS:
+            assert len(collisions) == 1, f"{link_name} 必须恰好有一个 mesh collision"
+            collision = collisions[0]
+            origin = collision.find("origin")
+            geometry = collision.find("geometry")
+            assert origin is not None and geometry is not None
+            mesh = geometry.find("mesh")
+            assert mesh is not None and len(geometry) == 1
+            assert _parse_vector(origin.attrib["xyz"]) == (0.0, 0.0, 0.0)
+            assert _parse_vector(origin.attrib["rpy"]) == (0.0, 0.0, 0.0)
+            assert mesh.attrib["filename"] == (
+                f"../../meshes/bumi3/{link_name}.STL"
+            )
         else:
-            reference_collisions = reference_links[link_name].findall("collision")
-            assert [_canonical_xml(node) for node in collisions] == [
-                _canonical_xml(node) for node in reference_collisions
-            ], f"{link_name} 出现用户指定范围之外的 collision 改动"
+            assert not collisions, f"{link_name} 按 SONIC BUMI3 契约不得包含 collision"
 
 
 def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
@@ -301,40 +243,24 @@ def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
             assert collision.attrib["mesh"] == body_name
 
 
-def _validate_asset_provenance() -> None:
-    """锁定参考版本，并确认 URDF/MJCF 只含获准路径和碰撞策略改动。"""
+def _validate_repository_assets() -> None:
+    """只锁定 SONIC 仓库内 BUMI3 资产，不读取任何外部参考仓库。"""
 
-    assert _sha256(REFERENCE_ROOT / "bumi.py") == REFERENCE_BUMI_PY_SHA256, (
-        "参考 bumi.py 已变化；必须重新审计执行器参数后更新集成"
+    assert _sha256(URDF_PATH) == EXPECTED_LOCAL_URDF_SHA256, (
+        "SONIC 仓库内 BUMI3 URDF 指纹变化，必须同步审计并更新契约"
     )
-    assert _sha256(REFERENCE_ROOT / "urdf/bumi.urdf") == REFERENCE_URDF_SHA256, (
-        "参考 BUMI3 URDF 已变化；必须重新审计资产契约"
+    assert _sha256(MJCF_PATH) == EXPECTED_LOCAL_MJCF_SHA256, (
+        "SONIC 仓库内 BUMI3 MJCF 指纹变化，必须同步审计并更新契约"
     )
-    assert _sha256(REFERENCE_ROOT / "mjcf/bumi3.xml") == REFERENCE_MJCF_SHA256, (
-        "参考 BUMI3 MJCF 已变化；必须重新审计资产契约"
+    assert _mesh_bundle_sha256(MESH_DIR) == EXPECTED_LOCAL_MESH_BUNDLE_SHA256, (
+        "SONIC 仓库内 BUMI3 mesh 集合变化，必须同步审计并更新契约"
     )
 
-    reference_urdf_root = ET.parse(REFERENCE_ROOT / "urdf/bumi.urdf").getroot()
     local_urdf_root = ET.parse(URDF_PATH).getroot()
-    assert _canonical_xml(local_urdf_root, omit_collisions=True) == _canonical_xml(
-        reference_urdf_root, omit_collisions=True
-    ), "URDF 存在 mesh 路径和用户指定 collision 之外的改动"
-    _validate_urdf_collision_policy(local_urdf_root, reference_urdf_root)
+    _validate_urdf_collision_policy(local_urdf_root)
 
-    reference_mjcf_root = ET.parse(REFERENCE_ROOT / "mjcf/bumi3.xml").getroot()
     local_mjcf_root = ET.parse(MJCF_PATH).getroot()
-    assert _canonical_mjcf_protected(local_mjcf_root) == _canonical_mjcf_protected(
-        reference_mjcf_root
-    ), "MJCF 存在 mesh 路径和审核后 geom 之外的动力学改动"
     _validate_mjcf_collision_policy(local_mjcf_root)
-
-    reference_meshes = sorted(path.name for path in (REFERENCE_ROOT / "meshes").iterdir())
-    copied_meshes = sorted(path.name for path in MESH_DIR.iterdir())
-    assert copied_meshes == reference_meshes, "复制的 BUMI3 meshes 文件集合与参考不一致"
-    for name in reference_meshes:
-        assert _sha256(MESH_DIR / name) == _sha256(REFERENCE_ROOT / "meshes" / name), (
-            f"mesh 文件内容与参考不一致: {name}"
-        )
 
 
 def _validate_xml_and_meshes() -> dict[str, list[str]]:
@@ -710,43 +636,6 @@ def _resolve_action_scale(action_scale: Mapping[str, float], joint_names: Sequen
     return resolved
 
 
-def _load_reference_bumi_cfg():
-    """隔离加载参考 bumi.py，并把 NoetixRobot actuator 映射到项目本地实现。"""
-
-    import importlib.util
-    from types import ModuleType
-
-    from gear_sonic.envs.manager_env.mdp.actuators import DelayedImplicitActuatorCfg
-
-    noetix_stub = ModuleType("NoetixRobot")
-    noetix_stub.__path__ = []
-    actuator_stub = ModuleType("NoetixRobot.actuators")
-    actuator_stub.DelayedImplicitActuatorCfg = DelayedImplicitActuatorCfg
-    assets_stub = ModuleType("NoetixRobot.assets")
-    assets_stub.ASSET_DIR = str(REFERENCE_ROOT.parent.parent)
-    stub_modules = {
-        "NoetixRobot": noetix_stub,
-        "NoetixRobot.actuators": actuator_stub,
-        "NoetixRobot.assets": assets_stub,
-    }
-    previous_modules = {name: sys.modules.get(name) for name in stub_modules}
-    sys.modules.update(stub_modules)
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "_gear_sonic_bumi3_reference", REFERENCE_ROOT / "bumi.py"
-        )
-        assert spec is not None and spec.loader is not None
-        reference_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(reference_module)
-    finally:
-        for name, previous in previous_modules.items():
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
-    return reference_module.Bumi_CFG, reference_module.Bumi_ACTION_SCALE
-
-
 def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # noqa: ARG001
     """在 Isaac Sim 已启动后导入并验证真实 ArticulationCfg。"""
 
@@ -788,7 +677,6 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
     ) == list(range(9, 21))
 
     robot_cfg = bumi3.BUMI3_CFG
-    reference_cfg, reference_action_scale = _load_reference_bumi_cfg()
     assert robot_cfg.spawn.fix_base is False
     assert robot_cfg.spawn.asset_path == (
         "gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf"
@@ -831,13 +719,9 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
     }
     assert robot_cfg.init_state.joint_vel == {".*": 0.0}
     assert robot_cfg.soft_joint_pos_limit_factor == 0.9
-    assert robot_cfg.init_state.pos == reference_cfg.init_state.pos
-    assert robot_cfg.init_state.joint_pos == reference_cfg.init_state.joint_pos
-    assert robot_cfg.init_state.joint_vel == reference_cfg.init_state.joint_vel
-    assert robot_cfg.soft_joint_pos_limit_factor == reference_cfg.soft_joint_pos_limit_factor
 
     actuators = robot_cfg.actuators
-    assert set(actuators) == set(reference_cfg.actuators)
+    assert set(actuators) == {"legs", "waist", "feet", "arms"}
     for actuator_name, actuator in actuators.items():
         assert type(actuator) is ImplicitActuatorCfg, (
             f"执行器 {actuator_name} 必须使用与 G1 相同的无延迟 ImplicitActuatorCfg"
@@ -892,20 +776,6 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
         assert actuators[actuator_name].armature is None, (
             f"非踝执行器 {actuator_name} 不应配置 armature"
         )
-    for actuator_name, actuator in actuators.items():
-        reference_actuator = reference_cfg.actuators[actuator_name]
-        for field_name in (
-            "joint_names_expr",
-            "effort_limit_sim",
-            "velocity_limit_sim",
-            "stiffness",
-            "damping",
-            "armature",
-        ):
-            assert getattr(actuator, field_name) == getattr(reference_actuator, field_name), (
-                f"BUMI3 actuator {actuator_name}.{field_name} 与当前参考 bumi.py 不一致"
-            )
-    assert bumi3.BUMI3_ACTION_SCALE == reference_action_scale
 
     resolved_scale = _resolve_action_scale(
         bumi3.BUMI3_ACTION_SCALE, bumi3.BUMI3_ISAACLAB_DOF_NAMES
@@ -1039,7 +909,7 @@ def main() -> int:
     """运行全部静态/动态契约检查，并在成功时打印关键 resolved 数值。"""
 
     args = _parse_args()
-    _validate_asset_provenance()
+    _validate_repository_assets()
     topology = _validate_xml_and_meshes()
     resolved = _validate_resolved_configs()
 

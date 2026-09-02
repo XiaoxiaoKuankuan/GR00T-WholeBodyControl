@@ -153,10 +153,9 @@ python gear_sonic/tools/validate_bumi3_sim2sim.py \
   --steps 100
 ```
 
-`validate_bumi3_sim2sim.py` 会比较当前本地 MJCF 与
-`/home/weili/legged_lab/.../assets/robots/bumi3/mjcf/bumi3.xml` 的 XML 语义（只允许
-meshdir 因仓库布局不同），检查所有 mesh、21 DoF、22 robot bodies、映射、动作缩放、
-armature、输入输出维度和 NaN/Inf。
+`validate_bumi3_sim2sim.py` 只读取并锁定当前 SONIC 仓库内的 BUMI3 MJCF，不依赖
+`legged_lab`、`NoetixRobot` 或其他外部机器人仓库。它检查所有 mesh、21 DoF、
+22 robot bodies、映射、动作缩放、armature、输入输出维度和 NaN/Inf。
 
 ## 5. 边界
 
