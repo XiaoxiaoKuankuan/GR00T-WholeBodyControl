@@ -5,7 +5,8 @@
 """验证 BUMI3 原生 SONIC 的资产、顺序、执行器和双编码器训练契约。
 
 脚本默认完成不依赖训练数据的全部检查：追溯参考 URDF/MJCF 允许的 mesh 路径与
-BUMI3 爬行/跪地碰撞体改动、解析两种机器人描述并检查 mesh、验证 21 DoF/22
+BUMI3 爬行/跪地碰撞体改动，验证 MJCF 的 22 个可视网格、14 个独立碰撞体和地面
+高度，解析两种机器人描述并检查 mesh、验证 21 DoF/22
 body、双向顺序与 round trip、执行器动作缩放/延迟，以及 Hydra 组合后的时间
 参数、网络输入维度和 Teleop 清除结果。动态机器人配置检查会启动 headless
 Isaac Sim，以保证导入的是实际 Isaac Lab 配置而非重复维护的常量。提供兼容的
@@ -108,6 +109,17 @@ EXPECTED_COLLISIONLESS_LINKS = {
     "l_leg_yaw_link",
     "r_leg_yaw_link",
 }
+EXPECTED_MJCF_MESH_COLLISIONS = {
+    "waist_yaw_link",
+    "l_arm_roll_link",
+    "l_elbow_pitch_link",
+    "r_arm_roll_link",
+    "r_elbow_pitch_link",
+    "l_ankle_pitch_link",
+    "l_ankle_roll_link",
+    "r_ankle_pitch_link",
+    "r_ankle_roll_link",
+}
 
 
 def _assert_unique(names: Sequence[str], label: str) -> None:
@@ -139,6 +151,29 @@ def _canonical_xml(
         _canonical_xml(child, omit_collisions=omit_collisions)
         for child in node
         if not (omit_collisions and child.tag == "collision")
+    ]
+    return (
+        node.tag,
+        tuple(sorted(attributes.items())),
+        (node.text or "").strip(),
+        tuple(children),
+    )
+
+
+def _canonical_mjcf_protected(node: ET.Element) -> tuple:
+    """构造排除获准 geom 改动的 MJCF 签名，严格保护其余参考动力学语义。"""
+
+    attributes = dict(node.attrib)
+    if node.tag == "compiler" and "meshdir" in attributes:
+        attributes["meshdir"] = "<BUMI3_MESH_DIR>"
+    children = [
+        _canonical_mjcf_protected(child)
+        for child in node
+        if child.tag != "geom"
+        and not (
+            child.tag == "default"
+            and child.attrib.get("class") in {"visual", "collision"}
+        )
     ]
     return (
         node.tag,
@@ -192,8 +227,82 @@ def _validate_urdf_collision_policy(
             ], f"{link_name} 出现用户指定范围之外的 collision 改动"
 
 
+def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
+    """逐 body 锁定 MJCF 的可视/碰撞分离、简化 capsule 和地面基准。"""
+
+    visual_default = mjcf_root.find("./default/default[@class='visual']/geom")
+    collision_default = mjcf_root.find("./default/default[@class='collision']/geom")
+    assert visual_default is not None and collision_default is not None
+    assert visual_default.attrib == {
+        "type": "mesh",
+        "contype": "0",
+        "conaffinity": "0",
+        "group": "1",
+        "density": "0",
+    }
+    assert collision_default.attrib == {
+        "contype": "1",
+        "conaffinity": "0",
+        "condim": "3",
+        "group": "3",
+        "density": "0",
+        "friction": "1 0.005 0.0001",
+        "rgba": "0 0 0 0",
+    }
+
+    ground = mjcf_root.find("./worldbody/geom[@name='ground']")
+    assert ground is not None
+    assert _parse_vector(ground.attrib["pos"]) == (0.001, 0.0, -0.02)
+    assert ground.attrib["contype"] == "0"
+    assert ground.attrib["conaffinity"] == "1"
+    assert ground.attrib["condim"] == "3"
+    assert ground.attrib["friction"] == "1 0.005 0.0001"
+
+    body_nodes = {
+        node.attrib["name"]: node for node in mjcf_root.findall(".//body")
+    }
+    expected_collision_bodies = (
+        set(EXPECTED_CYLINDER_COLLISIONS) | EXPECTED_MJCF_MESH_COLLISIONS
+    )
+    assert len(expected_collision_bodies) == 14
+    for body_name, body_node in body_nodes.items():
+        direct_geoms = body_node.findall("geom")
+        visual_geoms = [node for node in direct_geoms if node.attrib.get("class") == "visual"]
+        collision_geoms = [
+            node for node in direct_geoms if node.attrib.get("class") == "collision"
+        ]
+        assert len(visual_geoms) == 1, f"{body_name} 必须恰好有一个 MJCF visual geom"
+        visual = visual_geoms[0]
+        assert visual.attrib["name"] == f"{body_name}_visual"
+        assert visual.attrib["mesh"] == body_name
+
+        expected_collision_count = int(body_name in expected_collision_bodies)
+        assert len(collision_geoms) == expected_collision_count, (
+            f"{body_name} MJCF collision 数量错误"
+        )
+        assert len(direct_geoms) == 1 + expected_collision_count, (
+            f"{body_name} 存在未归类的 MJCF geom"
+        )
+        if not collision_geoms:
+            continue
+
+        collision = collision_geoms[0]
+        assert collision.attrib["name"] == f"{body_name}_collision"
+        if body_name in EXPECTED_CYLINDER_COLLISIONS:
+            expected = EXPECTED_CYLINDER_COLLISIONS[body_name]
+            assert collision.attrib["type"] == "capsule"
+            assert _parse_vector(collision.attrib["pos"]) == expected["xyz"]
+            expected_size = (expected["radius"], expected["length"] / 2.0)
+            assert _parse_vector(collision.attrib["size"]) == expected_size
+            assert "mesh" not in collision.attrib
+        else:
+            assert body_name in EXPECTED_MJCF_MESH_COLLISIONS
+            assert collision.attrib["type"] == "mesh"
+            assert collision.attrib["mesh"] == body_name
+
+
 def _validate_asset_provenance() -> None:
-    """锁定参考版本，并确认 URDF 只调整 mesh 路径和指定碰撞策略。"""
+    """锁定参考版本，并确认 URDF/MJCF 只含获准路径和碰撞策略改动。"""
 
     assert _sha256(REFERENCE_ROOT / "bumi.py") == REFERENCE_BUMI_PY_SHA256, (
         "参考 bumi.py 已变化；必须重新审计执行器参数后更新集成"
@@ -212,11 +321,12 @@ def _validate_asset_provenance() -> None:
     ), "URDF 存在 mesh 路径和用户指定 collision 之外的改动"
     _validate_urdf_collision_policy(local_urdf_root, reference_urdf_root)
 
-    ref_mjcf = (REFERENCE_ROOT / "mjcf/bumi3.xml").read_text()
-    expected_mjcf = ref_mjcf.replace(
-        'meshdir="../meshes/"', 'meshdir="../meshes/bumi3/"'
-    )
-    assert MJCF_PATH.read_text() == expected_mjcf, "MJCF 存在 mesh 路径之外的改动"
+    reference_mjcf_root = ET.parse(REFERENCE_ROOT / "mjcf/bumi3.xml").getroot()
+    local_mjcf_root = ET.parse(MJCF_PATH).getroot()
+    assert _canonical_mjcf_protected(local_mjcf_root) == _canonical_mjcf_protected(
+        reference_mjcf_root
+    ), "MJCF 存在 mesh 路径和审核后 geom 之外的动力学改动"
+    _validate_mjcf_collision_policy(local_mjcf_root)
 
     reference_meshes = sorted(path.name for path in (REFERENCE_ROOT / "meshes").iterdir())
     copied_meshes = sorted(path.name for path in MESH_DIR.iterdir())

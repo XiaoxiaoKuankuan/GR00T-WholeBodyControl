@@ -767,7 +767,12 @@ class Bumi3SonicSim2Sim:
             raise ValueError("未能应用 BUMI3 armature 配置")
 
     def _body_geom_ids(self, body_name: str) -> np.ndarray:
-        """按 body 名称返回其直接所属 geom，禁止依赖 XML 中的隐式编号。"""
+        """按 body 名称返回全部直接所属 geom，禁止依赖 XML 中的隐式编号。
+
+        BUMI3 MJCF 将原始 mesh 保留为可视 geom，并为需要参与接触的 link 另设
+        collision geom；同一个 body 因此可以合法拥有一个或两个 geom。调用方必须再按
+        geom 名称或 ``group`` 区分用途，不能假设每个 body 只有一个 mesh。
+        """
 
         body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, body_name
@@ -776,10 +781,8 @@ class Bumi3SonicSim2Sim:
             raise ValueError(f"BUMI3 MJCF 缺少 collision body: {body_name}")
         start = int(self.model.body_geomadr[body_id])
         count = int(self.model.body_geomnum[body_id])
-        if count != 1:
-            raise ValueError(
-                f"{body_name} 应有且只有一个可替换 mesh geom，实际为 {count}"
-            )
+        if count <= 0:
+            raise ValueError(f"{body_name} 没有直接所属 geom")
         return np.arange(start, start + count, dtype=np.int64)
 
     def _reference_qpos(self, frame: int) -> np.ndarray:
@@ -897,7 +900,12 @@ class Bumi3SonicSim2Sim:
         alpha: float,
         tint: np.ndarray | None,
     ) -> list[dict[str, Any]]:
-        """从原始 XML 的 resolved MjvScene 复制 22 个 robot mesh。"""
+        """从原始 XML 的 resolved MjvScene 复制 22 个 robot 可视 mesh。
+
+        group=3 的 collision geom 只服务 MuJoCo 接触计算，不能被重新着色后加入红色参考
+        影子；否则 capsule/透明碰撞网格会覆盖原始 link 外观，使影子与 policy 机器人看起来
+        使用了不同模型。这里固定只复制 XML 中 group=1 的 22 个可视 geom。
+        """
 
         mujoco.mjv_updateScene(
             self.reference_visual_model,
@@ -917,6 +925,8 @@ class Bumi3SonicSim2Sim:
             if not 0 <= model_geom_id < self.reference_visual_model.ngeom:
                 continue
             if int(self.reference_visual_model.geom_bodyid[model_geom_id]) == 0:
+                continue
+            if int(self.reference_visual_model.geom_group[model_geom_id]) != 1:
                 continue
 
             rgba = np.asarray(resolved_geom.rgba, dtype=np.float32).copy()

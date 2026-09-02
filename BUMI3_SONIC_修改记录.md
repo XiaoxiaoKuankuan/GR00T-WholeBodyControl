@@ -1883,3 +1883,79 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本次只修改仓库治理文档，没有启动新的测试任务或生成新测试产物，也没有追溯删除历史
   产物，因此代码单元测试、仿真和训练验证不适用。提交前执行 Markdown diff 人工检查和
   `git diff --check`；回滚时只需反向提交本节及 `agent.md` 对应规则，不影响训练代码和数据。
+
+## 2026-09-02：直接修正 BUMI3 MJCF 自碰撞与初始陷地
+
+### 1. 变更边界与参考版本
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `98717f7ee21114fb6ba668a4206c891578cade1e`。开始修改前本地与 GitHub 同步且工作区
+  干净；本轮不改训练 URDF、SONIC 网络、观测、奖励、控制频率、执行器、PPO 或数据。
+- 权威参考为
+  `/home/weili/legged_lab/source/NoetixRobot/NoetixRobot/assets/robots/bumi3/mjcf/bumi3.xml`，
+  SHA256 为 `041c81e8176c7f375302796deca28b141891a3c097d8e341e8d967b735466edf`。
+  本地修正后 `bumi3.xml` SHA256 为
+  `c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04`。
+- 验证器不再要求本地 MJCF 与参考逐字相同，而是排除获准修改的 `geom`、碰撞 default
+  和 `meshdir` 后，继续严格锁定 body 层级、质量、质心、惯量、关节位置/轴/限位、site、
+  actuator 和 sensor。这样既允许修复接触，又防止碰撞修改误伤参考动力学参数。
+
+### 2. `bumi3.xml` 的实际修改
+
+- 22 个原始 STL 全部保留为 `group=1` 的可视 mesh，并设置
+  `contype=0/conaffinity=0`；白色 policy 机器人和红色参考影子仍使用完整 BUMI3 原始
+  外观，不把 capsule 当作渲染模型。
+- 新增 14 个 `group=3` 碰撞体。`base_link`、左右 `leg_roll_link`、左右
+  `knee_pitch_link` 使用审核后的 5 个 capsule；位置、半径和长度严格对应训练 URDF：
+  base 为 `pos=(-0.0013853,0,0.065525), radius=0.052, length=0.12`，leg-roll 为
+  `pos=(0,0,-0.02), radius=0.03, length=0.08`，knee 为
+  `pos=(0.008475,0,-0.0894694), radius=0.025, length=0.13`。
+- `waist_yaw_link`、双侧 arm-roll、双肘、双侧 ankle-pitch 和 ankle-roll 共 9 个 link
+  保留 mesh collision；arm-pitch、arm-yaw、leg-pitch 和 leg-yaw 只渲染、不碰撞，避免
+  高精度相邻网格在动作 reset 时互相嵌入。
+- 机器人碰撞体设置 `contype=1/conaffinity=0`，地面设置互补的
+  `contype=0/conaffinity=1`。MuJoCo 因此仍计算机器人与地面的接触，但不计算机器人
+  link 之间的自碰撞；没有关闭膝、肘、脚或机身用于爬行/跪地的触地能力。
+- 地面从 `Z=0` 调整为 `Z=-0.02 m`。这是按已取回大集动作的脚底基准消除首帧约
+  1--2 cm 陷地；FineDance 首帧会相对地面留出约 1--2 cm 间隙并自然落地，本轮没有
+  在 Python 中偷偷抬高/压低 policy 或让参考影子跟随机器人。
+
+### 3. sim2sim 与验证代码同步
+
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py` 允许一个 body 同时拥有 visual 和
+  collision geom，并让红色参考影子只复制 `group=1` 的 22 个原始 mesh；动力学模型
+  仍直接加载本轮 `bumi3.xml`，没有运行时碰撞覆盖。
+- `gear_sonic/tests/test_bumi3_sim2sim.py` 锁定 `36=22 visual+14 collision`、5 个
+  capsule、9 个碰撞 mesh、碰撞名称集合、地面高度和 bitmask；静态 reset 必须无自碰撞
+  与地面穿透，主动下移浮动根后又必须只产生地面接触。
+- `gear_sonic/tools/validate_bumi3_sim2sim.py` 和
+  `gear_sonic/tools/validate_bumi3_integration.py` 增加同样的资产来源保护、碰撞数量/类型/
+  尺寸/名称/地面门禁。输出显式区分可视 geom、碰撞 geom、自碰撞开关和初始接触。
+- `docs/source/getting_started/bumi3_sim2sim.md` 更新 XML 是唯一 MuJoCo 接触来源的说明，
+  并记录 FineDance 与大集地面基准差异，避免以后又在 sim2sim Python 中隐式复刻 URDF。
+
+### 4. 实际验证结果与边界
+
+- 本地 `env_isaaclab` 执行 `pytest -q gear_sonic/tests/test_bumi3_sim2sim.py`：
+  最终复验 `12 passed in 3.09s`；`python -m compileall -q gear_sonic` 和
+  `git diff --check` 同时通过。
+- 执行 `validate_bumi3_sim2sim.py --skip-smoke`：通过；实测 `nq=28,nv=27,nu=21`、
+  22 bodies、22 visual mesh、14 collision geom、静态 reset `contacts=0`、自碰撞 `0`、
+  地面穿透 `0`，控制契约仍为 `sim_dt=0.005,decimation=4,50 Hz,input=1170,action=21`。
+- 对本地取回的 5 条 FineDance 和 5 条大集动作逐帧执行 MuJoCo FK/接触扫描，共
+  `26844` 帧；修正前这些动作出现肘-髋、肘-腰、膝-踝等碰撞，修正后自碰撞计数为
+  `0`。10 条动作首帧均为 `ncon=0`，没有初始地面穿透；整段仍有 `702` 个机器人-地面
+  接触，证明触地碰撞没有被误关。爬行/落地帧可能有较深地面接触，这是动作本身的运行
+  姿态，不等同于首帧陷地。
+- 完整 `validate_bumi3_integration.py` 通过；实际组合结果仍为 `sim_dt=0.005`、
+  `decimation=4`、`50 Hz`、`action_dim=21`，锚点仍是 `waist_yaw_link`，本轮未请求
+  Isaac 1-env 数据 smoke。Isaac 启动日志中的 platforminfo/Vulkan 信息不影响静态门禁
+  退出码 0。
+- 使用现有 `model_step_018000_g1.onnx` 分别对 `axe_idle_R_102__A355.pkl` 和
+  `finedance__001.pkl` 执行 100 控制周期真实回放，观测、动作和状态均有限且验证器通过；
+  但 2 秒末 root 高度仍分别只有约 `0.0295 m` 和 `0.0545 m`。因此本轮可以确认
+  “XML 初始自碰撞/陷地”已消除，不能把旧 checkpoint 仍会摔倒伪装成已解决；后者还需
+  继续核对训练/部署动力学一致性或用修正后契约重新训练，不能仅靠资产门禁下结论。
+- 本轮验证只使用已有模型和动作，不创建持久 checkpoint、event、导出、渲染或临时运行
+  目录，因此没有一次性测试产物需要删除。回滚时反向提交本节列出的 7 个文件即可；参考
+  `legged_lab` 仓库、训练数据和已有正式模型均未修改。
