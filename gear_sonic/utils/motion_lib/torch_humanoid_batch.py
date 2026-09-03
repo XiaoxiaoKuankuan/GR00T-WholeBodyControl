@@ -24,10 +24,7 @@ import torch
 from gear_sonic.isaac_utils.rotations import (
     axis_angle_to_quaternion,
     matrix_to_quaternion,
-    quat_angle_axis,
-    quat_identity_like,
-    quat_inverse,
-    quat_mul_norm,
+    quat_sequence_angular_velocity,
     quaternion_to_matrix,
     slerp,
     wxyz_to_xyzw,
@@ -738,17 +735,28 @@ class Humanoid_Batch:
 
     @staticmethod
     def _compute_angular_velocity(r, time_delta: float, guassian_filter=True):
-        # assume the second last dimension is the time axis
-        diff_quat_data = quat_identity_like(r).to(r)
-        diff_quat_data[..., :-1, :, :] = quat_mul_norm(
-            r[..., 1:, :, :], quat_inverse(r[..., :-1, :, :], w_last=True), w_last=True
-        )
-        diff_angle, diff_axis = quat_angle_axis(diff_quat_data, w_last=True)
-        angular_velocity = diff_axis * diff_angle.unsqueeze(-1) / time_delta
+        """从世界系 ``xyzw`` 四元数序列计算与整数帧对齐的世界系角速度。
+
+        四元数 ``q`` 与 ``-q`` 表示同一个旋转。FK 的矩阵转四元数过程允许相邻帧
+        选择不同符号，因此相对四元数在转换为轴角前必须规范到标量部 ``w >= 0``，
+        否则最短旋转角虽然正确，旋转轴却会反向。内部帧使用跨前后相邻帧的
+        中心差分，首尾帧使用单边差分，使角速度与位置速度一样对应整数帧时刻，
+        而不是提前半帧。
+
+        Args:
+            r: 形状为 ``[..., T, J, 4]`` 的世界系 ``xyzw`` 四元数。
+            time_delta: 相邻帧的时间间隔，单位为秒且必须大于零。
+            guassian_filter: 是否沿时间轴应用历史兼容的 ``sigma=2`` 高斯滤波。
+
+        Returns:
+            形状为 ``[..., T, J, 3]`` 的世界系角速度，单位为 ``rad/s``。
+        """
+        angular_velocity = quat_sequence_angular_velocity(r, time_delta, w_last=True)
+
         if guassian_filter:
             angular_velocity = torch.from_numpy(
                 filters.gaussian_filter1d(angular_velocity.numpy(), 2, axis=-3, mode="nearest"),
-            )
+            ).to(r)
         return angular_velocity
 
     def load_mesh(self):

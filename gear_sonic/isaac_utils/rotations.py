@@ -475,6 +475,79 @@ def quat_mul_norm(x, y, w_last):
     return quat_unit(quat_mul(x, y, w_last))
 
 
+def quat_to_shortest_rotation_vector(quaternion: Tensor, w_last: bool) -> Tensor:
+    """把单位四元数转换为与 ``q/-q`` 符号无关的最短弧旋转向量。
+
+    Args:
+        quaternion: 任意前导形状的单位四元数。
+        w_last: ``True`` 表示 ``xyzw``，``False`` 表示 ``wxyz``。
+
+    Returns:
+        与输入前导形状一致、末维为 3 的旋转向量，单位为弧度。
+    """
+    scalar = quaternion[..., -1:] if w_last else quaternion[..., :1]
+    canonical = torch.where(scalar < 0, -quaternion, quaternion)
+    vector = canonical[..., :3] if w_last else canonical[..., 1:]
+    scalar = canonical[..., -1:] if w_last else canonical[..., :1]
+    vector_norm = torch.linalg.vector_norm(vector, dim=-1, keepdim=True)
+    angle = 2.0 * torch.atan2(vector_norm, scalar)
+    return vector * (angle / vector_norm.clamp_min(1e-9))
+
+
+def quat_sequence_angular_velocity(
+    quaternion: Tensor,
+    time_delta: float,
+    w_last: bool,
+) -> Tensor:
+    """用最短弧中心差分计算与输入整数帧对齐的世界系角速度。
+
+    时间轴固定为倒数第三维，输入通常为 ``[..., T, J, 4]``。内部帧使用
+    ``q[t+1] * inverse(q[t-1]) / (2 * dt)``；首尾帧使用相邻区间的单边
+    差分。这样既消除四元数双覆盖导致的符号翻转，也避免把前向区间速度错误地
+    标记在整数帧 ``t`` 上。
+
+    Args:
+        quaternion: 世界系单位四元数序列。
+        time_delta: 相邻帧时间间隔，单位为秒且必须大于零。
+        w_last: ``True`` 表示 ``xyzw``，``False`` 表示 ``wxyz``。
+
+    Returns:
+        形状为 ``[..., T, J, 3]`` 的世界系角速度，单位为 ``rad/s``。
+    """
+    if time_delta <= 0:
+        raise ValueError(f"time_delta 必须大于零，实际为 {time_delta}")
+
+    num_frames = quaternion.shape[-3]
+    if num_frames <= 1:
+        return torch.zeros_like(quaternion[..., :3])
+
+    adjacent_delta = quat_mul_norm(
+        quaternion[..., 1:, :, :],
+        quat_inverse(quaternion[..., :-1, :, :], w_last=w_last),
+        w_last=w_last,
+    )
+    adjacent_velocity = quat_to_shortest_rotation_vector(adjacent_delta, w_last) / time_delta
+    if num_frames == 2:
+        return torch.cat([adjacent_velocity, adjacent_velocity], dim=-3)
+
+    centered_delta = quat_mul_norm(
+        quaternion[..., 2:, :, :],
+        quat_inverse(quaternion[..., :-2, :, :], w_last=w_last),
+        w_last=w_last,
+    )
+    centered_velocity = quat_to_shortest_rotation_vector(centered_delta, w_last) / (
+        2.0 * time_delta
+    )
+    return torch.cat(
+        [
+            adjacent_velocity[..., :1, :, :],
+            centered_velocity,
+            adjacent_velocity[..., -1:, :, :],
+        ],
+        dim=-3,
+    )
+
+
 @torch.jit.script
 def quat_identity(shape: List[int]):
     """

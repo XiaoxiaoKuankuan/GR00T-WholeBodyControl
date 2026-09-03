@@ -13,6 +13,7 @@ from gear_sonic.isaac_utils.rotations import (
     quat_identity_like,
     quat_inverse,
     quat_mul_norm,
+    quat_sequence_angular_velocity,
     transform_from_rotation_translation,
     transform_mul,
     transform_rotation,
@@ -1315,17 +1316,12 @@ class SkeletonMotion(SkeletonState):
 
     @staticmethod
     def _compute_angular_velocity(r, time_delta: float, guassian_filter=True):
-        # assume the second last dimension is the time axis
-        diff_quat_data = quat_identity_like(r).to(r)
-        diff_quat_data[..., :-1, :, :] = quat_mul_norm(
-            r[..., 1:, :, :], quat_inverse(r[..., :-1, :, :])
-        )
-        diff_angle, diff_axis = quat_angle_axis(diff_quat_data)
-        angular_velocity = diff_axis * diff_angle.unsqueeze(-1) / time_delta
+        """由 xyzw 世界系四元数计算最短弧、整数帧对齐的角速度。"""
+        angular_velocity = quat_sequence_angular_velocity(r, time_delta, w_last=True)
         if guassian_filter:
             angular_velocity = torch.from_numpy(
                 filters.gaussian_filter1d(angular_velocity.numpy(), 2, axis=-3, mode="nearest"),
-            )
+            ).to(r)
         return angular_velocity
 
     def crop(self, start: int, end: int, fps: int | None = None):

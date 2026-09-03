@@ -2425,3 +2425,74 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `git pull --ff-only`，快进到 `b00552b` 后仍干净。服务器使用 `liwei_lab` 环境复跑完整
   `test_bumi3_sim2sim.py`，结果为 `15 passed in 4.42s`。同步和测试没有停止或重启正式
   训练；最终检查时 8 个 worker 全部存活并继续到 iteration `25921`。
+
+## 2026-09-03：修正通用 quaternion delta 的符号和整数帧时间对齐
+
+### 1. 修改边界与问题定位
+
+- 本轮位于 `feature/bumi-native-sonic-full-training`，起始 HEAD 为
+  `ee748ac9468d815daa7213d8cc6e612408f73e19`，本地和 GitHub 同名分支修改前 ahead/behind
+  为 `0/0`；用户原有未跟踪 `g1.tar.gz` 保持未读取、未修改、未暂存和未删除。
+- 对服务器真实数据各抽取 40 条 motion 的修改前审计表明：BUMI 的相邻 FK 四元数中有
+  `9411/713748` 个符号跳变，覆盖 `34/40` 条动作；旧 MotionLib 角速度相对符号修正后的
+  结果 RMSE 为 `16.37%`，修正结果相对独立 SciPy Rotation 有限差分为 `0.081%`，而仅由
+  前向区间改成整数帧中心差分还会带来 `8.86%` 的相对差异。G1 同样有 `1486/191968`
+  个跳变、覆盖 `35/40` 条动作，三项相对差异分别为 `17.77%`、`0.165%` 和 `11.26%`。
+  因而问题不是 BUMI 重定向数据独有，而是 BUMI/G1 共用的 SONIC quaternion delta
+  实现同时存在 `q/-q` 双覆盖符号错误和半帧时间错位。
+- 修改前正式八卡训练仍为
+  `sonic_bumi3_base_anchor_v2_scratch_100k-20260902_164548`，launcher PID `21266`、worker
+  PID `21445-21452` 全部存活。已独立确认编号 checkpoint `model_step_026000.pt` 大小为
+  `391203747` bytes、SHA256 为
+  `7393d5a19f2f580b39fb93fa0f140ea1e0ada99b2960b8f549a5b23870ee3cb3`，可完整
+  `torch.load` 且 `state.global_step=26000`、`max_steps=100000`、
+  `episode=851968000`。该旧 run 和 checkpoint 将保留，仅停止精确匹配的训练进程。
+
+### 2. 通用实现与调用路径
+
+- `gear_sonic/isaac_utils/rotations.py` 新增
+  `quat_to_shortest_rotation_vector()`：先按标量部非负规范化相对四元数，再以稳定的
+  `2*atan2(||v||, w)` 求最短弧 rotation vector。它同时显式支持 `xyzw` 和 `wxyz`，
+  不再让同一物理旋转的 `q` 与 `-q` 产生方向相反的角速度。
+- 同文件新增 `quat_sequence_angular_velocity()` 作为唯一通用序列契约。内部帧通过
+  `q[t+1] * inverse(q[t-1]) / (2*dt)` 与整数帧 `t` 对齐，首尾采用相邻区间单边
+  差分；一帧返回零，两帧在两个端点复用唯一合法区间，并对非正 `dt` fail-fast。
+- `torch_humanoid_batch.py` 的 BUMI/G1/H2 Robot FK body 路径和 `skeleton.py` 的
+  `SkeletonMotion` 路径均改为调用该公共函数，并保留历史 `sigma=2`、时间轴 `-3` 的
+  高斯滤波；滤波返回值显式恢复输入 dtype/device。`motion_lib_base.py` 的 object
+  `wxyz` 角速度路径也切到同一实现，消除另一个复制的旧前向差分分支。位置、线速度、
+  关节位置、接触和原始 pose 数据均未改动。
+- 修改前后 SHA256 分别为：`rotations.py`
+  `b800cc97757ea452e04c12b16b70a2847b5cb08c041b521e32e7347b05479d99 ->
+  6642e6890fb9162fe6af96f828518f1f3f3f79bbe7e699527a25d997e22e6ac7`；
+  `skeleton.py`
+  `9e593ed72145add9e7b5711602913494128b0853a3ee3a682dfc4609deed0b8e ->
+  6c398995b8068a47365a94b42af0c5360b06506b1e1663cc3f869287aafc6250`；
+  `torch_humanoid_batch.py`
+  `41e5d4a44497547784a1f22fb968d112039f0a7b0eb85e166022e6ac3c4988d1 ->
+  b1cff99925690f56abb79926438225d71f535369261df1bb53e9b583f3efd335`；
+  `motion_lib_base.py`
+  `66425b5f647cef4b9ae4ee799d35dfe226906b17f5210dc51477ccc6a8a3019c ->
+  0f938b41fce8aae0aa218e72cec0fd3f95116b423cb785edc96eb0566fbf7fb0`。
+
+### 3. 回归测试与当前验证边界
+
+- 新增 `gear_sonic/tests/test_motion_lib_angular_velocity.py`，文件头详细记录测试目的，
+  SHA256 为 `03ae2f1606c9b08396a023de86f39a16263c82286d71f17dc06ba819d90652ac`。
+  解析测试覆盖：`xyzw/wxyz` 两种顺序的 `q/-q` 随机符号翻转不变性、二次角度轨迹的
+  整数帧中心差分、一帧/两帧边界和高斯滤波有限值。初版 float32 小角度测试暴露旧
+  `acos` 公式约 `1e-4 rad/s` 的数值误差后，公共转换改成上述 `atan2` 形式，而不是放宽
+  测试掩盖误差。
+- 本地 SONIC 环境最终运行新增测试及 tracking anchor、BUMI 配对/转换/三源索引、
+  BUMI sim2sim 回归，共 `49 passed, 4 warnings in 5.88s`；五个修改 Python 文件的
+  `compileall` 与 `git diff --check` 均通过。warning 仅为已有 `\*` 转义和
+  `scipy.ndimage.filters` 弃用提示。
+- 另一次扩大到 `gear_sonic/tests/test_input_readers.py` 的收集尝试因当前本地 SONIC 环境
+  缺少可选依赖 `msgpack` 而在 collection 阶段退出，该次没有测试被执行；环境同时没有
+  `ruff`/`black`，因此未伪称通过这些检查。服务器真实 BUMI/G1 重新计算、远端同步、旧
+  训练停止和新八卡启动将在本功能提交推送后执行，并在本节后续记录精确结果。
+- 本修改会改变所有共用 MotionLib 的 reference angular velocity 标签，旧模型权重结构
+  本身仍兼容，但旧 optimizer/critic 学到的是错误标签。按用户要求新训练将使用
+  `resume=false checkpoint=null auto_load_latest=false` 从零开始；这次修复可解释
+  body angular velocity reward 的系统性异常，但不能单独证明它是训练质量的唯一根因。
+  如需回滚，必须对本轮提交创建反向提交，不得 reset/clean 覆盖用户工作。

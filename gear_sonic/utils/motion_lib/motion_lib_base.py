@@ -1861,24 +1861,10 @@ class MotionLibBase:
             lin_vel = torch.cat([lin_vel[:1], lin_vel], dim=0)
             self._motion_object_lin_vel[start:end] = lin_vel
 
-            # Compute angular velocity from quaternion difference using same method as robot body
-            # ω = axis * angle / dt (same as _compute_angular_velocity in torch_humanoid_batch.py)
-            q_curr = quat[:-1]  # (T-1, N_obj, 4)
-            q_next = quat[1:]  # (T-1, N_obj, 4)
-
-            # Compute quaternion difference: q_diff = q_next * q_curr^{-1}
-            # Using quat_mul_norm and quat_inverse (w_last=False for xyzw format)
-            diff_quat = rotations.quat_mul_norm(
-                q_next, rotations.quat_inverse(q_curr, w_last=False), w_last=False
+            # Object 四元数使用 wxyz；与机器人 body 共用最短弧中心差分契约。
+            ang_vel = rotations.quat_sequence_angular_velocity(
+                quat, float(dt), w_last=False
             )
-
-            # Extract angle and axis from quaternion difference
-            diff_angle, diff_axis = rotations.quat_angle_axis(diff_quat, w_last=False)
-
-            # Angular velocity: ω = axis * angle / dt
-            ang_vel = diff_axis * diff_angle.unsqueeze(-1) / dt
-            # First frame uses same velocity as second frame
-            ang_vel = torch.cat([ang_vel[:1], ang_vel], dim=0)
             self._motion_object_ang_vel[start:end] = ang_vel
 
         logger.info(f"Computed object velocities for {len(motion_num_frames)} motions")
