@@ -2419,3 +2419,9 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `ruff`，因此没有伪称执行 ruff。pytest 临时目录由测试框架管理，本轮没有生成需保留的
   checkpoint、ONNX、视频或日志；本地 8 条原始 NPZ 与正式模型均未改写。兼容分支如需
   回滚，应对本轮提交创建反向提交，不得 reset/clean 覆盖用户工作。
+- 功能、测试和本节记录已提交为
+  `b00552b5e9ca93755769bbdaf3d6fe39474d5cf0` 并推送 GitHub；服务器仓库修改前位于
+  `fe16d959f17c6c678972d1b47406e6764e47943a` 且工作区干净，随后在同名 feature 分支执行
+  `git pull --ff-only`，快进到 `b00552b` 后仍干净。服务器使用 `liwei_lab` 环境复跑完整
+  `test_bumi3_sim2sim.py`，结果为 `15 passed in 4.42s`。同步和测试没有停止或重启正式
+  训练；最终检查时 8 个 worker 全部存活并继续到 iteration `25921`。
