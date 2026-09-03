@@ -4,7 +4,8 @@
 """BUMI3 SONIC sim2sim 的回归测试。
 
 测试覆盖名称生成的 IsaacLab/MuJoCo 双向排列、训练 PKL 与部署 CSV 的顺序/浮动根
-状态约定、参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
+状态约定、BUMI3 Mimic NPZ 的命名根 body 提取、参考状态 reset、``base_link`` 统一锚点
+语义、1170 维联合 policy 输入、
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
 闭环。测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
@@ -16,6 +17,7 @@ from pathlib import Path
 import joblib
 import mujoco
 import numpy as np
+import pytest
 
 from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
     Bumi3Contract,
@@ -118,6 +120,78 @@ def test_load_g1_style_csv_uses_policy_order_and_wxyz(tmp_path: Path) -> None:
     np.testing.assert_allclose(motion.joint_vel_policy, joint_vel)
     np.testing.assert_allclose(motion.root_quat_wxyz, root_quat)
     assert motion.root_position_world is None
+
+
+def test_load_bumi3_mimic_npz_extracts_named_root_body(tmp_path: Path) -> None:
+    """Mimic NPZ 必须按 body_names 找 base_link，不能把数组第 0 个腰部误作浮动根。"""
+
+    contract = _contract()
+    frames = 3
+    body_names = np.asarray(["waist_yaw_link", "base_link", "l_arm_pitch_link"])
+    joint_pos = np.repeat(contract.default_policy[None], frames, axis=0)
+    joint_vel = np.zeros_like(joint_pos)
+    body_pos_w = np.zeros((frames, body_names.size, 3), dtype=np.float32)
+    body_quat_w = np.zeros((frames, body_names.size, 4), dtype=np.float32)
+    expected_root_position = np.asarray(
+        [[0.1, -0.2, 0.50], [0.2, -0.1, 0.51], [0.3, 0.0, 0.52]],
+        dtype=np.float32,
+    )
+    expected_root_quaternion = np.repeat(
+        np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+        frames,
+        axis=0,
+    )
+    body_pos_w[:, 0] = [9.0, 9.0, 9.0]
+    body_quat_w[:, 0] = [0.0, 1.0, 0.0, 0.0]
+    body_pos_w[:, 1] = expected_root_position
+    body_quat_w[:, 1] = expected_root_quaternion
+    body_quat_w[:, 2] = [1.0, 0.0, 0.0, 0.0]
+    path = tmp_path / "bumi3_mimic.npz"
+    np.savez_compressed(
+        path,
+        fps=np.asarray(50.0),
+        joint_pos=joint_pos,
+        joint_vel=joint_vel,
+        body_pos_w=body_pos_w,
+        body_quat_w=body_quat_w,
+        joint_names=np.asarray(contract.policy_joint_names),
+        body_names=body_names,
+        anchor_body_name=np.asarray("waist_yaw_link"),
+        robot_name=np.asarray("bumi3_50hz"),
+        quaternion_order=np.asarray("wxyz"),
+    )
+
+    motion = load_reference_motion(path, contract)
+
+    np.testing.assert_allclose(motion.joint_pos_policy, joint_pos)
+    np.testing.assert_allclose(motion.joint_vel_policy, joint_vel)
+    np.testing.assert_allclose(motion.root_position_world, expected_root_position)
+    np.testing.assert_allclose(motion.root_quat_wxyz, expected_root_quaternion)
+
+
+def test_load_bumi3_mimic_npz_rejects_missing_named_root_body(tmp_path: Path) -> None:
+    """Mimic body 数组没有配置指定的根 body 时必须失败，禁止退回索引 0。"""
+
+    contract = _contract()
+    frames = 2
+    path = tmp_path / "missing_base_link.npz"
+    np.savez_compressed(
+        path,
+        fps=np.asarray(50.0),
+        joint_pos=np.repeat(contract.default_policy[None], frames, axis=0),
+        joint_vel=np.zeros((frames, 21), dtype=np.float64),
+        body_pos_w=np.zeros((frames, 1, 3), dtype=np.float64),
+        body_quat_w=np.repeat(
+            np.asarray([[[1.0, 0.0, 0.0, 0.0]]], dtype=np.float64),
+            frames,
+            axis=0,
+        ),
+        body_names=np.asarray(["waist_yaw_link"]),
+        quaternion_order=np.asarray("wxyz"),
+    )
+
+    with pytest.raises(ValueError, match="reference_root_body_name='base_link'"):
+        load_reference_motion(path, contract)
 
 
 def test_headless_zero_policy_builds_finite_observation_and_steps() -> None:

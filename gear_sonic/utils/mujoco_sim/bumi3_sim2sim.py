@@ -9,6 +9,9 @@ proprioception 历史、10 个 0.1 秒间隔的 Robot Encoder 参考帧；训练
 统一使用浮动根 ``base_link`` 作为 Robot Encoder、位置、姿态和重力方向锚点，避免
 在基础闭环中混用根连杆与腰部连杆。运行器优先从动作加载 root
 position/quaternion 和关节状态进行 reset，
+并兼容 BUMI3 重定向器导出的 Mimic NPZ：当文件只提供全身
+``body_pos_w/body_quat_w`` 时，必须依据 ``body_names`` 精确定位配置中的参考根 body，
+不得假设根 body 永远位于数组第 0 项。
 只在旧动作缺少 root translation 时使用接地附近的固定高度，然后调用
 ``eval_agent_trl.py`` 导出的 ``*_g1.onnx`` 联合模型得到 21 维动作。这里的 ``g1``
 只是 SONIC 为 checkpoint 兼容保留的 Robot Encoder 内部键名，并不使用 G1 资产。
@@ -392,6 +395,49 @@ def _extract_first(mapping: dict[str, Any], names: tuple[str, ...]) -> Any | Non
     return None
 
 
+def _extract_named_body_series(
+    mapping: dict[str, Any],
+    field_name: str,
+    body_name: str,
+    value_width: int,
+) -> np.ndarray | None:
+    """从 Mimic 全身 body 数组中按名称提取一个 body 的逐帧数据。
+
+    BUMI3 重定向器生成的 Mimic NPZ 保存 ``body_pos_w[T,B,3]`` 和
+    ``body_quat_w[T,B,4]``，但不重复保存顶层 root 字段。这里必须使用同文件内的
+    ``body_names`` 定位配置指定的 ``reference_root_body_name``；不能默认使用索引 0，
+    因为 body 顺序属于数据契约，未来导出器或资产调整后可能改变。缺少名称、名称重复、
+    根 body 不存在或数组 shape 不匹配都会立即报错，避免把腰部等非根连杆静默当作浮动根。
+    """
+
+    if field_name not in mapping:
+        return None
+    if "body_names" not in mapping:
+        raise ValueError(f"{field_name} 兼容格式必须同时提供 body_names")
+
+    body_names_array = np.asarray(mapping["body_names"])
+    if body_names_array.ndim != 1 or body_names_array.size == 0:
+        raise ValueError(f"body_names 必须是一维非空数组，实际为 {body_names_array.shape}")
+    body_names = [
+        value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        for value in body_names_array.tolist()
+    ]
+    body_indices = [index for index, name in enumerate(body_names) if name == body_name]
+    if len(body_indices) != 1:
+        raise ValueError(
+            f"body_names 必须恰好包含一个 reference_root_body_name={body_name!r}，"
+            f"实际匹配 {len(body_indices)} 个"
+        )
+
+    values = np.asarray(mapping[field_name])
+    expected_tail = (len(body_names), value_width)
+    if values.ndim != 3 or values.shape[1:] != expected_tail:
+        raise ValueError(
+            f"{field_name} 必须为 [T,{len(body_names)},{value_width}]，实际为 {values.shape}"
+        )
+    return values[:, body_indices[0], :]
+
+
 def load_reference_motion(
     path: str | Path,
     contract: Bumi3Contract,
@@ -404,8 +450,10 @@ def load_reference_motion(
 
     自动模式下，SONIC PKL 的 ``dof`` 视为 MuJoCo 顺序、``root_rot`` 视为 xyzw；
     CSV 的 ``joint_pos.csv`` 视为策略顺序、``body_quat.csv`` 视为 wxyz。NPZ 会读取
-    ``joint_order``/``quaternion_convention`` 元数据；缺失时分别采用策略顺序和 wxyz。
-    所有输入必须已经是 50 FPS，以避免部署端隐式重采样改变训练时间契约。
+    ``joint_order`` 和 ``quaternion_convention/quaternion_order`` 元数据；若顶层没有
+    root pose，则从 ``body_pos_w/body_quat_w`` 中按 ``body_names`` 精确提取配置指定的
+    参考根 body。元数据缺失时分别采用策略顺序和 wxyz。所有输入必须已经是 50 FPS，
+    以避免部署端隐式重采样改变训练时间契约。
     """
 
     motion_path = Path(path).expanduser().resolve()
@@ -473,10 +521,29 @@ def load_reference_motion(
         )
         if root_position is None and qpos is not None:
             root_position = qpos[:, :3]
+        if root_position is None:
+            root_position = _extract_named_body_series(
+                mapping,
+                "body_pos_w",
+                contract.reference_root_body_name,
+                3,
+            )
+        if root_quat is None:
+            root_quat = _extract_named_body_series(
+                mapping,
+                "body_quat_w",
+                contract.reference_root_body_name,
+                4,
+            )
         fps = float(np.asarray(mapping.get("fps", contract.target_fps)).reshape(-1)[0])
         metadata_joint_order = str(np.asarray(mapping.get("joint_order", "policy")).item())
         metadata_quaternion_order = str(
-            np.asarray(mapping.get("quaternion_convention", "wxyz")).item()
+            np.asarray(
+                mapping.get(
+                    "quaternion_convention",
+                    mapping.get("quaternion_order", "wxyz"),
+                )
+            ).item()
         )
     elif motion_path.suffix.lower() in {".pkl", ".joblib"}:
         source_kind = "pkl"

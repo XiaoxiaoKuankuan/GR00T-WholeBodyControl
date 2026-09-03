@@ -2376,3 +2376,46 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   该模型仍来自 2026-09-02 启动的旧 14 tracking-body/三 reward-point 配置，只是比先前
   回传的 step 24950 更新；它可以导出并运行 sim2sim，但不能代表本日新 12 body、五点奖励、
   `waist_yaw_link` COM/质量随机化配置已经训练。
+
+### 8. 兼容 BUMI3 重定向 Mimic NPZ 的命名根 body
+
+- 本轮位于 `feature/bumi-native-sonic-full-training`，起始 HEAD 为
+  `fe16d959f17c6c678972d1b47406e6764e47943a`，本地相对 origin ahead/behind 为 `0/0`；
+  修改前只有用户原有未跟踪 `g1.tar.gz`，本轮没有读取、修改、暂存或删除。修改前
+  `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py` 和
+  `gear_sonic/tests/test_bumi3_sim2sim.py` 的 SHA256 分别为
+  `de498239de6b535364faf98910f5166dcb5910788ae5fb3dead65664cbc5264a`、
+  `684aa9290849becef54e25f856c25fa202a8bfa1b00141955ceaed47cfdd8688`。
+- 运行契约仍来自仓库内 `gear_sonic/config/sim2sim/bumi3_sonic.yaml` 和 BUMI3 MJCF，
+  SHA256 分别为
+  `843756aef9332faa81f0f5ea71e95869e1c0d4604b0f4a11c64974773ead0d17`、
+  `c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04`；本轮没有修改配置、
+  资产、关节顺序、ONNX 或训练参数。验证使用的 step 25300 `_g1.onnx` SHA256 仍为
+  `562de4efda9cd2d8f90f368d304dcf990f9c59d10a41d14eaa2bf79215fb340b`。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py` 新增 BUMI3 Mimic NPZ 兼容路径：当 NPZ
+  没有顶层 `root_pos/root_quat`，但提供 `body_pos_w/body_quat_w` 时，按同文件
+  `body_names` 精确定位 sim2sim 配置中的 `reference_root_body_name=base_link`，再提取
+  `[T,3]` 根位置和 `[T,4]` 根四元数。实现没有使用数组第 0 项假设，也没有把 NPZ 中
+  `anchor_body_name=waist_yaw_link` 错当成浮动根；anchor 元数据和根 body 是不同语义。
+  缺少 `body_names`、根名称缺失/重复或 `[T,B,3/4]` shape 不一致都会 fail-fast。
+- 同一 NPZ 路径现在同时识别重定向器使用的 `quaternion_order` 和既有
+  `quaternion_convention`；显式顶层 root pose、qpos、训练 PKL 及 G1 风格 CSV 的原有优先级
+  和默认行为保持不变。该修改位于 BUMI3 专用 sim2sim 模块，不改变 G1/H2 通用部署逻辑。
+- `gear_sonic/tests/test_bumi3_sim2sim.py` 新增正反两个回归：正向 fixture 故意把
+  `waist_yaw_link` 放在第 0 位、`base_link` 放在第 1 位，确认加载结果仍取命名 base；反向
+  fixture 缺少 `base_link`，确认明确报错而非退回索引 0。完整该文件结果为
+  `15 passed in 2.77s`，其中既有训练 PKL 和 G1 风格 CSV 测试继续通过；相邻锚点语义测试为
+  `2 passed in 0.04s`。
+- 对本地
+  `/home/weili/robot_retargeter/output_data/bumi3_requested_20260901_50hz/mimic_npz/bumi3`
+  当前 8 个真实 NPZ 逐条运行标准 `run_bumi3_sim2sim.py --validate-only --provider cpu`，
+  `8/8` 全部输出 `BUMI3_SIM2SIM_VALIDATE_ONLY=PASS`。现场读取均为 50 FPS、21 关节、
+  22 body、wxyz 四元数，共 `32675` 帧；不能沿用旧记录中的 36675 帧。随后对
+  `CFmvaQiCW6I_40_0_900_dancer_00.npz` 运行 2 秒 headless、非实时 MuJoCo smoke，完成
+  100 个控制步和 1170→21 ONNX 推理，最终 root height 约 `0.24052 m`、最大绝对 torque
+  约 `42.76570`。该 smoke 只证明加载、reset、观测、推理和动力学链路可执行；根高度明显
+  下降，不能解释为动作质量、长时稳定性或真机安全通过。
+- 两个修改文件的 `compileall` 与 `git diff --check` 通过；当前 `.venv_sim` 未安装
+  `ruff`，因此没有伪称执行 ruff。pytest 临时目录由测试框架管理，本轮没有生成需保留的
+  checkpoint、ONNX、视频或日志；本地 8 条原始 NPZ 与正式模型均未改写。兼容分支如需
+  回滚，应对本轮提交创建反向提交，不得 reset/clean 覆盖用户工作。
