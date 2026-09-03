@@ -2027,19 +2027,35 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     "train", start_time, num_tokens=self.state.num_input_tokens_seen
                 )
 
-        # Sanitize all caller logs at this boundary: rank 0 stores only detached CPU/Python values.
+        # 在统一日志边界把标量张量转换为 Python 数字。转换后的同一份字典既写入
+        # Trainer 历史，也交给 TensorBoard/W&B 回调，避免回调收到零维 Tensor 后
+        # 丢弃 reward、termination、运动误差和自适应采样等关键训练指标。
+        sanitized_logs = {}
+        for key, value in logs.items():
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    raise ValueError(
+                        f"训练日志只允许标量张量，指标 {key!r} 的形状为 {tuple(value.shape)}"
+                    )
+                value = value.detach().cpu().item()
+            elif isinstance(value, np.ndarray):
+                if value.size != 1:
+                    raise ValueError(
+                        f"训练日志只允许单元素数组，指标 {key!r} 的形状为 {value.shape}"
+                    )
+                value = value.item()
+            elif isinstance(value, np.generic):
+                value = value.item()
+            sanitized_logs[key] = value
+
         if self.state.is_world_process_zero:
-            output = {}
-            for key, value in logs.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.detach().cpu().item()
-                elif isinstance(value, np.ndarray):
-                    value = float(value)
-                output[key] = value
+            output = dict(sanitized_logs)
             output["step"] = self.state.global_step
             self.state.log_history.append(output)
 
-        self.control = self.callback_handler.on_log(self.args, self.state, self.control, logs)
+        self.control = self.callback_handler.on_log(
+            self.args, self.state, self.control, sanitized_logs
+        )
 
     def _gradient_clipping(self):
         """Clip gradients and detect NaN/Inf, skipping the update if found.
