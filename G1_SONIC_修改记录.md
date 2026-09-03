@@ -53,6 +53,25 @@
 - Isaac Sim reset/step 和短回合训练未在本地运行：本次只改变 Trainer 日志边界，不改变
   环境、观测、动作或动力学；正式服务器启动后将以首轮真实 event 中是否出现 reward、
   termination、运动误差和 adaptive sampling 标签作为运行时门禁。
+- Git 提交 `e03a07b` 完成日志修复与记录文件，提交 `5bfd6fc` 修正 `agent.md` 文件尾部
+  格式；二者已推送到 GitHub 的 `feature/g1-native-sonic-training`。`noetix-12` 工作区从
+  `5702647` 通过 `git pull --ff-only` 快进到 `5bfd6fc`，拉取前后均为同名分支且工作区干净。
+- `/root/miniconda3/envs/jump/bin/python` 在服务器执行同一最小日志回调测试：通过，输出
+  `REMOTE_TENSORBOARD_LOG_SANITIZE_TEST=PASS`。
+- 正式八卡训练于 `2026-09-03 11:04:40 CST` 启动，tmux 会话为
+  `sonic_g1_scratch_8gpu_20260903_110440`，实验目录为
+  `/data/sonic_g1/runs/TRL_G1_Track/g1_sonic_bones_seed_8gpu_scratch_100k-20260903_110440`。
+  启动参数显式包含 `checkpoint=null`、`resume=false`、`auto_load_latest=false`、
+  `use_wandb=false` 和 `algo.trl.report_to=tensorboard`；日志中没有
+  `Loading checkpoint from`，实际初始化 G1、Teleop、SMPL 三个原生 Encoder。
+- 正式训练首轮后，8 个 rank 均存活且 8 张 GPU 均进入计算；训练日志中 TensorBoard 类型
+  警告为 0。实际 event 文件包含 122 个 scalar 标签，并确认
+  `train/objective/rewards`、`train/Episode_Reward/tracking_anchor_pos`、
+  `train/Episode_Termination/time_out`、`train/Metrics/motion/error_joint_pos` 和
+  `train/adp_samp/failure_rate_mean` 均存在，结果为
+  `TENSORBOARD_RUNTIME_TAG_GATE=PASS`。本次按用户要求没有启动 TensorBoard 服务进程。
+- 正式训练不是短回合测试，因此保留其实验目录、日志、event 和后续 checkpoint；没有产生
+  需要清理的临时训练目录或临时 tmux 会话。
 
 ### 6. 回滚方法
 
