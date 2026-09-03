@@ -18,4 +18,3 @@
 6. 当前 G1 SONIC 八卡训练服务器为 `noetix-12`，代码目录为
    `/root/home/liwei/GR00T-WholeBodyControl`，训练使用 Conda 环境
    `/root/miniconda3/envs/jump`。改变服务器、环境、分支或正式输出目录前必须先核对并记录。
-
