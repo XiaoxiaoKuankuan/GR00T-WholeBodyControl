@@ -48,8 +48,8 @@
   <worldbody>
     <light directional="true" diffuse=".4 .4 .4" specular="0.1 0.1 0.1" pos="0 0 5.0" dir="0 0 -1" castshadow="false"/>
     <light directional="true" diffuse=".6 .6 .6" specular="0.2 0.2 0.2" pos="0 0 4" dir="0 0 -1"/>
-    <!-- 大集 BUMI3 参考动作的脚底最低点约为 -0.02 m；地面与该数据基准对齐，避免 reset 时脚掌陷地。 -->
-    <geom name="ground" type="plane" size="0 0 1" pos="0.001 0 -0.02" quat="1 0 0 0" material="matplane" contype="0" conaffinity="1" condim="3" friction="1 0.005 0.0001"/>
+    <!-- sim2sim 使用世界坐标 Z=0 作为统一地面；动作加载器只归零水平根位置，不改动参考根高度。 -->
+    <geom name="ground" type="plane" size="0 0 1" pos="0.001 0 0" quat="1 0 0 0" material="matplane" contype="0" conaffinity="1" condim="3" friction="1 0.005 0.0001"/>
 
     <body name="base_link" pos="0 0 0.55">
       <inertial pos="1.254094e-03 -2.171701e-03 4.494330e-02" mass="1.914587e+00" fullinertia="4.581786e-03 2.116897e-03 4.196393e-03 -1.102273e-05 -6.894191e-06 -2.899742e-05"/>

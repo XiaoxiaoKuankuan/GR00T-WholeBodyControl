@@ -44,7 +44,7 @@ EXPECTED_LOCAL_URDF_SHA256 = (
     "0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955"
 )
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04"
+    "28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547"
 )
 EXPECTED_LOCAL_MESH_BUNDLE_SHA256 = (
     "5d84767fbd21ec22434c1cba8145e4887d4f5910512d5a8efeac50781f3afa26"
@@ -194,7 +194,7 @@ def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
 
     ground = mjcf_root.find("./worldbody/geom[@name='ground']")
     assert ground is not None
-    assert _parse_vector(ground.attrib["pos"]) == (0.001, 0.0, -0.02)
+    assert _parse_vector(ground.attrib["pos"]) == (0.001, 0.0, 0.0)
     assert ground.attrib["contype"] == "0"
     assert ground.attrib["conaffinity"] == "1"
     assert ground.attrib["condim"] == "3"

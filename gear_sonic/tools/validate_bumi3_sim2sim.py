@@ -36,7 +36,7 @@ from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
 
 
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04"
+    "28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547"
 )
 
 EXPECTED_COLLISION_BODIES = {
@@ -161,7 +161,7 @@ def _validate_collision_contract(model: mujoco.MjModel) -> tuple[np.ndarray, np.
 
     ground_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
     assert ground_id >= 0
-    assert np.isclose(model.geom_pos[ground_id, 2], -0.02)
+    assert np.isclose(model.geom_pos[ground_id, 2], 0.0)
     assert model.geom_contype[ground_id] == 0
     assert model.geom_conaffinity[ground_id] == 1
     assert model.geom_condim[ground_id] == 3
@@ -344,7 +344,7 @@ def validate(args: argparse.Namespace) -> None:
     print(
         "COLLISION_CONTRACT="
         f"visual_meshes:{visual_geom_ids.size},collision_geoms:{collision_geom_ids.size},"
-        "capsules:5,collision_meshes:9,self_collision:false,ground_z:-0.02"
+        "capsules:5,collision_meshes:9,self_collision:false,ground_z:0"
     )
     print(
         "INITIAL_CONTACT_GATE="

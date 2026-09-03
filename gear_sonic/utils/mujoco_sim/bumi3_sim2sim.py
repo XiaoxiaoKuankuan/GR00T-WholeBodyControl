@@ -329,8 +329,9 @@ class ReferenceMotion:
     """已转换到 50 FPS、策略关节顺序和 wxyz 浮动根状态的动作。
 
     ``root_position_world`` 对旧 CSV 可以为空；正常 SONIC PKL/NPZ 应提供训练时使用的
-    root translation。Robot Encoder 仍通过加载 BUMI3 MJCF 后的命名刚体获取锚点；
-    当前契约将该刚体固定为 ``base_link``，因此腰关节姿态不再改变参考锚点。
+    root translation。加载器会把整段水平根轨迹平移为首帧 ``x=y=0``，但保持每帧
+    相对位移和原始 ``z`` 不变。Robot Encoder 仍通过加载 BUMI3 MJCF 后的命名刚体获取
+    锚点；当前契约将该刚体固定为 ``base_link``，因此腰关节姿态不再改变参考锚点。
     """
 
     joint_pos_policy: np.ndarray
@@ -453,7 +454,8 @@ def load_reference_motion(
     ``joint_order`` 和 ``quaternion_convention/quaternion_order`` 元数据；若顶层没有
     root pose，则从 ``body_pos_w/body_quat_w`` 中按 ``body_names`` 精确提取配置指定的
     参考根 body。元数据缺失时分别采用策略顺序和 wxyz。所有输入必须已经是 50 FPS，
-    以避免部署端隐式重采样改变训练时间契约。
+    以避免部署端隐式重采样改变训练时间契约。若输入含根平移，返回前会让整段
+    ``root x/y`` 减去首帧水平位置；该刚体平移不改变相对运动轨迹，也不会改动根高度。
     """
 
     motion_path = Path(path).expanduser().resolve()
@@ -612,8 +614,14 @@ def load_reference_motion(
     ):
         if not np.isfinite(value).all():
             raise ValueError(f"{label} 含 NaN/Inf")
-    if root_position is not None and not np.isfinite(root_position).all():
-        raise ValueError("root_position 含 NaN/Inf")
+    if root_position is not None:
+        if not np.isfinite(root_position).all():
+            raise ValueError("root_position 含 NaN/Inf")
+        # MuJoCo 默认视角和 XML 世界原点都以 (0, 0) 为场景中心。对整段水平根轨迹
+        # 施加同一个刚体平移，既能让首帧稳定出现在画面中心，又严格保留逐帧位移、
+        # 速度和转向路径；Z 轴必须保持数据原值，避免把地面接触问题隐藏成高度修正。
+        root_position = root_position.copy()
+        root_position[:, :2] -= root_position[0, :2]
     return ReferenceMotion(
         joint_pos_policy=joint_pos.astype(np.float32),
         joint_vel_policy=joint_vel.astype(np.float32),

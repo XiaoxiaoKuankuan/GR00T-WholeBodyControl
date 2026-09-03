@@ -2496,3 +2496,86 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `resume=false checkpoint=null auto_load_latest=false` 从零开始；这次修复可解释
   body angular velocity reward 的系统性异常，但不能单独证明它是训练质量的唯一根因。
   如需回滚，必须对本轮提交创建反向提交，不得 reset/clean 覆盖用户工作。
+
+## 2026-09-03：SONIC sim2sim 地面与参考动作水平原点统一为零
+
+### 1. 修改边界与现场状态
+
+- 本轮位于 `feature/bumi-native-sonic-full-training`。开始检查时 HEAD 为
+  `ee748ac9468d815daa7213d8cc6e612408f73e19`，本地相对 GitHub ahead/behind 为
+  `0/0`；当时用户已有 `rotations.py`、`motion_lib_base.py`、`skeleton.py`、
+  `torch_humanoid_batch.py` 和新增角速度测试的独立修改，以及未跟踪 `g1.tar.gz`。
+  本轮实施期间该组角速度修改由外部流程提交并推送为
+  `5b863b205ccf0be9a4aa1273e2fdf2180dd67b0e`，本轮没有暂存、改写或回退其中任何内容；
+  后续 sim2sim 修改以该新 HEAD 为父提交，未跟踪 `g1.tar.gz` 仍保持原样。
+- 本轮只修改 BUMI3 的 MuJoCo sim2sim XML、专用动作加载器、对应测试/验证器和使用文档；
+  不修改训练 URDF、训练 Hydra 配置、21 关节顺序、控制频率、网络、checkpoint、ONNX、
+  原始 NPZ 或 `initial_root_position=[0,0,0.4744]`。实际 sim2sim 配置 SHA256 仍为
+  `843756aef9332faa81f0f5ea71e95869e1c0d4604b0f4a11c64974773ead0d17`；验证使用的
+  `model_step_025300_g1.onnx` SHA256 为
+  `562de4efda9cd2d8f90f368d304dcf990f9c59d10a41d14eaa2bf79215fb340b`。
+- 修改前 SHA256：`bumi3.xml`
+  `c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04`，
+  `bumi3_sim2sim.py`
+  `cd3c0d250c55549a4f23c3af42edc0b4c1f57e724e9452b647e0df483d2b0fb1`，
+  `test_bumi3_sim2sim.py`
+  `b5a5e7f8b667cb69215cfea6f5e877cc80ffb7bd9540c4889015ab46f2b09730`，
+  `validate_bumi3_sim2sim.py`
+  `09638241eefbe080073435d71f2ec5755ca5ce954fcdca9b2c9bb52aa90e1889`，
+  `validate_bumi3_integration.py`
+  `165e0ec366ac1f3b841a1529daa497f36ed713bf1033ba6f151dbee5d670d9fa`，
+  `bumi3_sim2sim.md`
+  `b135da6efa632cd9199b2c14a2c838fd57d107d381cf687744dd9aedc52090e9`。
+
+### 2. XML 与加载器的实际修改
+
+- `gear_sonic/data/assets/robot_description/mjcf/bumi3.xml` 把唯一 `ground` geom 的
+  `z` 从 `-0.02 m` 改为 `0 m`，并同步中文注释。灯光、机器人惯量、碰撞几何、接触
+  bitmask、摩擦和全部 actuator 均未改变；新 XML SHA256 为
+  `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py` 在根位置完成 shape/有限值检查后，复制
+  `root_position` 并对整段执行 `root_position[:, :2] -= root_position[0, :2]`。因此每条
+  含根平移的 PKL、NPZ 和 CSV 动作都会以首帧水平位置 `(0,0)` 开始；所有帧使用同一个
+  平移量，逐帧差分和相对首帧的完整水平轨迹保持不变。实现不原地修改输入数组，也不改
+  `root z`、根四元数、关节、速度或 FPS；不含根平移的旧 CSV 继续使用配置回退值。
+- 本轮没有随地面上移而改回退根高度。修改前的定向 MuJoCo 预检表明，在 `ground_z=0`
+  且回退根高仍为 `0.4744 m` 时静态姿态接触数为 0、地面穿透为 0；额外把根高抬升
+  `0.02 m` 只会增大悬空距离，没有数据依据。
+- `gear_sonic/tests/test_bumi3_sim2sim.py` 更新 PKL/命名 body NPZ 预期，显式断言首帧
+  `x/y=0`、整段 `np.diff(root_position)` 与源数据一致、`z` 原样保留，并把 XML 地面门禁
+  更新为 0。两个验证器同步地面数值和新 MJCF 指纹；使用文档增加水平归零契约以及旧
+  `Z=-0.02 m` 数据的兼容风险。修改后上述 Python、测试、验证器和文档 SHA256 依次为
+  `6d3f4077fe06f2f11c8655dd801d739b460db6ff491600bfc31e045c7f6d3003`、
+  `461f75eeb3da6fbef4ddb1f7da030bfce9530ee522370cba40f449e1ac6436cb`、
+  `bb39727b496c548e9c35dbfefedd3b1655a1d391a6e133092efb6b53c1666f50`、
+  `6a7f647c26ea73c312c18561e365d48ad238862c628f05f61e863d39aea72566`、
+  `76292b4fea42fcb9e76e3092cdb2d5e7a654366f44a0a5565a7093e084db46f7`。
+
+### 3. 实际验证结果与结论边界
+
+- `.venv_sim/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py
+  gear_sonic/tests/test_tracking_anchor_semantics.py` 最终复验结果为 `17 passed in 3.37s`
+  （修改后的首次运行同为 17 项通过，耗时 2.91 秒）。
+  `validate_bumi3_sim2sim.py` 完整 100 控制周期零策略静态参考 smoke 通过，输出锁定
+  `nq=28,nv=27,nu=21`、22 bodies、22 visual mesh、14 collision geom、
+  `ground_z=0`、静态 reset 无自碰撞/地面穿透、1170 维输入和 21 维输出。零策略 2 秒末
+  root height 为约 `0.071684 m`，这里只证明接口与数值链路可运行，不证明策略稳定性。
+- 对
+  `/home/weili/robot_retargeter/output_data/bumi3_requested_20260901_50hz/mimic_npz/bumi3`
+  当前 8 条真实动作共 `32675` 帧逐条核验：8/8 加载后首帧 `x/y=(0,0)`，每帧 `z` 与
+  原文件逐点一致，整段水平位置严格等于 `source_xy-source_xy[0]`。配合上述 step-25300
+  ONNX 的标准 `run_bumi3_sim2sim.py --validate-only` 也为 `8/8 PASS`。
+- `ground_z=0` 后，8 条动作中 7 条首帧产生地面接触；`hgEy_U-6Nbc_27_0_1290_dancer_00`
+  仍保留数据中的约 1 mm 离地间隙。7 条有接触动作的首帧最深接触距离约为
+  `-14.10 mm`，其余动作约为 `-0.34` 至 `-7.42 mm`；这是原始 `root z` 相对零地面的
+  实测结果。本轮按用户要求不做垂直归零，不能把“产生接触”解释成 8 条动作都无穿透。
+- 使用 `/home/weili/miniconda3/envs/sonic/bin/python` 和 AppLauncher 运行完整
+  `validate_bumi3_integration.py` 通过，静态门禁确认 21 DoF、22 bodies、50 Hz、action 21；
+  未传 `--smoke`，因此没有创建 Isaac 环境执行真实数据 reset/step。第一次尝试在
+  `.venv_sim` 中因缺少 Hydra 未进入验证；更新第二处预期 MJCF 哈希后，正确 SONIC 环境
+  退出码为 0。platforminfo 的 CPU package 提示是现有 Isaac 启动环境信息，不影响门禁。
+- 修改文件的 `compileall`、`git diff --check` 均通过。本轮只读取正式 ONNX 和 8 条原始
+  NPZ，没有生成 checkpoint、视频、日志或临时运行目录，因此没有一次性验证产物需清理。
+  旧的按 `Z=-0.02 m` 制作的大集动作切换到本 XML 后可能出现 1--2 cm 初始穿地，应在
+  数据转换或专用 XML 中显式处理；不能依赖本水平归零分支修改高度。回滚时应对本轮功能
+  提交创建反向提交，不得 reset/clean 或覆盖用户角速度修改和未跟踪文件。

@@ -4,8 +4,8 @@
 """BUMI3 SONIC sim2sim 的回归测试。
 
 测试覆盖名称生成的 IsaacLab/MuJoCo 双向排列、训练 PKL 与部署 CSV 的顺序/浮动根
-状态约定、BUMI3 Mimic NPZ 的命名根 body 提取、参考状态 reset、``base_link`` 统一锚点
-语义、1170 维联合 policy 输入、
+状态约定、根水平轨迹首帧归零且相对位移不变、BUMI3 Mimic NPZ 的命名根 body 提取、
+参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
 闭环。测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
@@ -81,7 +81,9 @@ def test_load_training_pkl_converts_mujoco_and_xyzw(tmp_path: Path) -> None:
         motion.joint_pos_policy[0], dof_mujoco[0, contract.mujoco_to_policy]
     )
     np.testing.assert_allclose(motion.root_quat_wxyz[0], [1.0, 0.0, 0.0, 0.0])
-    np.testing.assert_allclose(motion.root_position_world, root_position)
+    expected_root_position = root_position.copy()
+    expected_root_position[:, :2] = 0.0
+    np.testing.assert_allclose(motion.root_position_world, expected_root_position)
     assert motion.joint_vel_policy.shape == (frames, 21)
     assert np.isfinite(motion.joint_vel_policy).all()
 
@@ -132,8 +134,12 @@ def test_load_bumi3_mimic_npz_extracts_named_root_body(tmp_path: Path) -> None:
     joint_vel = np.zeros_like(joint_pos)
     body_pos_w = np.zeros((frames, body_names.size, 3), dtype=np.float32)
     body_quat_w = np.zeros((frames, body_names.size, 4), dtype=np.float32)
-    expected_root_position = np.asarray(
+    source_root_position = np.asarray(
         [[0.1, -0.2, 0.50], [0.2, -0.1, 0.51], [0.3, 0.0, 0.52]],
+        dtype=np.float32,
+    )
+    expected_root_position = np.asarray(
+        [[0.0, 0.0, 0.50], [0.1, 0.1, 0.51], [0.2, 0.2, 0.52]],
         dtype=np.float32,
     )
     expected_root_quaternion = np.repeat(
@@ -143,7 +149,7 @@ def test_load_bumi3_mimic_npz_extracts_named_root_body(tmp_path: Path) -> None:
     )
     body_pos_w[:, 0] = [9.0, 9.0, 9.0]
     body_quat_w[:, 0] = [0.0, 1.0, 0.0, 0.0]
-    body_pos_w[:, 1] = expected_root_position
+    body_pos_w[:, 1] = source_root_position
     body_quat_w[:, 1] = expected_root_quaternion
     body_quat_w[:, 2] = [1.0, 0.0, 0.0, 0.0]
     path = tmp_path / "bumi3_mimic.npz"
@@ -166,6 +172,10 @@ def test_load_bumi3_mimic_npz_extracts_named_root_body(tmp_path: Path) -> None:
     np.testing.assert_allclose(motion.joint_pos_policy, joint_pos)
     np.testing.assert_allclose(motion.joint_vel_policy, joint_vel)
     np.testing.assert_allclose(motion.root_position_world, expected_root_position)
+    np.testing.assert_allclose(
+        np.diff(motion.root_position_world, axis=0),
+        np.diff(source_root_position, axis=0),
+    )
     np.testing.assert_allclose(motion.root_quat_wxyz, expected_root_quaternion)
 
 
@@ -316,7 +326,7 @@ def test_reset_pose_has_no_self_collision_or_ground_penetration() -> None:
         runner.model, mujoco.mjtObj.mjOBJ_GEOM, "ground"
     )
     assert ground_id >= 0
-    assert np.isclose(runner.model.geom_pos[ground_id, 2], -0.02)
+    assert np.isclose(runner.model.geom_pos[ground_id, 2], 0.0)
 
     self_contacts = []
     ground_penetrations = []

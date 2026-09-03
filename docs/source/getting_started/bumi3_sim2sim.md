@@ -95,7 +95,10 @@ python gear_sonic/scripts/run_bumi3_sim2sim.py \
   --no-real-time
 ```
 
-多动作 PKL/NPZ 或包含多个 clip 子目录的 CSV 根目录使用 `--motion-key NAME`。顺序默认值：
+加载器会把含根平移的每条动作整体做水平归零：整段 ``root x/y`` 减去首帧
+``root x/y``，所以第一帧位于世界水平原点，后续每帧相对首帧的运动轨迹保持不变。
+这个操作不修改 ``root z``，也不改变关节、根旋转或帧率。多动作 PKL/NPZ 或包含多个
+clip 子目录的 CSV 根目录使用 `--motion-key NAME`。顺序默认值：
 
 - SONIC 训练 PKL：`dof` 为 MuJoCo 顺序，`root_rot` 为 `xyzw`。
 - G1 `MotionDataReader` 风格 CSV clip：`joint_pos.csv` 为策略/IsaacLab 顺序，
@@ -120,15 +123,16 @@ sim2sim 是 MuJoCo 闭环，所有碰撞完全以 `bumi3.xml` 为准。XML 里�
 link mesh 作为 `group=1` 的可视 geom，并把 14 个审核后的接触几何单独设为
 `group=3`：base、双侧 leg-roll 和双侧 knee 使用简化 capsule，其余 9 个需要接触的
 link 使用 mesh；arm-pitch/arm-yaw、leg-pitch/leg-yaw 不参与碰撞。地面 Z 基准为
-`-0.02 m`，用于消除大集参考 reset 时约 1--2 cm 的脚底陷地。机器人碰撞体使用
+`0 m`，与重定向数据和世界坐标原点统一；加载器不会改动动作原始根高度。机器人碰撞体使用
 `contype=1/conaffinity=0`，地面使用互补的 `contype=0/conaffinity=1`，因此保留
 机器人与地面的接触，但不会计算机器人 link 之间的自碰撞。运行器不会根据
 Isaac Lab URDF 或其他仓库规则再次覆盖这些定义；启动验证会将运行时
 `geom_type/bodyid/contype/conaffinity/pos/quat/size/friction/solref/solimp` 与重新加载
 的 XML 编译结果逐数组比较，并检查静态 reset 无自碰撞和地面穿透。
 
-FineDance 个别动作原始脚底接近 `Z=0`，相对于该地面会先有约 1--2 cm 的落差；这是
-不同数据源地面基准的可见差异，不应在 sim2sim 中通过跟随 policy 根高度来掩盖。
+旧大集若按 `Z=-0.02 m` 地面制作，切换到当前 XML 后可能出现约 1--2 cm 的初始穿地；
+这是数据地面基准差异，应在数据转换或专用资产中显式处理，不应通过 sim2sim 自动修改
+``root z`` 或让参考影子跟随 policy 根高度来掩盖。
 
 ONNX 只保存网络权重与 1170→21 的张量接口，不包含参考轨迹、锚点 body 名称或 FK
 结果；这些观测语义由 sim2sim 运行器负责重建。因此换动作文件或部署实现时仍必须使用
