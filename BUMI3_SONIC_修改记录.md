@@ -2261,8 +2261,68 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   或选择性初始化的策略，不能从维度静态检查推断兼容。回滚时应对本轮提交创建反向提交，
   不得用 reset/clean 覆盖用户工作。
 
-### 4. 服务器训练分析和模型回传待补录
+### 4. 服务器同步与旧训练配置边界
 
-- 配置提交、GitHub 推送、`noetix-volc` 同分支快进、当前正式训练现场分析以及最新完整
-  checkpoint 的本地回传/哈希复核将在本轮后续完成并补录。代码同步不会自动重启或改变
-  已经启动的 Python 训练进程；远端现有进程仍使用其启动时载入的旧配置。
+- 配置、校验和本记录首次补充已提交为
+  `0593bf3fe00182c35d28d8af95423b54c7ba4749`，使用详细中文提交说明推送到 GitHub 同名
+  feature 分支。服务器仓库 `/home/liwei/GR00T-WholeBodyControl` 修改前为
+  `b7f35750366149e313f4d9593c298d3a2020c044` 且工作区干净，随后执行
+  `git pull --ff-only origin feature/bumi-native-sonic-full-training`，只做快进并到达
+  `0593bf3`；快进后远端工作区仍干净。
+- 本次同步没有重启、停止或恢复训练。正式 tmux
+  `sonic_bumi3_base_anchor_v2_8gpu` 仍是 2026-09-02 16:46 启动的原进程，最终复核时八个
+  `train_agent_trl.py` rank 全部存活并继续到 iteration `25150`；TensorBoard 会话也继续在
+  `127.0.0.1:6017` 运行。现场八卡显存约 `16.0～16.7 GiB`，单次 GPU 利用率采样为
+  `0～58%`（GPU0 的瞬时 0% 不能解释为 rank 退出，PID、显存和后续 iteration 都在继续），
+  `/data` 仍有约 `1.8 TiB` 可用。
+- 运行目录内的 `config.yaml` 明确证明该进程仍使用启动时的旧契约：14 个 tracking body
+  包含左右 `leg_yaw_link`，reward 仍为 `base_link` 加双肘三点，anti-shake 仍含
+  `base_link`，COM 仍作用于 `base_link`，质量随机化为 `None`。因此下面的训练曲线和回传
+  checkpoint 都属于旧 base-anchor v2，不能当作本轮新配置的训练结果。
+
+### 5. 正式训练曲线与健康分析
+
+- 从正式日志逐 iteration 解析，前 100 轮到 iteration 24911 前的最近 100 轮，平均
+  reward 从 `1.0948` 提升到 `14.0518`，平均 episode length 从 `17.2739` 提升到
+  `146.6325`，timeout 从 `0.00336` 提升到 `0.52591`。body 位置/旋转误差从
+  `0.07706/0.52155` 降到 `0.04536/0.25070`，joint 位置误差从 `0.31014` 降到
+  `0.14400`，anchor 旋转误差从 `0.35424` 降到 `0.13284`，说明策略相对从头阶段已有
+  明显学习，而不是只保持进程存活。
+- 最近 100 轮主要 termination 指标为 foot position `0.23480`、anchor orientation
+  `0.22050`、end-effector position `0.08957`、anchor position `0.03214`；timeout 为
+  `0.52591`。这些 episode tensor 可在同一 episode 同时置位，不能简单相加当作互斥概率。
+  相较早期脚部/anchor 姿态终止已下降，但它们仍是主要失败来源；末端位置终止近期上升，
+  需要后续 replay/分动作评估确认是 adaptive sampling 难例集中还是动作质量退化。
+- TensorBoard 在 iteration `24938` 有 122 个 scalar。最近 100 轮：reward
+  `14.1867`、length `148.2163`、吞吐约 `267192 steps/s`；policy/value loss 分别为
+  `-0.00326/0.07563`，approx KL `0.01517`，clip fraction `0.10292`，ratio
+  `0.99984`，advantage std `0.98411`，学习率 `1e-5`，policy noise std 约 `0.49765`。
+  这些值没有数值发散迹象，但 noise std 接近配置上限 `0.5`，且最近 reward/length 有批次
+  波动，不能据此宣称 100k 训练已收敛。
+- 对截至 iteration `25150` 的完整正式日志使用精确边界扫描，`Traceback`、CUDA OOM、
+  `OutOfMemory`、NCCL error、`RuntimeError`、独立 `NaN` 和独立 `Inf` 均为 0。宽泛的
+  `grep -i inf` 会把普通字符串误计为 4249 行，不能用作异常数。本次没有执行策略 replay、
+  仿真评估、ONNX 导出或硬件测试，所以结论仅为训练进程和数值曲线健康、尚未证明动作质量
+  或硬件安全。
+
+### 6. 最新模型回传、完整性和清理
+
+- 正式 run 每 50 轮使用临时文件加原子 `os.replace` 更新 `last.pt`；编号 checkpoint 的
+  真实 callback `save_frequency` 为 2000，并已保存到 `model_step_024000.pt`。为避免下载
+  期间 `last.pt` 被替换，在同一文件系统为当时最新 inode 创建一次性硬链接；读取成功后
+  确认其 `state.global_step=24950`、`tot_timesteps=19621478400`、大小
+  `391203747` bytes，包含 policy/value/optimizer/scheduler/env state，随后才开始传输。
+- 模型已回传为
+  `models/sonic_bumi3/sonic_bumi3_base_anchor_v2_scratch_100k-20260902_164548/model_step_024950.pt`，
+  同目录保存该 run 原始 `config.yaml` 和 `meta.yaml`。三者本地/远端 SHA256 分别一致：
+  模型 `366a5457a9804a4e44dd9217ff965c31defa66a1a123d40bf70bc63bca6fd1d5`、配置
+  `62f6fc8bad5619971474674241b168c6d852fa672330d8e9d45336cd6cbd313c`、meta
+  `9194a2e11925a35277193b5707f51e1cd684d7ab6274e8127be032ec0318f852`。
+- 本地再次用 SONIC 环境完整 `torch.load`，确认 step/timestep 不变，policy 有 45 个 tensor、
+  value 有 17 个 tensor；actor 动态 decoder 第一层为 `(2048, 754)`、输出层为
+  `(21, 512)`，旧 critic 第一层为 `(2048, 1245)` 且 running mean/std 为 `1245`。这提供
+  了旧 checkpoint 不能完整 resume 新 `1227` 维 critic 的直接张量证据。
+- 本地哈希和结构复核通过后，远端一次性硬链接
+  `.codex_transfer_last_20260903.pt` 已用精确路径删除并确认不存在；正式 `last.pt`、
+  `model_step_024000.pt`、训练进程、TensorBoard 和其他 checkpoint 均未删除。回传目录位于
+  Git 已忽略的 `models/` 下，不进入源码提交；用户原有 `g1.tar.gz` 仍保持未跟踪且未触碰。
