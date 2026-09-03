@@ -2579,3 +2579,20 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   旧的按 `Z=-0.02 m` 制作的大集动作切换到本 XML 后可能出现 1--2 cm 初始穿地，应在
   数据转换或专用 XML 中显式处理；不能依赖本水平归零分支修改高度。回滚时应对本轮功能
   提交创建反向提交，不得 reset/clean 或覆盖用户角速度修改和未跟踪文件。
+
+### 4. GitHub 与 noetix-volc 交付复验
+
+- 功能、测试、资产、验证器、文档和本节前三部分记录已提交为
+  `91ce2ff8868ea57a61acea0f42b53b2fef7bd072`，并推送到 GitHub 的
+  `feature/bumi-native-sonic-full-training`。提交前逐文件暂存并核对，只有本轮 7 个文件
+  进入提交；本地未跟踪 `g1.tar.gz` 没有被读取、暂存、修改或删除。
+- `noetix-volc` 的 `/home/liwei/GR00T-WholeBodyControl` 同步前位于同名 feature 分支、
+  HEAD 为 `5b863b205ccf0be9a4aa1273e2fdf2180dd67b0e` 且工作区干净；执行
+  `git pull --ff-only origin feature/bumi-native-sonic-full-training` 后快进到
+  `91ce2ff8868ea57a61acea0f42b53b2fef7bd072`，没有 stash、reset、merge 或覆盖服务器文件。
+- 服务器使用 `/root/miniconda3/envs/liwei_lab/bin/python` 复跑 sim2sim 与锚点测试，结果
+  为 `17 passed in 4.47s`；随后运行 `validate_bumi3_sim2sim.py --skip-smoke` 通过，输出
+  再次确认 MJCF SHA256 为
+  `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`、
+  `ground_z=0`、静态 reset 无自碰撞/地面穿透、1170 维输入和 21 维动作。复验后服务器
+  工作区保持干净。本次同步和测试没有启动、停止或重启正式训练，也没有创建持久产物。
