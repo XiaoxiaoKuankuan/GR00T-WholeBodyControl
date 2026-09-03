@@ -4,8 +4,9 @@
 # BUMI3 原生 SONIC 训练入口。该配置继承发布版 SONIC 的仿真、奖励、事件、
 # termination、PPO、critic 与 trainer，只替换机器人和名称契约，并选择不含
 # Teleop 的 Robot+SMPL 双编码器配置。BUMI3 的跟踪锚点统一为浮动根
-# ``base_link``。当前只保留 ``base_link`` 的 COM 随机化，质量、KP/KD、踝关节
-# armature 随机化以及执行器 0～4 个 physics step 的随机延迟均先关闭。训练
+# ``base_link``，跟踪 body 不包含左右 leg-yaw 连杆，anti-shake 只约束双肘。
+# ``waist_yaw_link`` 同时承担 COM 随机化和 0.8～1.5 倍质量随机化；KP/KD、踝关节
+# armature 随机化以及执行器 0～4 个 physics step 的随机延迟仍保持关闭。训练
 # motion/SMPL 路径必须由 CLI 显式提供，避免把 G1 数据误用于 21 DoF BUMI3。
 
 defaults:
@@ -62,16 +63,20 @@ manager_env:
         body_names:
           - "l_elbow_pitch_link"
           - "r_elbow_pitch_link"
-          - "base_link"
 
   events:
-    # 锚点改为浮动根后，保留的 COM 扰动也统一落在 base_link。其余三类新增
-    # 动力学随机化先关闭，避免与无延迟执行器调整同时引入额外训练变量。
+    # COM 和质量扰动都只作用于腰部 yaw 连杆；质量按原始值乘以 0.8～1.5。
+    # 踝关节 armature 与 KP/KD 随机化继续关闭，避免同时引入额外训练变量。
     base_com:
       params:
         asset_cfg:
-          body_names: "base_link"
-    randomize_rigid_body_mass: null
+          body_names: "waist_yaw_link"
+    randomize_rigid_body_mass:
+      params:
+        asset_cfg:
+          body_names: "waist_yaw_link"
+        mass_distribution_params: [0.8, 1.5]
+        operation: "scale"
     randomize_ankle_armature: null
     randomize_actuator_gains: null
 
@@ -106,22 +111,24 @@ manager_env:
           "r_arm_roll_link",
           "r_elbow_pitch_link",
           "l_leg_roll_link",
-          "l_leg_yaw_link",
           "l_knee_pitch_link",
           "l_ankle_roll_link",
           "r_leg_roll_link",
-          "r_leg_yaw_link",
           "r_knee_pitch_link",
           "r_ankle_roll_link",
         ]
       reward_point_body:
         [
-          "base_link",
+          "waist_yaw_link",
           "l_elbow_pitch_link",
           "r_elbow_pitch_link",
+          "l_ankle_roll_link",
+          "r_ankle_roll_link",
         ]
       reward_point_body_offset:
         [
+          [0.0, 0.0, 0.0],
+          [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],

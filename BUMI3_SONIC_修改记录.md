@@ -2205,3 +2205,64 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `model_step_*.pt` 则按 `save_interval=500` 保存。后续复核到 iteration `71` 时，约
   `391 MB` 的首个 `last.pt` 已实际存在，但尚未到第一个编号 checkpoint，不能把两类
   保存频率混为一谈。
+
+## 2026-09-03：调整 BUMI3 跟踪点、腰部域随机化和五点奖励
+
+### 1. 修改起点与工作区保护
+
+- 所属分支为 `feature/bumi-native-sonic-full-training`，起始 HEAD 为
+  `b7f35750366149e313f4d9593c298d3a2020c044`；修改前本地与同名 origin 分支 ahead/behind
+  均为 `0/0`。工作区原有未跟踪文件 `g1.tar.gz` 属于用户受保护产物，本轮没有读取、
+  修改、暂存或删除它。
+- 本轮参数只来自用户明确给出的新训练契约和当前 SONIC BUMI3 配置，没有混用其他 BUMI
+  版本。修改前 `sonic_bumi3.yaml` SHA256 为
+  `a2ca8b208c4fc614a5ad64131558ffeb37ad445834ce440ea0cba683577c0d7a`；未修改的运行时
+  URDF `bumi.urdf` 和 MotionLib MJCF `bumi3.xml` SHA256 分别为
+  `0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955`、
+  `c4521504388c6eba296b8070fd80d73bb85c506b7346722031cefa3bcea11c04`。
+
+### 2. 配置和契约校验修改
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：从 motion
+  tracking `body_names` 中只移除 `l_leg_yaw_link` 和 `r_leg_yaw_link`，其余 12 个跟踪
+  body 及 `anchor_body=base_link` 保持不变；该修改不移除 21 DoF 动作中的左右
+  `leg_yaw_joint`，也不改变机器人关节顺序或执行器参数。
+- 同一配置把 `anti_shake_ang_vel` 的 `base_link` 删除，仅保留左右
+  `elbow_pitch_link`；把 COM 随机化目标从 `base_link` 改为 `waist_yaw_link`；启用只作用
+  于 `waist_yaw_link` 的质量随机化，启动时按原始质量乘以均匀采样的 `[0.8, 1.5]`，
+  operation 明确为 `scale`。踝关节 armature 和执行器 KP/KD 随机化仍为 `null`。
+- `reward_point_body` 按用户给出的顺序改为 `waist_yaw_link`、左右肘、左右踝共五点，五个
+  offset 均为 `[0.0, 0.0, 0.0]`。`vr_3point_body` 仍保持双肘加 `base_link`，因为它与
+  reward 五点及 tracking body 是三套独立语义，本轮没有收到修改 VR 三点的要求。
+- `gear_sonic/tools/validate_bumi3_integration.py` 同步锁定上述 resolved Hydra 契约；质量
+  event 额外检查 `_target_`、函数、`startup` 时机、robot body、范围和 scale operation，
+  防止只改表面 YAML 而继承到旧的 `[0.8, 2.5]`。12 个 tracking body 使 critic
+  observation 从 `1245` 降为 `1227`；actor proprioception 仍为 `690`、tokenizer flat
+  仍为 `1262`、动作维度仍为 `21`。
+
+### 3. 本地实际验证与兼容性边界
+
+- 直接调用 `_validate_resolved_configs()` 成功，实际解析得到
+  `sim_dt=0.005`、`decimation=4`、控制频率/目标 FPS `50`、actor `690`、tokenizer
+  `1262`、critic `1227`、decoder `754 -> 21`；不是只对 YAML 文本做搜索。
+- 使用 `/home/weili/miniconda3/envs/sonic/bin/python` 运行完整
+  `gear_sonic/tools/validate_bumi3_integration.py`，实际启动本地 headless Isaac Sim，验证
+  当前 URDF/MJCF、21 DoF/22 body、执行器、mapping 和 resolved 配置，结果为
+  `BUMI3 原生 SONIC 集成验证通过`。本轮未传正式 motion/SMPL 路径，所以没有创建环境做
+  reset/step smoke；该结果不代表新参数已完成短训练或策略质量验证。
+- 逐文件运行 BUMI3 dataset、配对、sim2sim 和锚点相关 pytest，结果为
+  `42 passed, 1 warning in 4.94s`；warning 是历史字符串的 invalid escape sequence。
+  一次对整个 `gear_sonic/tests` 的宽范围收集因环境缺少可选 `msgpack` 而在无关
+  `test_input_readers.py` 收集阶段退出，退出码 `2`，没有执行测试体；改用上述逐文件命令
+  后 BUMI3 范围全部通过。`compileall` 与 `git diff --check` 同样通过。
+- 旧正式训练使用 14 个 tracking body，checkpoint 中的 critic 输入层按 `1245` 维创建；
+  新配置为 `1227` 维，因此旧 checkpoint 不能未经权重适配就做包含 critic/optimizer 的
+  完整 resume。actor 输入和 21 维输出没有因本次修改变化，但仍需单独验证仅加载 actor
+  或选择性初始化的策略，不能从维度静态检查推断兼容。回滚时应对本轮提交创建反向提交，
+  不得用 reset/clean 覆盖用户工作。
+
+### 4. 服务器训练分析和模型回传待补录
+
+- 配置提交、GitHub 推送、`noetix-volc` 同分支快进、当前正式训练现场分析以及最新完整
+  checkpoint 的本地回传/哈希复核将在本轮后续完成并补录。代码同步不会自动重启或改变
+  已经启动的 Python 训练进程；远端现有进程仍使用其启动时载入的旧配置。

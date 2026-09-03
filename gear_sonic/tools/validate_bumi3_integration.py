@@ -391,7 +391,7 @@ def _validate_reward_compatibility(bumi_manager: dict, release_manager: dict) ->
 
 
 def _validate_event_compatibility(bumi_manager: dict, release_manager: dict) -> None:
-    """确认 BUMI3 只保留 base_link COM 扰动并关闭三类域随机化。"""
+    """确认 BUMI3 腰部质量/COM 扰动范围，并锁定其余随机化关闭状态。"""
 
     bumi_events = bumi_manager["events"]
     release_events = release_manager["events"]
@@ -406,14 +406,21 @@ def _validate_event_compatibility(bumi_manager: dict, release_manager: dict) -> 
     for event_name, release_event in release_events.items():
         bumi_event = bumi_events[event_name]
         if event_name == "randomize_rigid_body_mass":
-            assert bumi_event is None, "BUMI3 质量随机化必须关闭"
+            assert bumi_event["_target_"] == release_event["_target_"]
+            assert bumi_event["func"] == release_event["func"]
+            assert bumi_event["mode"] == "startup"
+            mass_params = bumi_event["params"]
+            assert mass_params["asset_cfg"]["name"] == "robot"
+            assert mass_params["asset_cfg"]["body_names"] == "waist_yaw_link"
+            assert mass_params["mass_distribution_params"] == [0.8, 1.5]
+            assert mass_params["operation"] == "scale"
             continue
         assert _without_body_names(bumi_event) == _without_body_names(release_event), (
             f"BUMI3 event {event_name} 出现未授权的函数、范围或执行时机变化"
         )
 
     assert bumi_events["base_com"]["params"]["asset_cfg"]["body_names"] == (
-        "base_link"
+        "waist_yaw_link"
     )
     assert bumi_events["randomize_ankle_armature"] is None
     assert bumi_events["randomize_actuator_gains"] is None
@@ -475,20 +482,22 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "r_arm_roll_link",
         "r_elbow_pitch_link",
         "l_leg_roll_link",
-        "l_leg_yaw_link",
         "l_knee_pitch_link",
         "l_ankle_roll_link",
         "r_leg_roll_link",
-        "r_leg_yaw_link",
         "r_knee_pitch_link",
         "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body"] == [
-        "base_link",
+        "waist_yaw_link",
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
+        "l_ankle_roll_link",
+        "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body_offset"] == [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
@@ -569,17 +578,17 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         + 10 * 6  # SMPL root 6D orientation
     )
     assert tokenizer_flat_dim == 1262
-    num_reward_bodies = len(motion_cfg["body_names"])
+    num_tracking_bodies = len(motion_cfg["body_names"])
     critic_obs_dim = (
         10 * (2 * action_dim)
         + 3
         + 6
-        + num_reward_bodies * 3
-        + num_reward_bodies * 6
+        + num_tracking_bodies * 3
+        + num_tracking_bodies * 6
         + (3 + 3 + action_dim + action_dim) * bumi_cfg.critic_prop_history_length
         + action_dim * bumi_cfg.critic_actions_history_length
     )
-    assert critic_obs_dim == 1245
+    assert critic_obs_dim == 1227
     dynamic_decoder_input_dim = token_total_dim + actor_proprioception_dim
     assert dynamic_decoder_input_dim == 754
     dynamic_decoder_output_dim = action_dim
@@ -587,6 +596,10 @@ def _validate_resolved_configs() -> dict[str, int | float]:
 
     _validate_reward_compatibility(bumi_manager, release_manager)
     _validate_event_compatibility(bumi_manager, release_manager)
+    assert bumi_manager["rewards"]["anti_shake_ang_vel"]["params"]["body_names"] == [
+        "l_elbow_pitch_link",
+        "r_elbow_pitch_link",
+    ]
     terminations = bumi_manager["terminations"]
     assert terminations["foot_pos_xyz"]["params"]["threshold"] == 0.20
     assert terminations["foot_pos_xyz"]["params"]["body_names"] == [
