@@ -2326,3 +2326,53 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `.codex_transfer_last_20260903.pt` 已用精确路径删除并确认不存在；正式 `last.pt`、
   `model_step_024000.pt`、训练进程、TensorBoard 和其他 checkpoint 均未删除。回传目录位于
   Git 已忽略的 `models/` 下，不进入源码提交；用户原有 `g1.tar.gz` 仍保持未跟踪且未触碰。
+
+### 7. 在 noetix-volc 导出 step 25300 ONNX 并回传本地
+
+- 用户要求在 `noetix-volc` 完成导出。为避免持续更新的 `last.pt` 在读取期间被原子替换，
+  先在正式 run 的同一文件系统为当时最新 inode 创建一次性硬链接，使用
+  `/root/miniconda3/envs/liwei_lab/bin/python` 完整 `torch.load` 后确认
+  `state.global_step=25300`、`tot_timesteps=19896729600`、大小 `391203747` bytes、policy
+  tensor 数为 `45`；旧 critic 输入层仍为 `(2048, 1245)`，actor decoder 输入/输出仍为
+  `(2048, 754)` 和 `(21, 512)`。冻结模型保留为正式产物
+  `model_step_025300.pt`，SHA256 为
+  `fb365c205d599a7750aaf91d34db07b4ce127df8e87bc5a9821bbbcec64980fc`；隐藏的一次性
+  `.codex_export_snapshot_20260903.pt` 随后已精确删除。
+- 在物理 GPU 4 上运行 `gear_sonic/eval_agent_trl.py`，参数为冻结 checkpoint、
+  `num_envs=1`、`headless=true` 和 `export_onnx_only=true`，进程退出码为 `0`。正式导出
+  日志保存在
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_export_step_025300_20260903.log`；无显示服务器上的
+  Vulkan/renderer 提示属于 headless 噪声，日志没有 Python traceback 或 OOM。导出后
+  精确删除一次性 `/tmp/isaaclab/logs/isaaclab_2026-09-03_14-17-31.log`，正式 checkpoint、
+  ONNX、配置和导出日志均保留。
+- 四个 ONNX 在服务器和本地分别通过 `onnx.checker.check_model` 及 ONNX Runtime CPU
+  零输入有限值推理。`model_step_025300_g1.onnx` 为 BUMI3 sim2sim 使用的 Robot Encoder
+  联合策略，输入/输出为 `1170 -> 21`，SHA256 为
+  `562de4efda9cd2d8f90f368d304dcf990f9c59d10a41d14eaa2bf79215fb340b`；SMPL 策略为
+  `1470 -> 21`，SHA256 为
+  `91f8701b2e69d713d883c07e5991d6ab84908136a4e39a7ed033cca8d51f00fd`；encoder 为
+  `1263 -> 64`，SHA256 为
+  `c18b05dd8454522014ed162db1a0bd82da5f36c89a0ca03894f162815bb26196`；decoder 为
+  `754 -> 21`，SHA256 为
+  `64f19bbee4aa7aecd95b65112afa3a0bd92c4b88206a70f14058a646601585d7`。相邻
+  `model_config.yaml` SHA256 为
+  `19765cd038d92b9fc1635d776c310d6c565b991286c59a52769afd1abd223333`。
+- 产物已回传至本地 Git 忽略目录
+  `models/sonic_bumi3/sonic_bumi3_base_anchor_v2_scratch_100k-20260902_164548`，四个 ONNX、
+  `model_config.yaml` 的本地/远端 SHA256 逐项一致。为了给 sim2sim 提供可直接执行的
+  50 Hz BUMI3 输入，同目录额外保存服务器实际验证过的 2749 帧动作
+  `sim2sim_validation_motion/aioz_gdance__-FXdDRM4lC0_03_0_1650_dancer_00.pkl`，SHA256 为
+  `7909459385b500e23af9af97e53f952b9ff24a6175356a544cd39645cc6a4a42`。
+- 服务器 `liwei_lab` 环境缺少的只是 `tyro` CLI 解析依赖，因此服务器验证通过临时内存
+  shim 绕过 CLI 后直接调用同一脚本的 `Args` 和 `main()`，没有安装包或修改训练环境：
+  `--validate-only` 等价验证输出 `BUMI3_SIM2SIM_VALIDATE_ONLY=PASS`，随后 2 秒 headless
+  动力学 smoke 完成 100 个控制步。回传后使用本地已有且依赖完整的仓库
+  `.venv_sim/bin/python` 运行标准 CLI，`--validate-only` 同样通过；本地 2 秒、100 控制步
+  smoke 正常结束，最终 root height 约 `0.40348 m`、最大绝对 torque 约 `21.21956`。
+  这些结果证明 ONNX/动作/MJCF 契约和短时 MuJoCo 执行链可用，不代表长动作质量或真机安全。
+- 导出和传输没有停止或重启正式训练。最终复核时 accelerate launcher 及 8 个 worker
+  全部存活，训练已从冻结时的 iteration 25300 继续到 iteration `25582`；正式日志中
+  `Traceback`、CUDA OOM、`OutOfMemory`、NCCL error 和 `RuntimeError` 精确计数仍均为 0。
+  该模型仍来自 2026-09-02 启动的旧 14 tracking-body/三 reward-point 配置，只是比先前
+  回传的 step 24950 更新；它可以导出并运行 sim2sim，但不能代表本日新 12 body、五点奖励、
+  `waist_yaw_link` COM/质量随机化配置已经训练。
