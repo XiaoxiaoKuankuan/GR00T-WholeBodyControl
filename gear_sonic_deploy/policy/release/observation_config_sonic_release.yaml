@@ -1,11 +1,9 @@
-# SONIC Release - Observation Configuration
-# ==========================================
-# For ONNX models exported from sonic_release checkpoint via:
-#   python gear_sonic/eval_agent_trl.py +checkpoint=sonic_release/last.pt \
-#       +headless=True ++num_envs=1 +export_onnx_only=true
-#
-# Encoder input dimension: 1751 (1 encoder_index + 1750 tokenizer obs)
-# Uses the unitoken_all_noz tokenizer config (3 encoders: g1, teleop, smpl)
+# SONIC Release 部署观测配置
+# =========================
+# 本配置专门对应由 sonic_release checkpoint 导出的拆分式 Encoder/Decoder ONNX。
+# Encoder 的 1751 维输入由 1 维动态模式编号、3 维 encoder_index，以及 Robot、
+# Teleop、SMPL 三种 Encoder 所需观测的并集组成。这里使用 C++ 观测注册表中的名称，
+# 并严格保持 Python 导出器的展平顺序；不得加入旧模型使用的根高度观测。
 
 observations:
 
@@ -31,49 +29,56 @@ encoder:
   dimension: 64
   use_fp16: false
   encoder_observations:
-    # Used by all encoder modes
-    - name: "encoder_index"
+    # 动态模式编号和三维 encoder_index 在部署端合并为连续的 4 维输入。
+    - name: "encoder_mode_4"
       enabled: true
-    # G1 mode
-    - name: "command_multi_future_nonflat"
+    # Robot Encoder：关节位置和关节速度各为 10 帧、29 维。
+    - name: "motion_joint_positions_10frame_step5"
       enabled: true
-    - name: "motion_anchor_ori_b_mf_nonflat"
+    - name: "motion_joint_velocities_10frame_step5"
       enabled: true
-    # Teleop mode
-    - name: "command_multi_future_lower_body"
+    # Python tokenizer 中单帧锚点姿态位于多帧锚点姿态之前，顺序不可交换。
+    - name: "motion_anchor_orientation"
+      enabled: true
+    - name: "motion_anchor_orientation_10frame_step5"
+      enabled: true
+    # Teleop Encoder：下肢关节位置和速度各为 10 帧、12 维。
+    - name: "motion_joint_positions_lowerbody_10frame_step5"
+      enabled: true
+    - name: "motion_joint_velocities_lowerbody_10frame_step5"
       enabled: true
     - name: "vr_3point_local_target"
       enabled: true
     - name: "vr_3point_local_orn_target"
       enabled: true
-    - name: "motion_anchor_ori_b"
+    # SMPL Encoder：10 帧人体关节、根姿态和机器人腕部参考。
+    - name: "smpl_joints_10frame_step1"
       enabled: true
-    # SMPL mode
-    - name: "smpl_joints_multi_future_local_nonflat"
+    - name: "smpl_anchor_orientation_10frame_step1"
       enabled: true
-    - name: "smpl_root_ori_b_multi_future"
-      enabled: true
-    - name: "joint_pos_multi_future_wrist_for_smpl"
+    - name: "motion_joint_positions_wrists_10frame_step1"
       enabled: true
   encoder_modes:
     - name: "g1"
       mode_id: 0
       required_observations:
-        - encoder_index
-        - command_multi_future_nonflat
-        - motion_anchor_ori_b_mf_nonflat
+        - encoder_mode_4
+        - motion_joint_positions_10frame_step5
+        - motion_joint_velocities_10frame_step5
+        - motion_anchor_orientation_10frame_step5
     - name: "teleop"
       mode_id: 1
       required_observations:
-        - encoder_index
-        - command_multi_future_lower_body
+        - encoder_mode_4
+        - motion_joint_positions_lowerbody_10frame_step5
+        - motion_joint_velocities_lowerbody_10frame_step5
         - vr_3point_local_target
         - vr_3point_local_orn_target
-        - motion_anchor_ori_b
+        - motion_anchor_orientation
     - name: "smpl"
       mode_id: 2
       required_observations:
-        - encoder_index
-        - smpl_joints_multi_future_local_nonflat
-        - smpl_root_ori_b_multi_future
-        - joint_pos_multi_future_wrist_for_smpl
+        - encoder_mode_4
+        - smpl_joints_10frame_step1
+        - smpl_anchor_orientation_10frame_step1
+        - motion_joint_positions_wrists_10frame_step1

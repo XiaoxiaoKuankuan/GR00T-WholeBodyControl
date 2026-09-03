@@ -77,3 +77,46 @@
 
 - 代码回滚只需撤销本次提交中 `TRLPPOTrainer.log()` 的日志转换改动；正式训练使用独立
   实验目录，不覆盖旧微调模型。不得通过 `git reset --hard` 或删除正式训练目录回滚。
+
+## 2026-09-03：修正 sonic_release 的 C++ Encoder 部署观测契约
+
+### 1. 问题现象与根因
+
+- `model_step_010000_encoder.onnx` 的实际输入是 `1751` 维，但使用通用
+  `policy/release/observation_config.yaml` 时，C++ 部署端组装了 `1762` 维。
+- 多出的 `11` 维来自旧通用配置中的十帧根高度和单帧根高度；当前
+  `sonic_release` checkpoint 的 Encoder 并未使用这两项。
+- 原 `observation_config_sonic_release.yaml` 写的是 Python tokenizer term 名，而 C++
+  运行时只能识别部署观测注册表名称，因此不能直接使用。
+
+### 2. 修改内容
+
+- 只修改 `gear_sonic_deploy/policy/release/observation_config_sonic_release.yaml`，不改动
+  为其他历史模型保留的通用 `observation_config.yaml`。
+- 用 `encoder_mode_4` 表示 1 维动态模式选择与 3 维 encoder index，并按
+  Python ONNX 导出器的实际展平顺序排列 Robot、Teleop 和 SMPL 观测。
+- 保留 G1/Teleop/SMPL 的模式编号 `0/1/2`，每个模式只计算它需要的观测；
+  观测并集总维度严格为 `1751`。
+
+### 3. 影响边界
+
+- 本次修改只影响导出后的 G1 `sonic_release` C++ sim2sim/部署配置，不改变
+  训练、checkpoint、ONNX 权重、MuJoCo 动力学或正在 noetix-12 运行的八卡训练。
+
+### 4. 验证结果
+
+- 直接读取 `model_step_010000_encoder.onnx` 的输入 shape，并按 C++ 观测注册表维度
+  求和：配置和 ONNX 均为 `1751`，模式顺序为 `g1=0, teleop=1, smpl=2`，
+  输出 `SONIC_RELEASE_DEPLOY_OBS_CONTRACT=PASS`。
+- 使用本机已运行的 MuJoCo 进程启动一次短暂的 C++ 控制器初始化：13 条部署动作
+  全部加载，Decoder `994 -> 29`、Encoder `1751 -> 64` 均通过运行时维度检查，
+  成功进入 `Init Done`。验证后通过 `O` 正常退出控制器，未停止用户的 MuJoCo
+  进程，未留下临时 tmux 或测试进程。
+- 本次没有执行 `] -> 9 -> T` 的落地跟踪，因为验证目标是排除观测契约崩溃；
+  实际动作效果由用户在可视化窗口中继续检查。
+- `git diff --check`：通过。
+
+### 5. 回滚方法
+
+- 若需回滚，只撤销 `observation_config_sonic_release.yaml` 的本次更改；不应修改或删除
+  通用 `observation_config.yaml`、ONNX/TRT 模型和训练 checkpoint。
