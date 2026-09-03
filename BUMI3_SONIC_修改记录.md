@@ -2497,6 +2497,74 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   body angular velocity reward 的系统性异常，但不能单独证明它是训练质量的唯一根因。
   如需回滚，必须对本轮提交创建反向提交，不得 reset/clean 覆盖用户工作。
 
+### 4. 服务器同步与真实 BUMI/G1 有限差分复验
+
+- 功能、解析测试和初始记录提交为
+  `5b863b205ccf0be9a4aa1273e2fdf2180dd67b0e`，已推送 GitHub。`noetix-volc`
+  工作区修改前干净，在同名 feature 分支由 `ee748ac` 执行 `git pull --ff-only` 快进到
+  `5b863b2`，同步后仍干净；服务器 `liwei_lab` 环境复跑与本地相同的测试集合，结果为
+  `49 passed, 4 warnings in 8.23s`。
+- 修复后按固定 seed `20260903` 重新抽取 40 条真实 BUMI motion：三个数据源分别为
+  `bumi3_smpl_97660_v1` 20 条、`hq4_pass50_v1` 10 条、`hq_all_v2` 10 条，共
+  `59919` 帧、50 Hz，并比较 12 个训练 tracking body。MotionLib 相对独立 SciPy
+  `Rotation` 中心相对旋转及相同 `sigma=2` 滤波的相对 RMSE 为
+  `5.289165391503483e-07`、最大绝对误差 `1.0309906383398904e-05 rad/s`；原始 FK
+  仍有 `9486/718548` 个相邻符号跳变并覆盖 `34/40` 条 motion，但随机逐帧翻转一半
+  `q/-q` 后相对 MotionLib 的 RMSE 和最大绝对误差均为 `0.0`，判定
+  `FINITE_DIFF_CONSISTENCY PASS`。
+- 同样以固定 seed 抽取 40 条真实 G1 motion，共 `14152` 帧、50 Hz、14 个既有
+  tracking body。MotionLib 相对独立 SciPy 的相对 RMSE 为
+  `6.034882924675027e-07`、最大绝对误差 `1.0280309380723829e-05 rad/s`；原始 FK
+  有 `1526/197568` 个相邻符号跳变并覆盖 `35/40` 条，随机符号翻转后的 RMSE 和最大
+  绝对误差同样均为 `0.0`，判定 `FINITE_DIFF_CONSISTENCY PASS`。两次审计均直接通过
+  MotionLib 重新做 Robot FK，没有修改、平滑或回写任何源 PKL，也没有生成临时数据集。
+
+### 5. 停止旧训练并从零启动新八卡正式训练
+
+- 在功能提交已推送、服务器测试和真实数据复验通过后，向精确 tmux 会话
+  `sonic_bumi3_base_anchor_v2_8gpu` 发送一次 `Ctrl-C`。8 秒后旧 launcher PID
+  `21266` 和 worker PID `21445-21452` 已全部退出，GPU compute PID 为空，旧训练 tmux
+  会话自动结束；独立的 `tensorboard_bumi3_base_anchor_v2` 会话继续保留。旧 run、日志和
+  checkpoint 均未删除，停止后再次确认 `model_step_026000.pt` SHA256 仍为
+  `7393d5a19f2f580b39fb93fa0f140ea1e0ada99b2960b8f549a5b23870ee3cb3`。
+- 新正式 tmux 会话为 `sonic_bumi3_qvel_centered_v1_8gpu`，run 为
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_qvel_centered_v1_scratch_100k-20260903_151155`，
+  tee 日志为
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_qvel_centered_v1_8gpu_20260903_151155.log`。
+  启动源码 HEAD 固定为 `5b863b2`，使用端口 `29517`、8 个 accelerate process、每卡
+  4096 env 进程中的一份环境分片，并显式设置 `resume=false`、`checkpoint=null`、
+  `auto_load_latest=false`、`num_learning_iterations=100000`，因此既不是 resume 旧
+  optimizer，也没有加载旧 policy 权重。
+- 落盘 resolved `config.yaml` SHA256 为
+  `96fee8b8c1ccf7b008816e3a2950c051eec3a62215bfc8f7b7ef19388df57b5c`。其中 Robot/SMPL
+  三源索引仍为 `bumi3_sonic_three_source_base_anchor_v2/train/{robot_all,smpl_all}`，
+  `exclude_motion_keys=[]`、`target_fps=50`、`robot_type=bumi3`、MJCF 为 `bumi3.xml`、
+  encoder 恰为 `g1/smpl`。运动 anchor 为 `base_link`；tracking body 为当前 12 个 body，
+  五点奖励使用 `waist_yaw_link`、双肘和双踝；肘部 anti-shake 开启；COM 和质量随机化都
+  精确作用于 `waist_yaw_link`。这也是此前旧 run 尚未使用的新 12-body/五点配置。
+- launcher PID 为 `685367`，八个直属 worker PID 为 `685524-685531`；验证时它们分别在
+  8 张 GPU 上各占约 `13.0-13.7 GiB`，不是单卡或仅创建 tmux。训练已实际到 iteration
+  `61`、`47972352` timesteps，该轮 `error_body_lin_vel=0.7100`、
+  `error_body_ang_vel=3.1062`；日志中 `Traceback`、`OutOfMemoryError`、
+  `CUDA out of memory`、`NCCL error`、`RuntimeError` 和 `Error executing job` 均为 0。
+- iteration 50 原子保存的首个 `last.pt` 已在训练继续运行时完整 `torch.load`：当时大小
+  `390761384` bytes、SHA256
+  `b624bc7c6f1c6758747b57d54df28ec0b7af6da3c0071eecbf8dbdded11a48b8`，
+  `state.global_step=50`、`max_steps=100000`、`episode=1638400`，并含 policy 45 个
+  tensor、value 17 个 tensor 以及 optimizer、scheduler、env state。该哈希只对应
+  iteration 50 的当时 inode；正式 `last.pt` 会继续被后续 checkpoint 原子更新。
+- 启动日志中的 headless Vulkan/renderer 提示与旧 run 一致，不伴随 Python traceback、
+  OOM、NCCL 错误或非零退出。当前证据证明修复后的 reference velocity 已进入新正式训练，
+  且多卡早期迭代和 checkpoint 链健康；iteration 61 的单点误差不能替代长期趋势、最终
+  动作质量、动力学鲁棒性或真机安全评估。
+- 完成功能提交后，本地工作区并行出现的 sim2sim 零原点改动，已由另一工作流独立提交并
+  推送为 `91ce2ff` 和服务器交付记录 `9bdb7e8`；本轮没有把这些文件混入 `5b863b2`。
+  新训练启动时源码固定为当时 HEAD `5b863b2`。后续两个提交只改变 sim2sim reference
+  loader/验证，以及 `bumi3.xml` 的 world ground geom 高度，不改变 quaternion delta、
+  MJCF body/关节层级或训练 Hydra 配置，也不会改变已经加载到运行进程中的 MotionLib；
+  因而无需停止并重建已经健康运行的新训练。本轮最终提交仍只暂存本修改记录，原有未跟踪
+  `g1.tar.gz` 继续保留。
+
 ## 2026-09-03：SONIC sim2sim 地面与参考动作水平原点统一为零
 
 ### 1. 修改边界与现场状态
