@@ -1,6 +1,7 @@
 import enum
 import gc
 import glob
+import math
 import os
 import os.path as osp
 from pathlib import Path
@@ -38,6 +39,135 @@ def to_torch(tensor):
         return tensor
     else:
         return torch.from_numpy(tensor)
+
+
+def _centered_finite_difference(values: torch.Tensor, fps: float) -> torch.Tensor:
+    """按动作自身帧率计算中心有限差分，并为端点使用单边差分。
+
+    Args:
+        values: 形状为 ``[帧数, 自由度数]`` 的连续标量轨迹。
+        fps: 严格大于零的动作帧率。
+
+    Returns:
+        与输入同形状的一阶时间导数；少于两帧时返回全零，避免把静态短片段
+        误报成动力学异常。
+    """
+
+    if not math.isfinite(float(fps)) or fps <= 0:
+        raise ValueError(f"动力学门禁要求 fps > 0，实际为 {fps}")
+    if values.ndim != 2:
+        raise ValueError(f"动力学门禁要求二维 DOF 轨迹，实际形状为 {tuple(values.shape)}")
+
+    derivative = torch.zeros_like(values)
+    if values.shape[0] < 2:
+        return derivative
+    derivative[0] = (values[1] - values[0]) * fps
+    derivative[-1] = (values[-1] - values[-2]) * fps
+    if values.shape[0] > 2:
+        derivative[1:-1] = (values[2:] - values[:-2]) * (0.5 * fps)
+    return derivative
+
+
+def evaluate_reference_dynamics(dof, fps: float, dynamics_gate_cfg) -> dict[str, float | bool]:
+    """检查原始参考关节轨迹是否超出配置声明的 BUMI3 动力学门禁。
+
+    该检查只读取数据文件中的原始 ``dof``，不会使用 freeze-frame、上肢拼接或
+    噪声增强后的轨迹。速度比值以逐关节执行器速度上限为分母；加速度比值以
+    ``速度上限 * fps`` 为分母，因此 ``1.0`` 表示一个采样周期内跨越完整速度
+    范围。门禁结果只作为自适应采样隔离的必要条件，不代表动作已通过接触、
+    力矩、仿真或硬件安全验证。
+
+    Args:
+        dof: 形状为 ``[帧数, 自由度数]``、按 ``dof_names`` 排列的关节角。
+        fps: 数据文件声明的动作帧率。
+        dynamics_gate_cfg: 包含关节名、速度上限和三个判定阈值的配置。
+
+    Returns:
+        包含 ``passed``、有限性、超速占比、最大速度比和最大加速度比的字典。
+
+    Raises:
+        ValueError: 配置缺项、名称集合/顺序与轨迹维度不一致或阈值非法。
+    """
+
+    cfg = dynamics_gate_cfg or {}
+    dof_tensor = to_torch(dof).detach().to(dtype=torch.float64, device="cpu")
+    if dof_tensor.ndim != 2:
+        raise ValueError(f"动力学门禁要求二维 DOF 轨迹，实际形状为 {tuple(dof_tensor.shape)}")
+    if dof_tensor.shape[0] == 0:
+        raise ValueError("动力学门禁不接受空 DOF 轨迹")
+    if not math.isfinite(float(fps)) or fps <= 0.0:
+        raise ValueError(f"动力学门禁要求有限且严格大于零的 fps，实际为 {fps}")
+
+    dof_names = list(cfg.get("dof_names", []))
+    velocity_limit_cfg = cfg.get("dof_velocity_limits", {})
+    if not dof_names:
+        raise ValueError("dynamics_gate.dof_names 不能为空")
+    if len(dof_names) != len(set(dof_names)):
+        raise ValueError("dynamics_gate.dof_names 含重复关节名")
+    if dof_tensor.shape[1] != len(dof_names):
+        raise ValueError(
+            "动力学门禁关节数与参考 DOF 维度不一致："
+            f"names={len(dof_names)}, dof={dof_tensor.shape[1]}"
+        )
+    if set(velocity_limit_cfg) != set(dof_names):
+        missing = sorted(set(dof_names) - set(velocity_limit_cfg))
+        extra = sorted(set(velocity_limit_cfg) - set(dof_names))
+        raise ValueError(f"动力学门禁速度上限名称不完整：missing={missing}, extra={extra}")
+
+    velocity_limits = torch.tensor(
+        [float(velocity_limit_cfg[name]) for name in dof_names], dtype=torch.float64
+    )
+    if not torch.isfinite(velocity_limits).all() or (velocity_limits <= 0).any():
+        raise ValueError("dynamics_gate.dof_velocity_limits 必须全部为有限正数")
+
+    max_exceedance_fraction = float(cfg.get("max_velocity_exceedance_fraction", 0.0))
+    max_velocity_ratio_limit = float(cfg.get("max_velocity_ratio", 1.0))
+    max_acceleration_ratio_limit = float(cfg.get("max_acceleration_ratio", 1.0))
+    if not all(
+        math.isfinite(value)
+        for value in (
+            max_exceedance_fraction,
+            max_velocity_ratio_limit,
+            max_acceleration_ratio_limit,
+        )
+    ):
+        raise ValueError("动力学门禁的速度/加速度阈值必须为有限数")
+    if not 0.0 <= max_exceedance_fraction <= 1.0:
+        raise ValueError("max_velocity_exceedance_fraction 必须位于 [0, 1]")
+    if max_velocity_ratio_limit <= 0.0 or max_acceleration_ratio_limit <= 0.0:
+        raise ValueError("速度比和加速度比阈值必须严格大于零")
+
+    finite = bool(torch.isfinite(dof_tensor).all().item())
+    if finite:
+        dof_velocity = _centered_finite_difference(dof_tensor, float(fps))
+        dof_acceleration = _centered_finite_difference(dof_velocity, float(fps))
+        velocity_ratio = dof_velocity.abs() / velocity_limits.unsqueeze(0)
+        acceleration_ratio = dof_acceleration.abs() / (
+            velocity_limits.unsqueeze(0) * float(fps)
+        )
+        velocity_exceedance_fraction = float((velocity_ratio > 1.0).double().mean().item())
+        max_velocity_ratio = float(velocity_ratio.max().item()) if velocity_ratio.numel() else 0.0
+        max_acceleration_ratio = (
+            float(acceleration_ratio.max().item()) if acceleration_ratio.numel() else 0.0
+        )
+    else:
+        velocity_exceedance_fraction = 1.0
+        max_velocity_ratio = float("inf")
+        max_acceleration_ratio = float("inf")
+
+    passed = (
+        finite
+        and velocity_exceedance_fraction <= max_exceedance_fraction
+        and max_velocity_ratio <= max_velocity_ratio_limit
+        and max_acceleration_ratio <= max_acceleration_ratio_limit
+    )
+    return {
+        "passed": passed,
+        "finite": finite,
+        "velocity_exceedance_fraction": velocity_exceedance_fraction,
+        "max_velocity_ratio": max_velocity_ratio,
+        "max_acceleration_ratio": max_acceleration_ratio,
+    }
 
 
 def is_navigation_motion(motion_key):
@@ -365,6 +495,10 @@ class MotionLibBase:
             alignment_cfg=self.paired_frame_alignment_cfg,
         )
         self.adaptive_sampling_cfg = self.m_cfg.get("adaptive_sampling", {})
+        self.dynamics_gate_cfg = self.adaptive_sampling_cfg.get("dynamics_gate", {})
+        self.use_dynamics_gate = False
+        self.quarantine_cfg = self.adaptive_sampling_cfg.get("quarantine", {})
+        self.use_adaptive_quarantine = False
         self.all_motions_loaded = False
 
         self.debug = motion_lib_cfg.get("debug", False)
@@ -1222,6 +1356,7 @@ class MotionLibBase:
         _motion_object_in_contact_right = []
         _motion_hand_action_left = []
         _motion_hand_action_right = []
+        _motion_dynamics_gate_results = []
 
         total_len = 0.0
         self.num_joints = len(self.skeleton_tree.node_names)
@@ -1510,6 +1645,18 @@ class MotionLibBase:
             _motion_dt.append(curr_dt)
             _motion_num_frames.append(num_frames)
             motions.append(curr_motion)
+            _motion_dynamics_gate_results.append(
+                curr_motion.get(
+                    "dynamics_gate_result",
+                    {
+                        "passed": True,
+                        "finite": True,
+                        "velocity_exceedance_fraction": 0.0,
+                        "max_velocity_ratio": 0.0,
+                        "max_acceleration_ratio": 0.0,
+                    },
+                )
+            )
             _motion_lengths.append(curr_len)
             if self.has_action:
                 _motion_actions.append(curr_motion.action)
@@ -1738,6 +1885,7 @@ class MotionLibBase:
         total_len = self.get_total_length()
 
         if self.use_adaptive_sampling:
+            self._record_loaded_motion_dynamics_gate(_motion_dynamics_gate_results)
             self.update_adaptive_sampling_motion_frames()
 
         logger.info(
@@ -1937,6 +2085,23 @@ class MotionLibBase:
             else:
                 start = random.randint(0, seq_len - max_len)
                 end = start + max_len
+
+            dynamics_gate_result = None
+            # 历史工具/单测会用 ``__new__`` 构造最小 MotionLib，不经过完整
+            # ``__init__``。这类实例没有门禁配置时应保持旧行为，即默认关闭。
+            if getattr(self, "use_dynamics_gate", False):
+                if "dof" not in curr_file:
+                    raise ValueError(
+                        f"动作 {self.curr_motion_keys[curr_id]} 缺少 dof，无法执行动力学门禁"
+                    )
+                # 必须在任何 freeze-frame、上肢拼接或噪声增强之前检查整条
+                # 有效原始参考；不能只检查 max_len 随机裁到的片段，否则同一坏动作
+                # 会因抽样起点不同而得到不稳定门禁结果。
+                dynamics_gate_result = evaluate_reference_dynamics(
+                    curr_file["dof"][:seq_len],
+                    float(curr_file["fps"]),
+                    self.dynamics_gate_cfg,
+                )
 
             trans = to_torch(curr_file["root_trans_offset"]).clone()[start:end]
             pose_aa = to_torch(curr_file["pose_aa"][start:end]).clone()
@@ -2305,6 +2470,8 @@ class MotionLibBase:
                         for k, v in curr_motion.items()
                     }
                 )
+                if dynamics_gate_result is not None:
+                    curr_motion.dynamics_gate_result = dynamics_gate_result
                 # add "action" to curr_motion
                 if self.has_action:
                     curr_motion.action = to_torch(curr_file["action"]).clone()[start:end]
@@ -2439,15 +2606,12 @@ class MotionLibBase:
         return dof_pos.reshape(B, -1)
 
     def init_adaptive_sampling(self):
-        """Initialize adaptive sampling data structures over all unique motions.
+        """为完整数据集初始化自适应采样、动力学门禁和隔离状态。
 
-        Divides every motion clip into fixed-size bins (``bin_size`` frames each) and
-        creates per-bin tracking tensors for failure rates and sampling probabilities.
-        This enables fine-grained, time-segment-level curriculum learning: bins with
-        higher failure rates are sampled more frequently during training.
-
-        NOTE: This operates over ALL unique motions in the dataset (not just the
-        currently loaded batch), so bin indices are stable across reloads.
+        每条动作按 ``bin_size`` 划分为稳定的全局时间分箱；失败率和采样概率按
+        分箱维护，动力学门禁失败与 quarantine 状态按整条动作维护。这里覆盖
+        数据集中的全部唯一动作，而不是当前加载批次，因此换批后索引和 checkpoint
+        状态仍可一一对应。
         """
         self.adp_samp_num_frames = torch.zeros(
             self._num_unique_motions, device=self._device, dtype=torch.long
@@ -2578,6 +2742,7 @@ class MotionLibBase:
             self.adp_samp_bin_weights = self.adp_samp_bin_weights / self.adp_samp_num_peer_bins
 
         init_num_failures = self.adaptive_sampling_cfg.get("init_num_failures", 1)
+        self.adp_samp_init_num_failures = float(init_num_failures)
         self.adp_samp_failure_rate_max_over_mean = self.adaptive_sampling_cfg.get(
             "adp_samp_failure_rate_max_over_mean", 50.0
         )
@@ -2587,6 +2752,52 @@ class MotionLibBase:
         # These prevent over-concentration on challenging motions. See update_adaptive_sampling_probabilities().
         self.max_prob_per_bin_cfg = self.adaptive_sampling_cfg.get("max_prob_per_bin", None)
         self.max_prob_per_motion_cfg = self.adaptive_sampling_cfg.get("max_prob_per_motion", None)
+        self.dynamics_gate_cfg = self.adaptive_sampling_cfg.get("dynamics_gate", {})
+        self.use_dynamics_gate = self.dynamics_gate_cfg.get("enable", False)
+        self.quarantine_cfg = self.adaptive_sampling_cfg.get("quarantine", {})
+        self.use_adaptive_quarantine = self.quarantine_cfg.get("enable", False)
+        if self.use_adaptive_quarantine and not self.use_dynamics_gate:
+            raise ValueError("启用 adaptive_sampling.quarantine 时必须同时启用 dynamics_gate")
+
+        high_failure_rate = float(self.quarantine_cfg.get("high_failure_rate", 0.9))
+        min_motion_episodes = float(self.quarantine_cfg.get("min_motion_episodes", 5.0))
+        min_new_motion_episodes = float(
+            self.quarantine_cfg.get("min_new_motion_episodes", 3.0)
+        )
+        consecutive_evaluations = int(self.quarantine_cfg.get("consecutive_evaluations", 3))
+        if not 0.0 <= high_failure_rate <= 1.0:
+            raise ValueError("quarantine.high_failure_rate 必须位于 [0, 1]")
+        if min_motion_episodes < 0.0 or min_new_motion_episodes <= 0.0:
+            raise ValueError("quarantine 的累计回合数必须非负，新增回合数必须严格大于零")
+        if consecutive_evaluations <= 0:
+            raise ValueError("quarantine.consecutive_evaluations 必须是正整数")
+
+        # 动力学门禁失败是静态、单向状态：任一已加载原始片段失败后即保持失败。
+        # quarantine 仍要求足够训练回合和连续高失败，避免只凭离线尖峰删除动作。
+        self.adp_samp_dynamics_gate_failed = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.bool
+        )
+        self.adp_samp_motion_quarantined = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.bool
+        )
+        self.adp_samp_quarantine_consecutive = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.long
+        )
+        self.adp_samp_quarantine_eval_episodes = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
+        # 原有分箱统计是“帧曝光量 / 分箱长度”，用于困难时刻采样；它不是
+        # 动作级的 episode 计数，长动作会因分箱数量而被稀释。quarantine 因此单独
+        # 统计“自然跑完或提前失败”的动作结果，确保失败率始终位于 [0, 1]。
+        self.adp_samp_motion_num_evaluations = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_motion_num_failures = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_motion_failure_rate = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
         self.adp_samp_num_failures = (
             torch.ones(self.adp_samp_num_bins, device=self._device, dtype=torch.float32)
             * init_num_failures
@@ -2607,11 +2818,11 @@ class MotionLibBase:
         )
 
     def get_state_dict(self):
-        """Return a serializable state dict for checkpointing adaptive sampling stats.
+        """返回可随 checkpoint 保存的自适应采样完整状态。
 
         Returns:
-            Dict containing ``adp_samp_num_episodes`` and ``adp_samp_num_failures``
-            tensors if adaptive sampling is enabled, otherwise an empty dict.
+            启用自适应采样时包含分箱统计、动力学失败、连续高失败计数和隔离掩码；
+            未启用时返回空字典。
         """
         state_dict = {}
         if self.use_adaptive_sampling:
@@ -2619,42 +2830,73 @@ class MotionLibBase:
                 {
                     "adp_samp_num_episodes": self.adp_samp_num_episodes,
                     "adp_samp_num_failures": self.adp_samp_num_failures,
+                    "adp_samp_dynamics_gate_failed": self.adp_samp_dynamics_gate_failed,
+                    "adp_samp_motion_quarantined": self.adp_samp_motion_quarantined,
+                    "adp_samp_quarantine_consecutive": self.adp_samp_quarantine_consecutive,
+                    "adp_samp_quarantine_eval_episodes": (
+                        self.adp_samp_quarantine_eval_episodes
+                    ),
+                    "adp_samp_motion_num_evaluations": (
+                        self.adp_samp_motion_num_evaluations
+                    ),
+                    "adp_samp_motion_num_failures": self.adp_samp_motion_num_failures,
                 }
             )
         return state_dict
 
     def load_state_dict(self, state_dict):
-        """Restore adaptive sampling statistics from a checkpoint.
+        """从 checkpoint 恢复与当前数据集形状一致的自适应采样状态。
 
-        Validates that the bin count matches before restoring. If it does not match
-        (e.g. dataset changed between runs), the load is silently skipped.
+        旧 checkpoint 只含分箱成功/失败统计时仍可恢复，新增的动力学和 quarantine
+        张量保持初始化值；数据集分箱数量变化时沿用历史行为并跳过恢复，避免把统计
+        套到错误动作上。
 
         Args:
-            state_dict: Dict previously returned by ``get_state_dict()``.
+            state_dict: ``get_state_dict()`` 生成的字典。
         """
         if self.use_adaptive_sampling and "adp_samp_num_episodes" in state_dict:
             if len(self.adp_samp_num_failures) != len(state_dict["adp_samp_num_failures"]):
-                print("Adaptive sampling state dict does not match. Skipping load.")  # noqa: T201
+                print("自适应采样分箱状态与当前数据集不匹配，已跳过恢复。")  # noqa: T201
                 return
 
             self.adp_samp_num_episodes[:] = state_dict["adp_samp_num_episodes"].to(self._device)
             self.adp_samp_num_failures[:] = state_dict["adp_samp_num_failures"].to(self._device)
+            motion_state_names = (
+                "adp_samp_dynamics_gate_failed",
+                "adp_samp_motion_quarantined",
+                "adp_samp_quarantine_consecutive",
+                "adp_samp_quarantine_eval_episodes",
+                "adp_samp_motion_num_evaluations",
+                "adp_samp_motion_num_failures",
+            )
+            for state_name in motion_state_names:
+                if state_name not in state_dict:
+                    continue
+                target = getattr(self, state_name)
+                source = state_dict[state_name]
+                if len(target) != len(source):
+                    print(  # noqa: T201
+                        f"自适应采样动作状态 {state_name} 与当前数据集不匹配，已跳过该项恢复。"
+                    )
+                    continue
+                target[:] = source.to(device=self._device, dtype=target.dtype)
             self.sync_and_compute_adaptive_sampling(sync_across_gpus=False)
         return
 
     def update_adaptive_sampling(self, failure, motion_ids, motion_time_steps):
-        """Update adaptive sampling statistics based on training outcomes.
+        """依据当前仿真步更新分箱曝光/失败统计和动作级结果。
 
-        Increments episode counts for all sampled bins, and failure counts for bins
-        where the policy terminated early. Uses bincount for efficient batched updates
-        when multiple environments hit the same bin.
+        所有环境的当前帧都增加对应分箱的长度归一化曝光量，提前终止还会
+        增加分箱失败权重；这两项继续服务于困难时刻采样。quarantine 使用另一组
+        动作级计数：提前失败或自然跑到末帧才形成一次评估，避免失败率受
+        分箱数量和动作长度影响。重复 ID 通过 ``bincount`` 批量累加。
 
         Args:
-            failure: Boolean tensor of shape ``(N,)`` indicating which environments
-                terminated due to failure (not timeout).
-            motion_ids: Tensor of shape ``(N,)`` with batch-local motion indices.
-            motion_time_steps: Tensor of shape ``(N,)`` with the simulation time step
-                at which the episode ended (or was sampled).
+            failure: 形状 ``(N,)`` 的布尔张量，表示哪些环境因失败（非 timeout）
+                被提前终止。
+            motion_ids: 形状 ``(N,)`` 的当前加载批内动作索引。
+            motion_time_steps: 形状 ``(N,)`` 的当前参考帧索引，用于定位全局
+                分箱并判断是否自然到达末帧。
         """
         # Convert motion_ids to dataset motion ids if needed
         dataset_motion_ids = self.get_motion_ids_in_dataset(motion_ids)
@@ -2681,18 +2923,114 @@ class MotionLibBase:
                 )
                 self.adp_samp_num_failures += failure_counts * failure_counts_multiplier
 
-    def sync_and_compute_adaptive_sampling(self, accelerator=None, sync_across_gpus=False):
-        """Synchronize adaptive sampling stats across GPUs and recompute probabilities.
+        # quarantine 的分母必须是真实动作结果次数，不能复用上方为分箱
+        # 采样设计的帧曝光量。自然到达动作末帧视为通过；在任意时刻被环境
+        # 提前终止视为失败。两者合并为一次动作级评估。
+        motion_num_frames = self.adp_samp_num_frames[dataset_motion_ids]
+        completed = motion_time_steps + 1 >= motion_num_frames
+        evaluated = failure | completed
+        if evaluated.any():
+            evaluation_counts = torch.bincount(
+                dataset_motion_ids[evaluated], minlength=self._num_unique_motions
+            )
+            self.adp_samp_motion_num_evaluations += evaluation_counts
+            failure_counts = torch.bincount(
+                dataset_motion_ids[failure], minlength=self._num_unique_motions
+            )
+            self.adp_samp_motion_num_failures += failure_counts
 
-        In multi-GPU training, averages episode/failure counts across all processes
-        before recomputing the per-bin sampling distribution. Optionally applies
-        failure-rate decay to propagate difficulty information to preceding bins.
+    def _record_loaded_motion_dynamics_gate(self, gate_results) -> None:
+        """把当前加载批次的原始参考动力学结果合并到全数据集状态。
+
+        同一动作可能因有放回采样在一个批次出现多次，也可能在未来批次再次加载。
+        这里使用单向 OR 合并：只要任一原始片段门禁失败，该动作就保持失败；通过
+        结果不会覆盖既有失败。该状态本身不改变采样，只有同时满足连续高失败条件
+        后才会进入 quarantine。
 
         Args:
-            accelerator: HuggingFace Accelerator instance for multi-GPU gather.
-                Required when ``sync_across_gpus=True``.
-            sync_across_gpus: Whether to synchronize statistics across distributed
-                processes before computing probabilities.
+            gate_results: 与 ``self._curr_motion_ids`` 一一对应的门禁结果字典序列。
+        """
+
+        if not self.use_dynamics_gate:
+            return
+        if len(gate_results) != len(self._curr_motion_ids):
+            raise ValueError(
+                "动力学门禁结果数量与当前动作批次不一致："
+                f"results={len(gate_results)}, motions={len(self._curr_motion_ids)}"
+            )
+
+        failed_local = torch.tensor(
+            [not bool(result["passed"]) for result in gate_results],
+            device=self._device,
+            dtype=torch.bool,
+        )
+        if failed_local.any():
+            failed_dataset_ids = self._curr_motion_ids[failed_local]
+            self.adp_samp_dynamics_gate_failed[failed_dataset_ids] = True
+
+    def _motion_level_adaptive_statistics(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回独立的逐动作评估数和失败率。"""
+
+        motion_evaluations = self.adp_samp_motion_num_evaluations
+        motion_failures = self.adp_samp_motion_num_failures
+        if (motion_failures > motion_evaluations).any():
+            raise RuntimeError("quarantine 动作失败数不得大于评估数")
+        motion_failure_rate = motion_failures / motion_evaluations.clamp_min(1.0)
+        return motion_evaluations, motion_failure_rate
+
+    def _update_adaptive_sampling_quarantine(self) -> None:
+        """依据新增训练证据更新动作 quarantine，且不自动解除既有隔离。
+
+        一条动作必须同时满足：原始参考动力学门禁失败、累计回合数足够、从上次
+        有效评估后又积累了足够新回合、动作级失败率持续高于阈值。只有连续满足
+        配置次数后才隔离；任一次有效评估不再高失败会把连续计数清零。调用方只在
+        全 GPU 统计同步点执行本方法，保证各 rank 得到相同隔离集合。
+        """
+
+        if not self.use_adaptive_quarantine:
+            return
+
+        motion_episodes, motion_failure_rate = self._motion_level_adaptive_statistics()
+        self.adp_samp_motion_failure_rate[:] = motion_failure_rate
+        high_failure_rate = float(self.quarantine_cfg.get("high_failure_rate", 0.9))
+        min_motion_episodes = float(self.quarantine_cfg.get("min_motion_episodes", 5.0))
+        min_new_motion_episodes = float(
+            self.quarantine_cfg.get("min_new_motion_episodes", 3.0)
+        )
+        consecutive_evaluations = int(self.quarantine_cfg.get("consecutive_evaluations", 3))
+
+        new_evidence = (
+            motion_episodes - self.adp_samp_quarantine_eval_episodes
+        ) >= min_new_motion_episodes
+        eligible = (
+            new_evidence
+            & (motion_episodes >= min_motion_episodes)
+            & self.adp_samp_dynamics_gate_failed
+            & ~self.adp_samp_motion_quarantined
+        )
+        high_failure = motion_failure_rate >= high_failure_rate
+        reset_mask = eligible & ~high_failure
+        increment_mask = eligible & high_failure
+        self.adp_samp_quarantine_consecutive[reset_mask] = 0
+        self.adp_samp_quarantine_consecutive[increment_mask] += 1
+        self.adp_samp_quarantine_eval_episodes[eligible] = motion_episodes[eligible]
+
+        newly_quarantined = (
+            self.adp_samp_quarantine_consecutive >= consecutive_evaluations
+        ) & self.adp_samp_dynamics_gate_failed
+        self.adp_samp_motion_quarantined |= newly_quarantined
+
+    def sync_and_compute_adaptive_sampling(self, accelerator=None, sync_across_gpus=False):
+        """同步自适应统计、更新 quarantine，并重新计算分箱采样概率。
+
+        全 GPU 同步时对分箱统计和动作结果计数取 rank 均值，对静态动力学
+        失败取逻辑 OR；
+        quarantine 只在这个全局同步点根据新增训练证据更新，避免各 rank 因本地
+        动作分布不同而产生互相矛盾的隔离集合。普通本地调用只刷新采样概率。
+
+        Args:
+            accelerator: 提供 ``gather`` 的 HuggingFace Accelerator；全局同步时必需。
+            sync_across_gpus: 是否在计算概率前执行跨进程同步与 quarantine 评估。
         """
         if not self.use_adaptive_sampling:
             return
@@ -2709,6 +3047,28 @@ class MotionLibBase:
                 self.adp_samp_num_episodes, self.adp_samp_num_failures = adp_samp_stats_all.chunk(
                     2, dim=-1
                 )
+                gate_failed_all = accelerator.gather(
+                    self.adp_samp_dynamics_gate_failed.float()
+                ).reshape(-1, *self.adp_samp_dynamics_gate_failed.shape)
+                self.adp_samp_dynamics_gate_failed[:] = gate_failed_all.amax(dim=0).bool()
+                motion_outcomes = torch.cat(
+                    [
+                        self.adp_samp_motion_num_evaluations,
+                        self.adp_samp_motion_num_failures,
+                    ],
+                    dim=-1,
+                )
+                motion_outcomes_all = accelerator.gather(motion_outcomes).reshape(
+                    -1, *motion_outcomes.shape
+                )
+                motion_outcomes_mean = motion_outcomes_all.mean(dim=0)
+                motion_evaluations_mean, motion_failures_mean = motion_outcomes_mean.chunk(
+                    2, dim=-1
+                )
+                self.adp_samp_motion_num_evaluations[:] = motion_evaluations_mean
+                self.adp_samp_motion_num_failures[:] = motion_failures_mean
+
+            self._update_adaptive_sampling_quarantine()
 
         with common.Timer("compute_sampling_prob"):
             failure_rate = self.adp_samp_num_failures / self.adp_samp_num_episodes
@@ -2739,26 +3099,32 @@ class MotionLibBase:
         return
 
     def update_adaptive_sampling_probabilities(self):
-        """Recompute per-bin sampling probabilities for the currently loaded motion batch.
+        """重算当前加载批次的逐分箱采样概率。
 
-        Blends failure-rate-based probabilities with a uniform baseline (controlled by
-        ``uniform_sampling_rate``), then applies optional max-probability constraints
-        per bin and per motion to prevent over-concentration on outlier sequences.
-        See the inline comments for detailed rationale on the constraint design.
+        先把失败率分布与 uniform 下限混合，再执行既有的逐分箱/逐动作概率上限。
+        已 quarantine 的动作只保留 uniform 分量，不再从高失败率获得额外权重；
+        因此它们不会永久消失，仍可用低频样本观察数据修复后的表现。
         """
         self.adp_samp_failure_rate = self.adp_samp_failure_rate.double()
         self.adp_samp_active_failure_rate = self.adp_samp_failure_rate[
             self.adp_samp_active_motion_bins
         ]
+        active_orig_motion_ids = self.adp_samp_bins[self.adp_samp_active_motion_bins, 0]
         adp_samp_failure_rate_upper_bound = (
             self.adp_samp_active_failure_rate.mean() * self.adp_samp_failure_rate_max_over_mean
         )
         adp_samp_active_failure_rate_clipped = torch.clip(
             self.adp_samp_active_failure_rate, 0.0, adp_samp_failure_rate_upper_bound
         )
-        failure_based_sampling_prob = (
-            adp_samp_active_failure_rate_clipped / adp_samp_active_failure_rate_clipped.sum()
-        )
+        quarantine_mask = self.adp_samp_motion_quarantined[active_orig_motion_ids]
+        adp_samp_active_failure_rate_clipped[quarantine_mask] = 0.0
+        clipped_sum = adp_samp_active_failure_rate_clipped.sum()
+        if clipped_sum > 0.0:
+            failure_based_sampling_prob = adp_samp_active_failure_rate_clipped / clipped_sum
+        else:
+            failure_based_sampling_prob = torch.zeros_like(
+                adp_samp_active_failure_rate_clipped
+            )
         uniform_sampling_prob = torch.ones_like(failure_based_sampling_prob) / len(
             failure_based_sampling_prob
         )
@@ -2767,9 +3133,11 @@ class MotionLibBase:
             + uniform_sampling_prob * self.uniform_sampling_rate
         )
         self.adp_sampling_active_prob *= self.adp_samp_bin_weights[self.adp_samp_active_motion_bins]
-        self.adp_sampling_active_prob = (
-            self.adp_sampling_active_prob / self.adp_sampling_active_prob.sum()
-        )
+        active_prob_sum = self.adp_sampling_active_prob.sum()
+        if active_prob_sum > 0.0:
+            self.adp_sampling_active_prob = self.adp_sampling_active_prob / active_prob_sum
+        else:
+            self.adp_sampling_active_prob = uniform_sampling_prob
 
         # ==========================================================================
         # MAX PROBABILITY CONSTRAINTS: Prevent over-concentration on challenging motions
@@ -2818,7 +3186,6 @@ class MotionLibBase:
             return
 
         num_active_bins = len(self.adp_samp_active_motion_bins)
-        active_orig_motion_ids = self.adp_samp_bins[self.adp_samp_active_motion_bins, 0]
         num_active_motions = len(active_orig_motion_ids.unique())
 
         # 1. Max probability per bin: no single bin can exceed this fraction of total samples
@@ -2877,11 +3244,11 @@ class MotionLibBase:
         assert (self.adp_sampling_active_prob >= 0).all()
 
     def update_adaptive_sampling_motion_sequences(self):
-        """Recompute global (full-dataset) motion-level sampling probabilities.
+        """重算完整数据集的动作级加载概率。
 
-        Called before ``load_motions()`` to determine which motions to load next.
-        Aggregates per-bin failure rates into per-motion probabilities and applies
-        the same max-probability constraints as the batch-level update.
+        在 ``load_motions()`` 选择下一批动作前，先从全局分箱失败率构造概率，
+        再将 quarantine 动作限制为 uniform 分量，最后执行与批内采样相同的概率
+        上限。这样坏动作既不能主导下一次加载，也不会被永久删除。
         """
         self.adp_samp_failure_rate = self.adp_samp_failure_rate.double()
         adp_samp_failure_rate_upper_bound = (
@@ -2890,9 +3257,14 @@ class MotionLibBase:
         adp_samp_failure_rate_clipped = torch.clip(
             self.adp_samp_failure_rate, 0.0, adp_samp_failure_rate_upper_bound
         )
-        failure_based_sampling_prob = (
-            adp_samp_failure_rate_clipped / adp_samp_failure_rate_clipped.sum()
-        )
+        global_bin_motion_ids = self.adp_samp_bins[:, 0]
+        quarantine_mask = self.adp_samp_motion_quarantined[global_bin_motion_ids]
+        adp_samp_failure_rate_clipped[quarantine_mask] = 0.0
+        clipped_sum = adp_samp_failure_rate_clipped.sum()
+        if clipped_sum > 0.0:
+            failure_based_sampling_prob = adp_samp_failure_rate_clipped / clipped_sum
+        else:
+            failure_based_sampling_prob = torch.zeros_like(adp_samp_failure_rate_clipped)
         uniform_sampling_prob = torch.ones_like(failure_based_sampling_prob) / len(
             failure_based_sampling_prob
         )
@@ -2901,7 +3273,11 @@ class MotionLibBase:
             + uniform_sampling_prob * self.uniform_sampling_rate
         )
         self.adp_sampling_prob *= self.adp_samp_bin_weights
-        self.adp_sampling_prob = self.adp_sampling_prob / self.adp_sampling_prob.sum()
+        sampling_prob_sum = self.adp_sampling_prob.sum()
+        if sampling_prob_sum > 0.0:
+            self.adp_sampling_prob = self.adp_sampling_prob / sampling_prob_sum
+        else:
+            self.adp_sampling_prob = uniform_sampling_prob
 
         # ==========================================================================
         # MAX PROBABILITY CONSTRAINTS (applied to global bin probabilities)

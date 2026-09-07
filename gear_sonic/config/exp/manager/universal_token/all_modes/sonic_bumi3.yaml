@@ -1,10 +1,11 @@
 # @package _global_
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# BUMI3 原生 SONIC 训练入口。该配置继承发布版 SONIC 的仿真、奖励、事件、
-# termination、PPO、critic 与 trainer，只替换机器人和名称契约，并选择不含
-# Teleop 的 Robot+SMPL 双编码器配置。BUMI3 的跟踪锚点统一为浮动根
-# ``base_link``，跟踪 body 不包含左右 leg-yaw 连杆，anti-shake 只约束双肘。
+# BUMI3 原生 SONIC 训练入口。该配置继承发布版 SONIC 的仿真、trainer 和网络
+# 主体，并显式覆盖 BUMI3 的机器人名称、跟踪强点、低姿态 termination、坏动作
+# quarantine 与 Actor/Critic 学习率。编码器使用不含 Teleop 的 Robot+SMPL
+# 双路配置。BUMI3 的跟踪锚点统一为浮动根 ``base_link``，跟踪 body 不包含
+# 左右 leg-yaw 连杆，局部强点仅保留腰部与双肘，anti-shake 也只约束双肘。
 # ``waist_yaw_link`` 同时承担 COM 随机化和 0.8～1.5 倍质量随机化；KP/KD、踝关节
 # armature 随机化以及执行器 0～4 个 physics step 的随机延迟仍保持关闭。训练
 # motion/SMPL 路径必须由 CLI 显式提供，避免把 G1 数据误用于 21 DoF BUMI3。
@@ -81,6 +82,13 @@ manager_env:
     randomize_actuator_gains: null
 
   terminations:
+    anchor_pos:
+      params:
+        # BUMI3 的正常参考根高约为 0.46 m；0.40 m 只把真实蹲伏/坐下动作送入
+        # 低姿态分支，避免沿用 G1 的 0.50 m 后把绝大多数站立帧误判为低姿态。
+        threshold: 0.12
+        down_threshold: 0.25
+        root_height_threshold: 0.40
     foot_pos_xyz:
       params:
         # threshold 不在 BUMI3 重复覆盖，直接继承 G1 基线 0.20 m。
@@ -89,7 +97,11 @@ manager_env:
           - "r_ankle_roll_link"
     ee_body_pos:
       params:
-        # threshold 直接继承 G1 基线 0.15 m，只替换 BUMI3 双肘名称。
+        # anchor 与末端高度必须使用同一套姿态分类边界，否则同一帧会被两套
+        # termination 规则作出矛盾判断。双肘仍是 BUMI3 的末端高度检查对象。
+        threshold: 0.12
+        down_threshold: 0.25
+        root_height_threshold: 0.40
         body_names:
           - "l_elbow_pitch_link"
           - "r_elbow_pitch_link"
@@ -122,13 +134,9 @@ manager_env:
           "waist_yaw_link",
           "l_elbow_pitch_link",
           "r_elbow_pitch_link",
-          "l_ankle_roll_link",
-          "r_ankle_roll_link",
         ]
       reward_point_body_offset:
         [
-          [0.0, 0.0, 0.0],
-          [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
           [0.0, 0.0, 0.0],
@@ -165,7 +173,72 @@ manager_env:
             "balance",
           ]
         adaptive_sampling:
+          # BUMI3 显式开启，避免未来父配置关闭后只保留一组不生效的门禁参数。
+          enable: true
           adp_samp_failure_rate_max_over_mean: 200
+          # 动力学门禁只检查原始参考关节轨迹，不使用加噪或拼接后的训练增强。
+          # 速度上限来自 BUMI3 当前 Isaac Lab 执行器配置，并按 MuJoCo 数据关节名
+          # 显式绑定；集成校验会锁定这份配置顺序，数据顺序则由三源数据集
+          # 的 BUMI3 MuJoCo 契约保证，不根据 21 维形状猜测关节语义。
+          dynamics_gate:
+            enable: true
+            dof_names:
+              [
+                "waist_yaw_joint",
+                "l_arm_pitch_joint",
+                "l_arm_roll_joint",
+                "l_arm_yaw_joint",
+                "l_elbow_pitch_joint",
+                "r_arm_pitch_joint",
+                "r_arm_roll_joint",
+                "r_arm_yaw_joint",
+                "r_elbow_pitch_joint",
+                "l_leg_pitch_joint",
+                "l_leg_roll_joint",
+                "l_leg_yaw_joint",
+                "l_knee_pitch_joint",
+                "l_ankle_pitch_joint",
+                "l_ankle_roll_joint",
+                "r_leg_pitch_joint",
+                "r_leg_roll_joint",
+                "r_leg_yaw_joint",
+                "r_knee_pitch_joint",
+                "r_ankle_pitch_joint",
+                "r_ankle_roll_joint",
+              ]
+            dof_velocity_limits:
+              waist_yaw_joint: 9.0
+              l_arm_pitch_joint: 12.0
+              l_arm_roll_joint: 12.0
+              l_arm_yaw_joint: 12.0
+              l_elbow_pitch_joint: 12.0
+              r_arm_pitch_joint: 12.0
+              r_arm_roll_joint: 12.0
+              r_arm_yaw_joint: 12.0
+              r_elbow_pitch_joint: 12.0
+              l_leg_pitch_joint: 12.0
+              l_leg_roll_joint: 12.0
+              l_leg_yaw_joint: 12.0
+              l_knee_pitch_joint: 12.0
+              l_ankle_pitch_joint: 12.0
+              l_ankle_roll_joint: 12.0
+              r_leg_pitch_joint: 12.0
+              r_leg_roll_joint: 12.0
+              r_leg_yaw_joint: 12.0
+              r_knee_pitch_joint: 12.0
+              r_ankle_pitch_joint: 12.0
+              r_ankle_roll_joint: 12.0
+            # 允许极少数有限差分尖峰；持续超速、两倍以上超速或单帧内跨越
+            # 一整档速度范围的加速度尖峰都会把该动作标记为动力学门禁失败。
+            max_velocity_exceedance_fraction: 0.005
+            max_velocity_ratio: 2.0
+            max_acceleration_ratio: 1.0
+          quarantine:
+            enable: true
+            high_failure_rate: 0.90
+            min_motion_episodes: 5.0
+            min_new_motion_episodes: 3.0
+            consecutive_evaluations: 3
         motion_file: null
         smpl_motion_file: null
         # 三源训练索引已经逐条审计 Robot/SMPL 配对，不再沿用旧 hq_all_v2 的
@@ -186,6 +259,10 @@ manager_env:
 
 algo:
   config:
+    # Actor 维持保守更新，Critic 使用独立且更快的学习率；trainer 会把二者放入
+    # 具名 optimizer 参数组，KL 控制器只允许改 Actor 参数组。
+    actor_learning_rate: 2e-5
+    critic_learning_rate: 3e-4
     empty_cache_every_n_ppo_epoch: -1
     num_steps_per_env: 24
     use_clampped_std: true

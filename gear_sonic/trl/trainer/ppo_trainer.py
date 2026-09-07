@@ -36,6 +36,10 @@ sys.modules["trl.trainer.utils"].exact_div = ppo_trainer.exact_div
 
 # Constants and utilities that may not be exported from trl
 INVALID_LOGPROB = 1.0  # Invalid log probability marker
+OPTIMIZER_ROLE_KEY = "optimizer_role"
+OPTIMIZER_GROUP_NAME_KEY = "optimizer_group_name"
+OPTIMIZER_SCHEMA_KEY = "sonic_optimizer_schema"
+OPTIMIZER_SCHEMA_VERSION = 2
 
 
 def masked_mean(values, mask, axis=None):
@@ -43,6 +47,130 @@ def masked_mean(values, mask, axis=None):
     if axis is not None:
         return (values * mask).sum(axis=axis) / mask.sum(axis=axis).clamp(min=1)
     return (values * mask).sum() / mask.sum().clamp(min=1)
+
+
+def _strip_parallel_module_prefix(parameter_name: str) -> str:
+    """去掉 DDP/FSDP 可能添加的一层 ``module.`` 前缀。"""
+
+    return parameter_name[7:] if parameter_name.startswith("module.") else parameter_name
+
+
+def _optimizer_role_from_parameter_name(parameter_name: str) -> str:
+    """按 PolicyAndValueWrapper 的模块前缀判定参数所属优化角色。"""
+
+    normalized_name = _strip_parallel_module_prefix(parameter_name)
+    if normalized_name.startswith("policy."):
+        return "actor"
+    if normalized_name.startswith("value_model."):
+        return "critic"
+    # 判别器等附加可训练模块既不属于 Actor 的 KL 更新，也不属于 Critic；它们沿用
+    # Actor 初始学习率，但保持固定，防止策略 KL 控制器误改其步长。
+    return "auxiliary"
+
+
+def build_role_aware_optimizer_groups(
+    model: nn.Module,
+    decay_parameter_names,
+    actor_learning_rate: float,
+    critic_learning_rate: float,
+    weight_decay: float,
+) -> list[dict]:
+    """构造具名 Actor/Critic 参数组，同时保留 weight-decay/no-decay 区分。
+
+    每个可训练参数严格进入一个参数组。Actor 与 Critic 分别使用配置学习率；
+    其他附加模块进入固定学习率的 ``auxiliary`` 组。参数组携带角色、名称和 schema
+    版本，因而 KL 控制、日志和 checkpoint 恢复不再依赖易变的组序号。
+
+    Args:
+        model: 尚未被分布式包装的 ``PolicyAndValueWrapper``。
+        decay_parameter_names: HuggingFace 判定应使用 weight decay 的参数名集合。
+        actor_learning_rate: Actor 与附加模块的初始学习率。
+        critic_learning_rate: Critic 的独立学习率。
+        weight_decay: decay 参数组的权重衰减系数。
+
+    Returns:
+        可直接传给 PyTorch optimizer 的参数组列表。
+    """
+
+    if actor_learning_rate <= 0.0 or critic_learning_rate <= 0.0:
+        raise ValueError("Actor/Critic 学习率必须严格大于零")
+
+    decay_names = {
+        _strip_parallel_module_prefix(name) for name in set(decay_parameter_names)
+    }
+    grouped_parameters: dict[tuple[str, bool], list[nn.Parameter]] = {}
+    for parameter_name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        normalized_name = _strip_parallel_module_prefix(parameter_name)
+        role = _optimizer_role_from_parameter_name(normalized_name)
+        uses_decay = normalized_name in decay_names
+        grouped_parameters.setdefault((role, uses_decay), []).append(parameter)
+
+    groups = []
+    role_order = ("actor", "critic", "auxiliary")
+    for role in role_order:
+        role_learning_rate = (
+            critic_learning_rate if role == "critic" else actor_learning_rate
+        )
+        for uses_decay in (True, False):
+            parameters = grouped_parameters.get((role, uses_decay), [])
+            if not parameters:
+                continue
+            decay_name = "decay" if uses_decay else "no_decay"
+            groups.append(
+                {
+                    "params": parameters,
+                    "lr": float(role_learning_rate),
+                    "weight_decay": float(weight_decay) if uses_decay else 0.0,
+                    OPTIMIZER_ROLE_KEY: role,
+                    OPTIMIZER_GROUP_NAME_KEY: f"{role}_{decay_name}",
+                    OPTIMIZER_SCHEMA_KEY: OPTIMIZER_SCHEMA_VERSION,
+                }
+            )
+
+    grouped_parameter_ids = [id(parameter) for group in groups for parameter in group["params"]]
+    expected_parameter_ids = [
+        id(parameter) for parameter in model.parameters() if parameter.requires_grad
+    ]
+    if len(grouped_parameter_ids) != len(set(grouped_parameter_ids)):
+        raise RuntimeError("optimizer 参数分组出现重复参数")
+    if set(grouped_parameter_ids) != set(expected_parameter_ids):
+        raise RuntimeError("optimizer 参数分组未完整覆盖全部可训练参数")
+    return groups
+
+
+def get_optimizer_learning_rates_by_role(optimizer) -> dict[str, float]:
+    """从 optimizer 实际参数组读取每个角色当前唯一学习率。
+
+    同一角色的 decay/no-decay 组必须保持相同 LR；若出现分叉立即报错，避免日志
+    只展示其中一个值并掩盖恢复或 scheduler 冲突。
+    """
+
+    learning_rates: dict[str, list[float]] = {}
+    for group in optimizer.param_groups:
+        role = group.get(OPTIMIZER_ROLE_KEY, "unclassified")
+        learning_rates.setdefault(role, []).append(float(group["lr"]))
+
+    result = {}
+    for role, role_rates in learning_rates.items():
+        first_rate = role_rates[0]
+        if any(not math.isclose(rate, first_rate, rel_tol=1.0e-12, abs_tol=0.0) for rate in role_rates):
+            raise RuntimeError(f"optimizer 的 {role} 参数组学习率不一致：{role_rates}")
+        result[role] = first_rate
+    return result
+
+
+def set_optimizer_role_learning_rate(optimizer, role: str, learning_rate: float) -> None:
+    """只修改指定角色参数组的学习率，并确认至少命中一个参数组。"""
+
+    matched = 0
+    for group in optimizer.param_groups:
+        if group.get(OPTIMIZER_ROLE_KEY) == role:
+            group["lr"] = float(learning_rate)
+            matched += 1
+    if matched == 0:
+        raise RuntimeError(f"optimizer 中不存在角色为 {role!r} 的参数组")
 
 
 from collections import deque  # noqa: E402
@@ -428,6 +556,114 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         if checkpoint is not None:
             self.load_checkpoint(checkpoint, resume=resume)
 
+    def _uses_adaptive_kl_schedule(self) -> bool:
+        """返回当前配置是否由整轮 KL 统计直接控制 Actor 学习率。"""
+
+        return str(self.config.get("schedule", "")).lower() == "adaptive"
+
+    def _annotate_external_optimizer_groups(self) -> None:
+        """为调用方传入的 optimizer 补充角色元数据，混合角色参数组直接拒绝。
+
+        自定义 optimizer 若把 Actor 与 Critic 放在同一组，就无法做到“KL 只改
+        Actor”。与其继续静默共用学习率，这里给出明确错误，要求调用方按角色拆组。
+        """
+
+        parameter_roles = {
+            id(parameter): _optimizer_role_from_parameter_name(parameter_name)
+            for parameter_name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        }
+        for index, group in enumerate(self.optimizer.param_groups):
+            roles = {
+                parameter_roles[id(parameter)]
+                for parameter in group["params"]
+                if id(parameter) in parameter_roles
+            }
+            if len(roles) != 1:
+                raise ValueError(
+                    "外部 optimizer 参数组必须只包含一种角色，"
+                    f"group={index}, roles={sorted(roles)}"
+                )
+            role = roles.pop()
+            group.setdefault(OPTIMIZER_ROLE_KEY, role)
+            group.setdefault(OPTIMIZER_GROUP_NAME_KEY, f"{role}_external_{index}")
+            group.setdefault(OPTIMIZER_SCHEMA_KEY, OPTIMIZER_SCHEMA_VERSION)
+
+    def create_optimizer(self):
+        """创建具名 Actor/Critic optimizer 参数组并应用独立学习率。
+
+        HuggingFace 默认仅按 weight decay 拆组，会让 Policy 和 Value 共享
+        ``args.learning_rate``。本实现先按 Actor/Critic/附加模块分角色，再在每个
+        角色内部保留 decay/no-decay 两组；因此一个 optimizer 仍可配合 DDP 完成
+        单次 backward，同时 Critic 真正使用 ``critic_learning_rate``。
+        """
+
+        if self.optimizer is not None:
+            self._annotate_external_optimizer_groups()
+            return self.optimizer
+
+        actor_learning_rate = float(
+            self.config.get("actor_learning_rate", self.args.learning_rate)
+        )
+        critic_learning_rate = float(
+            self.config.get("critic_learning_rate", actor_learning_rate)
+        )
+        self.args.learning_rate = actor_learning_rate
+        decay_parameter_names = self.get_decay_parameter_names(self.model)
+        optimizer_grouped_parameters = build_role_aware_optimizer_groups(
+            model=self.model,
+            decay_parameter_names=decay_parameter_names,
+            actor_learning_rate=actor_learning_rate,
+            critic_learning_rate=critic_learning_rate,
+            weight_decay=float(self.args.weight_decay),
+        )
+
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(
+            self.args, self.model
+        )
+        unsupported_overrides = {
+            key for key in ("params", "model", "optimizer_dict") if key in optimizer_kwargs
+        }
+        if unsupported_overrides:
+            raise ValueError(
+                "当前 SONIC 角色参数组不支持会替换参数集合的 optimizer 选项："
+                f"{sorted(unsupported_overrides)}"
+            )
+        self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+        return self.optimizer
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """自适应 KL 模式禁用 HF scheduler，其他模式保留 HuggingFace 行为。
+
+        adaptive 模式由每个 PPO iteration 末尾唯一一次 KL 决策直接设置下一轮
+        Actor LR；此时返回 ``None``，彻底避免 constant scheduler 在同一轮末尾
+        把 LR 恢复到初始 base LR。非 adaptive 配置仍调用父类 scheduler。
+        """
+
+        if self._uses_adaptive_kl_schedule():
+            self.lr_scheduler = None
+            self._created_lr_scheduler = False
+            return None
+        return super().create_scheduler(num_training_steps, optimizer=optimizer)
+
+    def _validate_optimizer_learning_rate_contract(self, context: str) -> dict[str, float]:
+        """核对实际参数组角色和 LR，并把兼容字段同步为真实 Actor LR。
+
+        Args:
+            context: 用于错误信息区分初始化或 checkpoint 恢复阶段的中文上下文。
+
+        Returns:
+            从 optimizer 参数组直接读取的角色到学习率映射。
+        """
+
+        learning_rates = get_optimizer_learning_rates_by_role(self.optimizer)
+        if "actor" not in learning_rates:
+            raise RuntimeError(f"{context}：optimizer 缺少 Actor 参数组")
+        if self.value_model is not None and "critic" not in learning_rates:
+            raise RuntimeError(f"{context}：存在 Value 模型但 optimizer 缺少 Critic 参数组")
+        self.args.learning_rate = learning_rates["actor"]
+        return learning_rates
+
     def _init_trl(
         self,
         args,
@@ -588,7 +824,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         # self.model.config = self.policy_model.config  # needed for pushing to hub
         self.create_optimizer_and_scheduler(
             num_training_steps=args.num_total_batches
-        )  # note that we are calling `self.lr_scheduler.step()` manually only at the batch level
+        )  # adaptive 模式不创建 scheduler；其他模式只在完整 iteration 末尾 step 一次。
 
         #########
         ### trainer specifics
@@ -731,7 +967,11 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.num_critics = self.env.config.rewards.get("num_critics", 1)
 
     def _init_config(self):
-        """Extract PPO hyperparameters and environment dimensions from config."""
+        """解析 PPO 超参数、环境维度与 Actor/Critic 学习率契约。
+
+        除存储 rollout/loss 所需配置外，这里会从 optimizer 实际参数组
+        校验 Actor/Critic 角色和 Critic 初始 LR，避免只看 YAML 宣称值。
+        """
         # Env related Config
         self.num_envs: int = self.env.config.num_envs
         self.algo_obs_dim_dict = self.env.config.robot.algo_obs_dim_dict
@@ -748,6 +988,21 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.lam = self.args.lam
         self.adaptive_lr_min = self.config.get("adaptive_lr_min", 1e-5)
         self.adaptive_lr_max = self.config.get("adaptive_lr_max", 1e-2)
+        self.critic_learning_rate = float(
+            self.config.get("critic_learning_rate", self.args.learning_rate)
+        )
+        initial_learning_rates = self._validate_optimizer_learning_rate_contract("初始化")
+        if self.value_model is not None and not math.isclose(
+            initial_learning_rates["critic"],
+            self.critic_learning_rate,
+            rel_tol=1.0e-12,
+            abs_tol=0.0,
+        ):
+            raise RuntimeError(
+                "初始化：Critic 参数组未使用 critic_learning_rate，"
+                f"actual={initial_learning_rates['critic']}, "
+                f"configured={self.critic_learning_rate}"
+            )
         self.sync_advantage_normalization = self.config.get("sync_advantage_normalization", True)
         self.multi_critic_advantage_weights = self.config.get(
             "multi_critic_advantage_weights", None
@@ -1340,25 +1595,20 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         return ret_dict
 
     def _compute_ppo_loss(self, forward_results, mb_rollout_data):
-        """Compute the clipped PPO surrogate loss, value loss, and entropy bonus.
+        """计算单个 micro-batch 的 PPO、Value、熵与可选对称性损失。
 
-        Implements standard clipped PPO with:
-        - Clipped surrogate policy gradient loss.
-        - Clipped value function loss.
-        - Entropy regularization.
-        - Adaptive learning rate adjustment based on KL divergence.
-        - Optional left-right symmetry consistency losses for actor and critic.
+        本函数只计算本地 KL 并写入统计缓冲，不再在 loss 内即时修改学习率。
+        完整 iteration 的全部 micro-batch 结束后，训练循环会汇总所有 GPU 的 KL，
+        再唯一一次决定下一轮 Actor LR。
 
         Args:
-            forward_results: Output of ``_forward_model``.
-            mb_rollout_data: Micro-batch dict from ``_get_mb_rollout_data``.
+            forward_results: ``_forward_model`` 返回的 Policy/Value 输出。
+            mb_rollout_data: ``_get_mb_rollout_data`` 生成的 micro-batch。
 
         Returns:
-            Dict with ``"ppo_loss"`` (combined scalar), plus individual loss
-            components and diagnostic metrics (KL, clip fractions, ratios).
+            包含总 PPO loss、各损失分量以及 KL/clip/ratio 诊断量的字典。
         """
         args = self.args
-        optimizer = self.optimizer
 
         policy_results = forward_results["policy_results"]
         value_results = forward_results["value_results"]
@@ -1387,8 +1637,6 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 axis=-1,
             )
             local_kl_mean = torch.mean(kl)
-            kl_mean = self.accelerator.gather(local_kl_mean).mean()
-            self._adjust_learning_rate_based_on_kl(kl_mean, optimizer)
 
         # Forward a DDP model twice will cause the error: "one of the variables needed for gradient computation has been modified by an inplace operation"  # noqa: E501
         vpred = value_results
@@ -1575,17 +1823,23 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         ].std()
 
     def _get_train_metrics(self):
-        """Gather and aggregate training statistics from all processes.
+        """汇总本轮全部 PPO 更新和全部 GPU 的训练统计。
+
+        KL 同时记录均值、中位数、P95 和最大值；自适应控制只使用整轮均值，
+        其余分位数用于识别困难 batch 尖峰，不会在 minibatch 内触发 LR 改动。
 
         Returns:
-            Dict of scalar metrics (approx KL, clip fractions, losses, entropy,
-            ratios, advantage stats) averaged across all GPUs and update steps.
+            可直接写入日志的跨进程标量指标字典。
         """
         metrics = {}
 
-        approxkl_avg = self.accelerator.gather_for_metrics(self.approxkl_stats).mean().item()
+        approxkl_all = self.accelerator.gather_for_metrics(self.approxkl_stats).flatten()
+        approxkl_avg = approxkl_all.mean().item()
 
         metrics["policy/approxkl_avg"] = approxkl_avg
+        metrics["policy/approxkl_median"] = approxkl_all.median().item()
+        metrics["policy/approxkl_p95"] = torch.quantile(approxkl_all, 0.95).item()
+        metrics["policy/approxkl_max"] = approxkl_all.max().item()
         metrics["policy/clipfrac_avg"] = (
             self.accelerator.gather_for_metrics(self.pg_clipfrac_stats).mean().item()
         )
@@ -1851,6 +2105,12 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
                 metrics = {}
                 train_metrics = self._get_train_metrics()
+                if self._uses_adaptive_kl_schedule():
+                    # 所有 epoch/minibatch/microbatch 更新已经结束；此处使用整轮、全 GPU
+                    # KL 均值唯一调整一次 Actor LR，调整结果只影响下一 iteration。
+                    self._adjust_learning_rate_based_on_kl(
+                        train_metrics["policy/approxkl_avg"]
+                    )
                 metrics.update(train_metrics)
                 metrics["eps"] = eps
                 metrics["objective/rewards"] = (
@@ -1869,7 +2129,15 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     .mean()
                     .item()
                 )
-                metrics["lr"] = self.args.learning_rate
+                actual_learning_rates = self._validate_optimizer_learning_rate_contract(
+                    "iteration 结束"
+                )
+                metrics["lr"] = actual_learning_rates["actor"]
+                metrics["lr/actor_actual"] = actual_learning_rates["actor"]
+                if "critic" in actual_learning_rates:
+                    metrics["lr/critic_actual"] = actual_learning_rates["critic"]
+                if "auxiliary" in actual_learning_rates:
+                    metrics["lr/auxiliary_actual"] = actual_learning_rates["auxiliary"]
                 metrics["episode"] = self.state.episode
                 env_log_dict = self.episode_env_tensors.mean_and_clear()
 
@@ -1916,7 +2184,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 self.log(metrics)
                 self.ep_infos.clear()
 
-            self.lr_scheduler.step()
+            if self.lr_scheduler is not None:
+                # 只有非 adaptive 模式会创建 scheduler；adaptive 模式的 Actor LR
+                # 已在上方按整轮 KL 调整，不能再由第二个控制器覆盖。
+                self.lr_scheduler.step()
 
             del metrics, rollout_data
             # Skip pre-iteration GC here; motion loading performs fallback cleanup,
@@ -1969,7 +2240,11 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 self.value_model.running_mean_std.sync_across_gpus(self.accelerator)
 
     def sync_adaptive_sampling(self):
-        """Synchronize adaptive motion sampling weights across GPU processes."""
+        """按配置频率同步所有 GPU 的自适应采样与 quarantine 证据。
+
+        普通 iteration 只在本地刷新采样概率；到达全局同步周期时，
+        MotionLib 还会合并分箱统计、动作结果和动力学门禁，再统一更新隔离状态。
+        """
         sync_adaptive_sampling_all_gpus_freq = self.env.config.get(
             "sync_adaptive_sampling_all_gpus_freq", 200
         )
@@ -2179,42 +2454,149 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             )
         return returns, advantages
 
-    def _adjust_learning_rate_based_on_kl(self, kl_mean, optimizer):
-        """Adjust the learning rate based on the KL divergence.
+    def _adjust_learning_rate_based_on_kl(self, kl_mean: float) -> float:
+        """根据整轮 KL 均值只调整 Actor 参数组，返回下一轮实际 Actor LR。
 
-        This function implements a learning rate schedule that adjusts the learning rate
-        based on the KL divergence between the current policy and the old policy.
-        If the KL divergence is too high, the learning rate is decreased.
-        If the KL divergence is too low, the learning rate is increased.
+        当前 LR 必须从 optimizer 参数组读取，而不是信任可能过期的
+        ``args.learning_rate``。Critic 与附加模块的参数组不会被修改。
 
         Args:
-            kl_mean (float): The mean KL divergence across all processes.
-            optimizer (torch.optim.Optimizer): The optimizer to update.
-        """
-        if self.desired_kl is None:
-            return
-
-        if kl_mean > self.desired_kl * 2.0:
-            new_lr = max(self.adaptive_lr_min, self.args.learning_rate / 1.5)
-        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-            new_lr = min(self.adaptive_lr_max, self.args.learning_rate * 1.5)
-        else:
-            new_lr = self.args.learning_rate
-        self.args.learning_rate = new_lr
-
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = self.args.learning_rate
-
-    def load_checkpoint(self, checkpoint_path, resume=False):  # noqa: D417
-        """Load a checkpoint to restore model weights and optionally full training state.
-
-        Args:
-            checkpoint_path: Path to the ``.pt`` checkpoint file.
-            resume: If True, also restore optimizer state, LR scheduler,
-                environment state, and trainer counters for seamless resumption.
+            kl_mean: 完整 PPO iteration、全部 GPU 汇总后的 KL 均值。
 
         Returns:
-            The loaded checkpoint dict.
+            调整后写入 Actor 参数组的实际学习率。
+        """
+
+        learning_rates = self._validate_optimizer_learning_rate_contract("KL 调整前")
+        current_actor_lr = learning_rates["actor"]
+        if self.desired_kl is None:
+            return current_actor_lr
+
+        kl_mean = float(kl_mean)
+        if kl_mean > self.desired_kl * 2.0:
+            new_lr = max(self.adaptive_lr_min, current_actor_lr / 1.5)
+        elif 0.0 < kl_mean < self.desired_kl / 2.0:
+            new_lr = min(self.adaptive_lr_max, current_actor_lr * 1.5)
+        else:
+            new_lr = current_actor_lr
+
+        set_optimizer_role_learning_rate(self.optimizer, "actor", new_lr)
+        self.args.learning_rate = float(new_lr)
+        return float(new_lr)
+
+    def _migrate_legacy_optimizer_state_dict(self, legacy_state_dict: dict) -> dict:
+        """把旧版 decay/no-decay 两组 checkpoint 迁移到角色参数组 schema。
+
+        旧 checkpoint 没有参数名，但其两个组严格沿用 HuggingFace 的稳定规则：
+        第一组为全部 decay 参数，第二组为全部 no-decay 参数，组内顺序等于
+        ``model.named_parameters()``。本方法重建“参数名到旧 state id”的映射，
+        复用 Adam 动量；Actor 恢复旧 optimizer 中真实 LR，Critic 则启用当前配置的
+        独立 LR。若模型结构或旧组形状不匹配会明确失败，不做猜测式恢复。
+        """
+
+        legacy_groups = legacy_state_dict.get("param_groups", [])
+        if len(legacy_groups) != 2 or any(
+            OPTIMIZER_ROLE_KEY in group for group in legacy_groups
+        ):
+            raise ValueError("checkpoint 不是可识别的旧版两组 optimizer 状态")
+
+        model = self.accelerator.unwrap_model(self.model)
+        named_parameters = [
+            (name, parameter)
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        ]
+        decay_names = {
+            _strip_parallel_module_prefix(name)
+            for name in self.get_decay_parameter_names(model)
+        }
+        legacy_parameter_names = [
+            [
+                name
+                for name, _ in named_parameters
+                if _strip_parallel_module_prefix(name) in decay_names
+            ],
+            [
+                name
+                for name, _ in named_parameters
+                if _strip_parallel_module_prefix(name) not in decay_names
+            ],
+        ]
+        for index, parameter_names in enumerate(legacy_parameter_names):
+            if len(parameter_names) != len(legacy_groups[index]["params"]):
+                raise ValueError(
+                    "旧 optimizer 参数数量与当前模型不一致，不能安全迁移："
+                    f"group={index}, checkpoint={len(legacy_groups[index]['params'])}, "
+                    f"model={len(parameter_names)}"
+                )
+
+        old_state_id_by_name = {}
+        old_group_index_by_name = {}
+        for group_index, (parameter_names, legacy_group) in enumerate(
+            zip(legacy_parameter_names, legacy_groups, strict=True)
+        ):
+            for parameter_name, state_id in zip(
+                parameter_names, legacy_group["params"], strict=True
+            ):
+                old_state_id_by_name[parameter_name] = state_id
+                old_group_index_by_name[parameter_name] = group_index
+
+        migrated_state_dict = self.optimizer.state_dict()
+        parameter_name_by_id = {id(parameter): name for name, parameter in named_parameters}
+        for live_group, serialized_group in zip(
+            self.optimizer.param_groups,
+            migrated_state_dict["param_groups"],
+            strict=True,
+        ):
+            group_parameter_names = [
+                parameter_name_by_id[id(parameter)] for parameter in live_group["params"]
+            ]
+            serialized_group["params"] = [
+                old_state_id_by_name[name] for name in group_parameter_names
+            ]
+            role = serialized_group[OPTIMIZER_ROLE_KEY]
+            if role == "actor":
+                source_group_indices = {
+                    old_group_index_by_name[name] for name in group_parameter_names
+                }
+                if len(source_group_indices) != 1:
+                    raise ValueError("Actor 新参数组跨越多个旧参数组，无法安全迁移")
+                source_group = legacy_groups[source_group_indices.pop()]
+                serialized_group["lr"] = float(source_group["lr"])
+
+        migrated_state_dict["state"] = legacy_state_dict.get("state", {})
+        return migrated_state_dict
+
+    def _load_optimizer_state_dict_compat(self, optimizer_state_dict: dict) -> str:
+        """加载新 schema，必要时迁移旧 schema，并返回恢复模式说明。"""
+
+        checkpoint_groups = optimizer_state_dict.get("param_groups", [])
+        has_role_schema = bool(checkpoint_groups) and all(
+            group.get(OPTIMIZER_SCHEMA_KEY) == OPTIMIZER_SCHEMA_VERSION
+            and OPTIMIZER_ROLE_KEY in group
+            for group in checkpoint_groups
+        )
+        if has_role_schema:
+            self.optimizer.load_state_dict(optimizer_state_dict)
+            return "role-aware"
+
+        migrated_state_dict = self._migrate_legacy_optimizer_state_dict(
+            optimizer_state_dict
+        )
+        self.optimizer.load_state_dict(migrated_state_dict)
+        return "legacy-migrated"
+
+    def load_checkpoint(self, checkpoint_path, resume=False):  # noqa: D417
+        """加载 checkpoint 模型权重，并按需恢复完整训练状态。
+
+        Args:
+            checkpoint_path: 待加载的 ``.pt`` checkpoint 路径。
+            resume: 为真时额外恢复 optimizer、可用 scheduler、环境和
+                trainer 计数器。旧两组 optimizer 会先迁移到具名角色 schema；
+                adaptive KL 模式不恢复已禁用的 HF scheduler。
+
+        Returns:
+            完整 checkpoint 字典，便于调用方继续审计元数据。
         """
         print(f"Loading checkpoint from {checkpoint_path}")  # noqa: T201
         checkpoint = torch.load(
@@ -2236,20 +2618,28 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 "optimizer_state_dict" in checkpoint
                 and checkpoint["optimizer_state_dict"] is not None
             ):
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-                # Update learning rate if available
-                if "args" in checkpoint and hasattr(checkpoint["args"], "learning_rate"):
-                    self.args.learning_rate = checkpoint["args"].learning_rate
-                    for param_group in self.optimizer.param_groups:
-                        param_group["lr"] = self.args.learning_rate
+                optimizer_restore_mode = self._load_optimizer_state_dict_compat(
+                    checkpoint["optimizer_state_dict"]
+                )
+                actual_learning_rates = self._validate_optimizer_learning_rate_contract(
+                    "checkpoint 恢复后"
+                )
+                self.accelerator.print(
+                    "Optimizer 恢复完成："
+                    f"mode={optimizer_restore_mode}, actual_lr={actual_learning_rates}"
+                )
 
             # Load learning rate scheduler state
             if (
                 "lr_scheduler_state_dict" in checkpoint
                 and checkpoint["lr_scheduler_state_dict"] is not None
             ):
-                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
+                else:
+                    self.accelerator.print(
+                        "当前为 adaptive KL 模式，已忽略旧 checkpoint 中的 HF scheduler 状态"
+                    )
 
             if "env_state_dict" in checkpoint:
                 self.env.load_env_state_dict(checkpoint["env_state_dict"])

@@ -2664,3 +2664,142 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`、
   `ground_z=0`、静态 reset 无自碰撞/地面穿透、1170 维输入和 21 维动作。复验后服务器
   工作区保持干净。本次同步和测试没有启动、停止或重启正式训练，也没有创建持久产物。
+
+## 2026-09-07：修正 BUMI3 强点/高度终止、坏动作隔离与 PPO 学习率控制
+
+### 1. 修改边界与现场保护
+
+- 本轮位于 `feature/bumi-native-sonic-full-training`，起始 HEAD 为
+  `cd5a00a867a9634941f8946a5172a04501ad79b0`，本地与 GitHub 同名分支 ahead/behind 为
+  `0/0`。修改前工作区只有用户未跟踪的 `g1.tar.gz`；本轮没有读取、修改、
+  暂存、删除或打包该文件。
+- 修改范围限于 BUMI3 Hydra 训练覆盖、通用 PPO trainer、通用 MotionLib 中
+  默认关闭的可选动力学门禁/隔离、相关日志、集成校验与单测。没有修改
+  URDF、MJCF、mesh、关节/body 顺序、动作数据、checkpoint、ONNX、正式训练目录
+  或 sim2sim 实现。
+- BUMI3 执行器速度上限沿用当前 SONIC
+  `gear_sonic/envs/manager_env/robots/bumi3.py`（SHA256
+  `53bc574948e4faabf8887a8d552e5d1ca1fdf71cb50f1f2a59c3c50f17f0ff8c`）中的腰部
+  `9 rad/s`、手臂/腿/脚 `12 rad/s`。该数值同时核对了用户指定的
+  `/home/weili/legged_lab/source/NoetixRobot/NoetixRobot/assets/robots/bumi3/bumi.py`，该参考
+  工作区当时有用户未提交修改，因此锁定读取时 SHA256 为
+  `74aaeca9da615c50e3749e4f103bbf713b83443d9cb16fab08edfd320227c03e`。参考 MJCF/URDF
+  SHA256 分别为
+  `041c81e8176c7f375302796deca28b141891a3c097d8e341e8d967b735466edf` 和
+  `174c1747019ced64267e74244bf89f3746856c90c30f88e4f162582ebc486476`；本轮仅读取核对，
+  没有修改 `legged_lab` 任何文件。SONIC BUMI3 MJCF 仍为既有 SHA256
+  `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`。
+
+### 2. BUMI3 局部强点与高度 termination
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml` 将
+  `reward_point_body` 从“腰部+双肘+双脚踝”改为仅
+  `waist_yaw_link + l_elbow_pitch_link + r_elbow_pitch_link`，并将 offset 同步缩减为 3 项。
+  双脚仍受全身 tracking reward、`foot_pos_xyz` termination、接触与脚部加速度约束，
+  但不再叠加 `std=0.1` 的局部强点奖励，避免多个高刚度目标同时拉扯脚踝。
+- BUMI3 为 `anchor_pos` 和 `ee_body_pos` 同时覆盖
+  `root_height_threshold=0.40 m`、正常姿态 `threshold=0.12 m`、低姿态
+  `down_threshold=0.25 m`。两处共用同一个低姿态分类边界，避免同一帧在锚点和
+  末端 termination 中被不同解释；`0.75 m` 这个对约 `0.46 m` 高 BUMI3 近似
+  关闭低姿态高度约束的数值已移除。G1/H2 的 reward point 和 termination 配置
+  没有被这个 BUMI3 专用覆盖改写。
+- 该配置 SHA256 从
+  `36df5a1954c2985adcee25b9ad35c48b99da94916757487a6a3fb6149eb31af5` 变为
+  `1dbb31da447cd14c3f741f0852e2b40c9e7f17d83c4bbed4c75abca09dd7c765`；集成验证器同步
+  锁定了三强点、两套高度阈值和下述学习率/隔离配置。
+
+### 3. 坏动作动力学门禁与 quarantine
+
+- `gear_sonic/utils/motion_lib/motion_lib_base.py` 新增原始 DOF 轨迹动力学门禁。它在
+  freeze-frame、上肢拼接和噪声增强前，按动作自身 FPS 对整条有效原始 DOF 做
+  中心有限差分，端点使用单边差分。空轨迹、非有限 FPS/阈值、关节数或速度上限
+  名称契约不一致时直接失败，不在随机 `max_len` 片段上得出不稳定结论。
+- BUMI3 门禁配置为：速度超出执行器上限的 DOF-帧占比不得超过
+  `0.005`，单点最大速度比不得超过 `2.0`，最大加速度比不得超过 `1.0`。
+  加速度分母为 `velocity_limit * fps`，因而 `1.0` 表示一个数据采样周期内跨越
+  一整档速度范围。该门禁只是“可否进入隔离”的必要条件，不是接触、力矩、
+  仿真或硬件安全证明。
+- quarantine 必须同时满足“原始参考动力学门禁失败”和“训练中连续高失败”。
+  为避免复用原有“帧曝光量/分箱长度”统计导致长动作失败率被稀释，新实现
+  单独记录动作级结果：提前 termination 计一次失败，自然到达动作末帧计一次
+  通过。动作至少有 `5` 次结果、距上次评估新增至少 `3` 次、失败率连续 `3`
+  个全 GPU 同步评估点不低于 `0.90` 后才永久进入 quarantine；一次有足够新证据的
+  低失败评估会清零连续计数。
+- 被 quarantine 的动作只保留 `uniform_sampling_rate` 对应的低频基线采样，不再
+  从高失败率获得困难采样放大；它们不会从数据集永久删除。动力学失败、
+  动作结果计数、连续评估和 quarantine 掩码均进入 env checkpoint；旧 checkpoint 缺少
+  新字段时保持零值并继续恢复旧分箱统计。日志新增门禁失败动作数、已隔离
+  动作数、已获得结果的动作数以及这些动作的平均/最大失败率。其他机器人
+  未显式开启 `dynamics_gate/quarantine` 时保持旧行为。
+
+### 4. Actor/Critic optimizer、整轮 KL 与 checkpoint 恢复
+
+- `gear_sonic/trl/trainer/ppo_trainer.py` 不再使用 HuggingFace 默认的“仅按
+  weight decay 分两组”方式。所有可训练参数先按 `policy.* -> actor`、
+  `value_model.* -> critic`、其他附加模块 `-> auxiliary` 分角色，每个角色内再保留
+  decay/no-decay 差异。每组保存稳定的角色名、组名和 schema 版本，并校验全部
+  参数恰好被覆盖一次。
+- `ppo_im_phc.yaml` 的 Actor 保持 `2e-5`，Critic 从未被代码使用的宣称值
+  `1e-3` 改为真正作用于 Critic 参数组的 `3e-4`；BUMI3 入口显式重申两个数值。
+  这是通用 PPO 缺陷修正，因此同样使用 `ppo_im_phc` 的 G1/H2 也会真正获得独立
+  Critic LR；其 reward、termination 和数据契约不变。
+- KL 不再在 `_compute_ppo_loss()` 的每个 micro/minibatch 中即时改 LR。本轮所有
+  PPO epoch/minibatch/microbatch 结束后，`_get_train_metrics()` 一次汇总所有 GPU 的
+  KL 均值、中位数、P95 和最大值；控制器每个 iteration 只使用整轮均值调整一次
+  下一轮 Actor LR。调整函数从 optimizer 实际 Actor 组读取当前值，只写 Actor 组；
+  Critic 和 auxiliary LR 保持不变。
+- `schedule=adaptive` 时 `create_scheduler()` 明确返回 `None`，不再创建或 step HF
+  constant scheduler，消除 KL 刚降低 Actor LR 就被 scheduler 恢复初始 base LR 的冲突。
+  非 adaptive 配置仍沿用 HuggingFace scheduler。日志从可能过期的
+  `args.learning_rate` 改为直接记录 `lr/actor_actual`、`lr/critic_actual`，存在
+  auxiliary 时还记录 `lr/auxiliary_actual`；兼容旧字段 `lr` 现等于实际 Actor LR。
+- 新 checkpoint 直接保存具名参数组及各自实际 LR。旧 checkpoint 的两组
+  decay/no-decay optimizer 在 resume 时按当前模型稳定参数名顺序迁移 Adam 动量：
+  Actor 继承旧 optimizer 中实际 LR，Critic 保留动量但启用当前独立 `3e-4`。
+  参数数量/分组不能确定匹配时直接报错，不猜测恢复。恢复后会立即校验并打印
+  各角色实际 LR；adaptive 模式明确忽略旧 HF scheduler 状态。
+- 关键文件修改前 -> 修改后 SHA256：`ppo_im_phc.yaml`
+  `57fec213ced45071d501548ea4bb31be1ca83aedfa6b5bdbdab056efae853632 ->
+  fc9c4512c69dec45ad5a7d78b0d7969b40c67fe85d3d3b2ebbfb1817a97f6044`；
+  `ppo_trainer.py`
+  `822261d5eef7043c183dfe578a7c70979c58a324b608c2eebdad4d49ec93e2f7 ->
+  3132ac5a46df6cf91afb93005e2113a7dd7c1c1e69ba278edeb556bc8bddd1e0`；
+  `motion_lib_base.py`
+  `0f938b41fce8aae0aa218e72cec0fd3f95116b423cb785edc96eb0566fbf7fb0 ->
+  e25effe8c39d33af2fd79fa37dc7960bcb0e49c1171bad80eb20530c68c72164`。
+
+### 5. 测试结果、已知边界与回滚
+
+- 新增 `gear_sonic/tests/test_ppo_optimizer_and_kl.py` 和
+  `gear_sonic/tests/test_motion_lib_adaptive_quarantine.py`，两个新文件均以详细中文模块
+  docstring 说明验证范围。定向测试覆盖具名 Actor/Critic decay/no-decay 组、
+  KL 仅改 Actor、adaptive scheduler 为空、旧/新 checkpoint 的 LR 和 Adam 状态恢复、
+  每轮唯一 KL 调整点、平滑/尖峰 DOF 门禁、名称契约、双条件 quarantine、
+  低失败证据重置、真实动作结果计数以及“隔离后只保留 uniform 分量”。
+- 本地使用 `/home/weili/miniconda3/envs/sonic/bin/python` 运行新增定向测试，结果为
+  `13 passed, 1 warning in 2.76s`。随后运行 BUMI3 sim2sim、MotionLib 角速度、
+  tracking anchor、配对帧窗口、三源数据集、PASS50 与旧 BUMI3 数据准备的全部
+  现有相关回归，结果为 `62 passed, 3 warnings in 6.90s`。warning 只有既有未知
+  `\*` 转义和 `scipy.ndimage.filters` 弃用提示。回归首次暴露两个用
+  `__new__` 构造最小 MotionLib 的旧测试缺少新字段，实现已改为“未配置时门禁
+  默认关闭”，同一集合重跑后 62 项全部通过。
+- 将 `gear_sonic/tests/test_input_readers.py` 也加入整体收集的尝试因本地 SONIC
+  环境缺少可选依赖 `msgpack` 而在 collection 阶段退出，该文件未执行；本轮没有
+  安装依赖或修改用户环境。四个修改 Python 实现/验证器的 `py_compile`、
+  `git diff --check`、`uvx ruff check --select E9,F63,F7,F82` 均通过；两个新测试文件
+  完整 `ruff check` 和 `ruff format --check` 通过。四个历史 Python 大文件在起始 HEAD
+  就不符合当前 Ruff formatter，因此本轮没有借机整文件格式化并混入无关 diff。
+- 直接调用集成验证器的仓库资产、XML/mesh 拓扑和 Hydra resolved 配置校验
+  通过，确认 `21 DoF / 22 body / 50 Hz / action_dim=21`、三强点、两组高度阈值、
+  21 关节速度门禁顺序和 Actor/Critic LR。本地未启动 Isaac AppLauncher，未执行
+  环境 reset/step、训练 smoke、完整训练、动作质量或真机验证；用户本轮要求的是
+  修改并同步代码，没有授权启动或重启正式训练。
+- quarantine 阈值是根据当前问题和保守原则设定的可观测起点，不是数据集全量
+  统计最优值。动力学门禁只在动作被加载时计算；默认全 GPU 自适应统计每
+  `200` iteration 同步一次，因而连续 3 次确认不是立即删样本。后续必须通过
+  `adp_samp/*`、KL 分位数、实际 Actor/Critic LR、value loss、终止率和 replay 联合
+  判断效果，不能只看 reward 或一个早期 checkpoint。
+- 本轮没有生成 checkpoint、ONNX、视频、渲染、日志或临时训练目录，因此没有
+  一次性产物需要清理。如需回滚，应对本轮后续记录的功能提交创建反向提交，
+  不得 reset/clean 或覆盖用户未跟踪文件。GitHub/noetix-volc 的精确提交与远端复验
+  将在完成推送和 `git pull --ff-only` 后追加记录。

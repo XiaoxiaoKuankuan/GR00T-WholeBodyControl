@@ -966,6 +966,30 @@ class ManagerEnvWrapper:
                 extras["to_log"]["adp_samp/episodes_max_over_mean"] = (
                     self._motion_lib.adp_samp_num_episodes.max() / eps_mean
                 )
+            if hasattr(self._motion_lib, "adp_samp_motion_quarantined"):
+                # 两个计数分别回答“数据门禁已发现多少异常动作”和“其中多少动作又经
+                # 连续高失败确认后停止困难采样”，便于训练中判断隔离机制是否过严。
+                extras["to_log"]["adp_samp/dynamics_gate_failed_motions"] = (
+                    self._motion_lib.adp_samp_dynamics_gate_failed.sum()
+                )
+                extras["to_log"]["adp_samp/quarantined_motions"] = (
+                    self._motion_lib.adp_samp_motion_quarantined.sum()
+                )
+                motion_evaluations = self._motion_lib.adp_samp_motion_num_evaluations
+                evaluated_mask = motion_evaluations > 0
+                extras["to_log"]["adp_samp/evaluated_motions"] = evaluated_mask.sum()
+                if evaluated_mask.any():
+                    # 只在至少有一次自然跑完/提前失败的动作上统计，避免
+                    # 未评估动作的零值把平均失败率人为压低。
+                    evaluated_failure_rates = (
+                        self._motion_lib.adp_samp_motion_failure_rate[evaluated_mask]
+                    )
+                    extras["to_log"]["adp_samp/motion_failure_rate_mean"] = (
+                        evaluated_failure_rates.mean()
+                    )
+                    extras["to_log"]["adp_samp/motion_failure_rate_max"] = (
+                        evaluated_failure_rates.max()
+                    )
         new_obs = self.process_raw_obs(obs_dict, flatten_dict_obs=True)
         # Store obs for action_transform_module when obs_dict is not provided in next step()
         self._last_obs_dict = new_obs

@@ -15,7 +15,8 @@ algo:
     value_loss_coef: 1.0
     entropy_coef: 0.01
     actor_learning_rate: 2e-5  # 5e-4 # 1.e-3
-    critic_learning_rate: 1.e-3 # 5e-4 # 1.e-3
+    # Critic 由独立 optimizer 参数组使用该学习率，不再回退到 Actor LR。
+    critic_learning_rate: 3.e-4
     max_grad_norm: 1.0
     use_clipped_value_loss: True
     schedule: "adaptive"

@@ -40,6 +40,29 @@ URDF_PATH = ASSET_ROOT / "urdf/bumi3/bumi.urdf"
 MJCF_PATH = ASSET_ROOT / "mjcf/bumi3.xml"
 MESH_DIR = ASSET_ROOT / "meshes/bumi3"
 EXP_NAME = "manager/universal_token/all_modes/sonic_bumi3"
+EXPECTED_BUMI3_MUJOCO_DOF_NAMES = [
+    "waist_yaw_joint",
+    "l_arm_pitch_joint",
+    "l_arm_roll_joint",
+    "l_arm_yaw_joint",
+    "l_elbow_pitch_joint",
+    "r_arm_pitch_joint",
+    "r_arm_roll_joint",
+    "r_arm_yaw_joint",
+    "r_elbow_pitch_joint",
+    "l_leg_pitch_joint",
+    "l_leg_roll_joint",
+    "l_leg_yaw_joint",
+    "l_knee_pitch_joint",
+    "l_ankle_pitch_joint",
+    "l_ankle_roll_joint",
+    "r_leg_pitch_joint",
+    "r_leg_roll_joint",
+    "r_leg_yaw_joint",
+    "r_knee_pitch_joint",
+    "r_ankle_pitch_joint",
+    "r_ankle_roll_joint",
+]
 EXPECTED_LOCAL_URDF_SHA256 = (
     "0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955"
 )
@@ -492,12 +515,8 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "waist_yaw_link",
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
-        "l_ankle_roll_link",
-        "r_ankle_roll_link",
     ]
     assert motion_cfg["reward_point_body_offset"] == [
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
@@ -606,19 +625,41 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "l_ankle_roll_link",
         "r_ankle_roll_link",
     ]
-    assert terminations["anchor_pos"]["params"]["threshold"] == 0.15
+    assert terminations["anchor_pos"]["params"]["threshold"] == 0.12
     assert terminations["anchor_pos"]["params"]["threshold_adaptive"] is True
-    assert terminations["anchor_pos"]["params"]["down_threshold"] == 0.75
-    assert terminations["anchor_pos"]["params"]["root_height_threshold"] == 0.5
-    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.15
+    assert terminations["anchor_pos"]["params"]["down_threshold"] == 0.25
+    assert terminations["anchor_pos"]["params"]["root_height_threshold"] == 0.4
+    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.12
     assert terminations["ee_body_pos"]["params"]["body_names"] == [
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
     ]
     assert terminations["ee_body_pos"]["params"]["threshold_adaptive"] is True
-    assert terminations["ee_body_pos"]["params"]["down_threshold"] == 0.75
-    assert terminations["ee_body_pos"]["params"]["root_height_threshold"] == 0.5
+    assert terminations["ee_body_pos"]["params"]["down_threshold"] == 0.25
+    assert terminations["ee_body_pos"]["params"]["root_height_threshold"] == 0.4
     assert terminations["anchor_ori_full"]["params"]["threshold"] == 0.20
+
+    assert bumi_algo["config"]["actor_learning_rate"] == 2e-5
+    assert bumi_algo["config"]["critic_learning_rate"] == 3e-4
+    adaptive_sampling = motion_lib_cfg["adaptive_sampling"]
+    assert adaptive_sampling["enable"] is True
+    assert adaptive_sampling["dynamics_gate"]["enable"] is True
+    assert adaptive_sampling["dynamics_gate"]["dof_names"] == (
+        EXPECTED_BUMI3_MUJOCO_DOF_NAMES
+    )
+    assert list(adaptive_sampling["dynamics_gate"]["dof_velocity_limits"]) == (
+        EXPECTED_BUMI3_MUJOCO_DOF_NAMES
+    )
+    assert adaptive_sampling["dynamics_gate"]["max_velocity_exceedance_fraction"] == 0.005
+    assert adaptive_sampling["dynamics_gate"]["max_velocity_ratio"] == 2.0
+    assert adaptive_sampling["dynamics_gate"]["max_acceleration_ratio"] == 1.0
+    assert adaptive_sampling["quarantine"] == {
+        "enable": True,
+        "high_failure_rate": 0.9,
+        "min_motion_episodes": 5.0,
+        "min_new_motion_episodes": 3.0,
+        "consecutive_evaluations": 3,
+    }
 
     return {
         "sim_dt": sim_dt,
