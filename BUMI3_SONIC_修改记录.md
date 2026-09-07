@@ -2844,3 +2844,44 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `git pull --ff-only`，使代码与交付记录保持同一 HEAD。功能回滚目标为
   `5c44c77e4fb19cc654cd0bab40ef7f51eea05c19`，需创建反向提交；仅回滚本节文档时则反向
   后续 docs 提交即可。
+
+### 7. 八卡重启首次运行暴露整数日志均值错误并修复
+
+- 用户授权在 `noetix-volc` 重新开始八卡 BUMI3 SONIC 训练。启动前服务器仓库位于
+  `feature/bumi-native-sonic-full-training`，HEAD 为
+  `a1c0f8476ec7edae3e53b34fed3669ceb27eeb99` 且工作区干净；8 张 RTX 4090 D 均无
+  compute process，显存约 `4 MiB`、利用率 `0%`。当前三源索引仍有 Robot `95358`、
+  paired SMPL `95222` 个软链接，没有发现一级断链。旧
+  `sonic_bumi3_qvel_centered_v1_8gpu` 已在 2026-09-07 05:56 跑满 `100000` iteration 并
+  保存 `model_step_100000.pt`，残留 tmux 仅停在 shell；本轮只关闭该空会话，旧 run、
+  checkpoint 和约 579 MB 正式日志均保留。
+- 首次新 run 为
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_native_fullfix_v1_scratch_100k-20260907_174735`，正式故障日志为
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_native_fullfix_v1_8gpu_20260907_174735.log`。
+  命令使用端口 `29517`、8 个 accelerate rank、每 rank `4096` env，并显式设置
+  `resume=false`、`checkpoint=null`、`auto_load_latest=false` 和 `100000` iteration。
+  8 个 worker PID `2523586-2523593` 均完成环境创建并进入 `===training policy===`，但在首轮
+  日志聚合时全部确定性退出；没有生成 checkpoint，也没有继续占用 GPU。
+- 失败堆栈精确位于 `ppo_trainer.py:2142 -> TensorAverageMeterDict.mean_and_clear() ->
+  TensorAverageMeter.mean()`，异常为 `RuntimeError: mean(): could not infer output dtype ...
+  Got: Long`。根因不是 OOM、NCCL、数据断链或 PPO loss，而是本轮新加的
+  `dynamics_gate_failed_motions`、`quarantined_motions`、`evaluated_motions` 三个计数由
+  bool 张量求和后为 `torch.long`，通用日志平均器过去只处理浮点量并直接调用
+  `cat.mean()`。故障 run 和日志作为正式诊断证据保留，不当作健康训练，也不从它恢复。
+- `manager_env_wrapper.py` 在上述三个计数产生处显式 `.float()`，明确环境日志的可平均
+  数值契约；`average_meters.py` 同时增加兜底，只把 integer/bool 累积量转为 float 后求均值，
+  已有 float64 和 complex 指标不降精度。新增
+  `gear_sonic/tests/test_average_meters.py`，以详细中文模块说明覆盖 float64 保真、long 计数和
+  bool 比例三类输入。修改后 SHA256 依次为：`average_meters.py`
+  `6ebbe817f2040e2bb48173b782c092c4aeadbbfb3eb75db33f3d1eedf3df69df`、
+  `manager_env_wrapper.py`
+  `d37bfa703ac1f2811a2da09619c1ef815f6a3374640bc0b32e538d887446f1b9`、新测试
+  `948c52ac57163a1c4723d7116b9285d8ec07ad6434a90fd7ee2b9f640931fa83`。
+- 本地定向测试（日志平均器、quarantine、PPO optimizer/KL）结果为
+  `16 passed, 2 warnings in 2.64s`；加入全部现有 BUMI3/工具回归并排除本地缺少可选
+  `msgpack` 的既有 `test_input_readers.py` 后为 `65 passed, 4 warnings in 6.71s`。
+  三个修改文件 `py_compile` 与 `git diff --check` 均通过。warning 仍是既有未知 `\*`、
+  TRL experimental API 和 SciPy filters 弃用提示。修复会在提交、推送、服务器
+  `git pull --ff-only` 及服务器复测后，以全新时间戳 run 再次从零启动；最终训练健康证据
+  另行追加，不能用这里的单元测试替代真实八卡首轮。

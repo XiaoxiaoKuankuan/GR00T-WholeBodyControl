@@ -111,6 +111,11 @@ class TensorAverageMeter:
         if cat.numel() == 0:
             return 0
         else:
+            # 环境日志里既有连续浮点指标，也有由 bool/long 求和得到的计数指标。
+            # PyTorch 不允许直接对整数张量调用 mean，因此只在必要时转为 float；
+            # 已有 float64/complex 指标保持原精度和既有行为。
+            if not (cat.is_floating_point() or cat.is_complex()):
+                cat = cat.float()
             return cat.mean()
 
     def clear(self):

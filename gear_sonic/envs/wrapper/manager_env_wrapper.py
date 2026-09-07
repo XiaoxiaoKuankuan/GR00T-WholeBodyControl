@@ -970,14 +970,14 @@ class ManagerEnvWrapper:
                 # 两个计数分别回答“数据门禁已发现多少异常动作”和“其中多少动作又经
                 # 连续高失败确认后停止困难采样”，便于训练中判断隔离机制是否过严。
                 extras["to_log"]["adp_samp/dynamics_gate_failed_motions"] = (
-                    self._motion_lib.adp_samp_dynamics_gate_failed.sum()
+                    self._motion_lib.adp_samp_dynamics_gate_failed.sum().float()
                 )
                 extras["to_log"]["adp_samp/quarantined_motions"] = (
-                    self._motion_lib.adp_samp_motion_quarantined.sum()
+                    self._motion_lib.adp_samp_motion_quarantined.sum().float()
                 )
                 motion_evaluations = self._motion_lib.adp_samp_motion_num_evaluations
                 evaluated_mask = motion_evaluations > 0
-                extras["to_log"]["adp_samp/evaluated_motions"] = evaluated_mask.sum()
+                extras["to_log"]["adp_samp/evaluated_motions"] = evaluated_mask.sum().float()
                 if evaluated_mask.any():
                     # 只在至少有一次自然跑完/提前失败的动作上统计，避免
                     # 未评估动作的零值把平均失败率人为压低。
