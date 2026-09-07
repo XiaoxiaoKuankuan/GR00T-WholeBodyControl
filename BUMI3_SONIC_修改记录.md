@@ -2885,3 +2885,50 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   TRL experimental API 和 SciPy filters 弃用提示。修复会在提交、推送、服务器
   `git pull --ff-only` 及服务器复测后，以全新时间戳 run 再次从零启动；最终训练健康证据
   另行追加，不能用这里的单元测试替代真实八卡首轮。
+
+### 8. 修复后从零重新启动八卡正式训练
+
+- 上述日志 dtype 修复、测试与第 7 节记录提交为
+  `bad93fc11e0464cd8f69f76d8ad361424575918e`，已推送 GitHub 同名 feature 分支。
+  `noetix-volc` 工作区同步前干净，执行 `git pull --ff-only` 从 `a1c0f84` 快进到
+  `bad93fc` 后仍干净；服务器使用 `liwei_lab` 环境复跑同一相关回归，结果为
+  `65 passed, 4 warnings in 10.31s`。确认失败 run 已退出且 8 张 GPU 无 compute process 后，
+  没有从故障 run 或 2026-09-03 的旧 100k 模型恢复。
+- 修复后的正式 tmux 为 `sonic_bumi3_native_fullfix_v1_8gpu`；launcher PID `2531165`，
+  八个直属 worker PID 为 `2531304-2531311`。正式 run 为
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_native_fullfix_v1_scratch_100k-20260907_175428`，tee 日志为
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_native_fullfix_v1_8gpu_20260907_175428.log`。
+  启动源码固定为 `bad93fc`，端口 `29517`，8 个 accelerate rank、每 rank `4096` env；
+  `resume=false`、`checkpoint=null`、`auto_load_latest=false`、
+  `num_learning_iterations=100000`，因此是全新随机初始化训练。
+- 落盘 resolved `config.yaml` SHA256 为
+  `f2d8bf42d2b793408c2224516bdb05addee00f584235cb4e7266b4115b0d877d`。它实际指向三源
+  v2 的 Robot `95358` 和 paired SMPL `95222` 索引，并确认 Actor `2e-5`、Critic
+  `3e-4`、adaptive 范围 `1e-5--2e-4`、三奖励点
+  `waist_yaw_link + 双肘`、`anchor_pos/ee_body_pos` 两处完全相同的
+  `root_height_threshold=0.40 m`、`threshold=0.12 m`、`down_threshold=0.25 m`，以及已开启
+  dynamics gate/quarantine。该核对来自本次 run 自己的 resolved 配置，不是只读取源码
+  默认值。
+- 8/8 个 worker 已越过原来首轮日志聚合故障并持续进入真实 PPO。监控到 iteration `112`、
+  `88080384` timesteps 时，吞吐约 `265343 steps/s`、mean reward 约 `1.05723`、mean
+  episode length 约 `15.63`；8 张 GPU 总显存占用约 `15.96--16.37 GiB`、利用率抽样约
+  `57%--79%`。正式日志中 `Traceback`、`OutOfMemoryError`、`CUDA out of memory`、
+  `NCCL error`、`RuntimeError`、`Error executing job` 精确计数均为 0。
+- TensorBoard 已写入 `137` 类 scalar；step `108` 的所有最新 scalar 均为有限值。
+  Actor 实际 LR 为 `1.51875e-4`，说明整轮 KL 控制器已从初始 `2e-5` 独立上调 Actor；
+  Critic 实际 LR 始终为 `3e-4`。同一步 KL mean/median/P95/max 约为
+  `0.01134/0.01184/0.01506/0.01635`。动作门禁失败、quarantine、已评估动作数三个新
+  日志已稳定输出为 `310/0/1017`，不再因 long dtype 中断训练。
+- iteration 100 原子保存的 `last.pt` 已在训练继续运行时完整 `torch.load`，当时文件大小
+  `392861510` bytes、SHA256 为
+  `d1061f354eea9baee47f0e4faace0922115433188421039b7a9e87e9d9d6781e`；
+  `state.global_step=100`、`max_steps=100000`、`episode=3276800`，含 policy `45` 个 tensor、
+  value `17` 个 tensor 和 optimizer/env state。四个 optimizer 参数组在 checkpoint 中明确为
+  `actor_decay/actor_no_decay`（schema 2、LR `1.51875e-4`）与
+  `critic_decay/critic_no_decay`（schema 2、LR `3e-4`），证明训练、日志和恢复状态使用同一
+  实际 LR。该哈希只对应 step 100 当时的原子文件；`last.pt` 后续会继续覆盖更新。
+- 当前证据证明从零八卡启动、真实 PPO、整数日志修复、独立 Actor/Critic LR、TensorBoard
+  和 checkpoint 链都已运行；iteration 112 仍是 100k 训练的极早期，不代表模型已收敛、
+  达到 G1 动作效果、通过 sim2sim 或满足真机安全。本轮按用户要求不等待训练结束，tmux、
+  launcher、8 个 worker、正式日志和 run 全部保留继续运行。
