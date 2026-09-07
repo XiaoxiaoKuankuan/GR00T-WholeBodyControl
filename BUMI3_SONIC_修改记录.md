@@ -2803,3 +2803,44 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   一次性产物需要清理。如需回滚，应对本轮后续记录的功能提交创建反向提交，
   不得 reset/clean 或覆盖用户未跟踪文件。GitHub/noetix-volc 的精确提交与远端复验
   将在完成推送和 `git pull --ff-only` 后追加记录。
+
+### 6. GitHub/noetix-volc 交付与真实数据门禁抽样
+
+- 上述功能、配置、测试和记录提交为
+  `5c44c77e4fb19cc654cd0bab40ef7f51eea05c19`，已推送到 GitHub
+  `feature/bumi-native-sonic-full-training`。首次 push 在网络层长时无响应后仅中断该
+  push 客户端；`git ls-remote` 确认远端仍为 `cd5a00a` 且未发生半推送，随后用
+  BatchMode、连接超时和 keepalive 非交互重试，正常快进 `cd5a00a..5c44c77`。
+  没有 force push、rebase、reset、stash 或改写历史；本地工作区仍只保留未跟踪
+  `g1.tar.gz`。
+- `noetix-volc:/home/liwei/GR00T-WholeBodyControl` 同步前为同名 feature 分支、
+  HEAD `cd5a00a867a9634941f8946a5172a04501ad79b0` 且工作区干净。执行
+  `git pull --ff-only origin feature/bumi-native-sonic-full-training` 后快进到
+  `5c44c77e4fb19cc654cd0bab40ef7f51eea05c19`，同步后仍干净。同步前后精确查找
+  `train|accelerate|torchrun` 均只命中查询命令自身，没有正式训练进程；本轮没有启动、
+  停止或重启训练。
+- 服务器使用 `/root/miniconda3/envs/liwei_lab/bin/python` 复跑与本地相同的全部
+  62 项相关回归，结果为 `62 passed, 3 warnings in 10.25s`；服务器 `py_compile`、
+  `git diff --check` 和静态 Hydra/资产契约通过。随后运行完整
+  `validate_bumi3_integration.py --device cuda:0`（未传 `--smoke`）退出码为 0，输出
+  `BUMI3 原生 SONIC 集成验证通过`，运行时再次确认 21 DoF、22 body、50 Hz、
+  Actor/Critic/decoder 维度与双向顺序。启动时仍有该 headless 节点的
+  `omni.platforminfo` 循环依赖和 `ERROR_INCOMPATIBLE_DRIVER` Vulkan 提示，但未阻止非渲染的
+  运行时配置校验；本次仍没有创建环境 reset/step，不能解释为仿真 smoke 通过。
+- 服务器真实训练索引
+  `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2/train/robot_all`
+  当时有 `95358` 条动作及 1 个 `metadata.pkl`：大集 `92443`、HQ4 PASS50
+  `2816`、旧 HQ `99`。按每个来源文件名排序后的等距固定索引，分别只读抽取
+  `256/128/99` 条，共 `468169` 帧执行新的整条原始 DOF 门禁。大集标记
+  `87/256=33.98%`，HQ4 为 `0/128`，旧 HQ 为 `1/99=1.01%`。大集最大速度比
+  P50/P95/max 分别为 `1.7249/3.6085/7.6240`，最大加速度比 P95/max 为
+  `1.7608/3.7913`；HQ4 两项 max 只有 `0.9990/0.1480`。
+- 这个抽样不是全量数据质量结论，但说明了不能把“门禁标记”直接等同于“删除动作”：
+  否则可能一次隔离近三分之一的大集抽样。当前实现只把门禁失败作为必要条件，
+  还必须在真实训练中累积足够结果且连续高失败才停止困难采样放大，与本轮设计目标
+  一致。抽样过程只加载 PKL 并输出统计，没有回写数据、生成报告文件或修改训练索引。
+- 最终远端复查时仓库工作区干净，Isaac 校验进程已退出，仍无训练进程。
+  本节仅为交付证据文档追加，将作为独立 docs 提交推送后再在服务器执行一次
+  `git pull --ff-only`，使代码与交付记录保持同一 HEAD。功能回滚目标为
+  `5c44c77e4fb19cc654cd0bab40ef7f51eea05c19`，需创建反向提交；仅回滚本节文档时则反向
+  后续 docs 提交即可。
