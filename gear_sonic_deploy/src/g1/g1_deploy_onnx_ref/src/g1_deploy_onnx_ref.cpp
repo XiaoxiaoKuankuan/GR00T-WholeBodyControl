@@ -38,6 +38,7 @@
  *   --motion-data         | Directory of pre-loaded reference motions
  *   --obs-config          | Observation config YAML
  *   --encoder-model       | Encoder ONNX model (for token_state)
+ *   --encoder-mode        | 初始编码器模式：0=G1、1=遥操作、2=SMPL
  *   --planner-model       | Locomotion planner ONNX model
  *   --input-type          | keyboard / gamepad / zmq / ros2 / interface_manager / gamepad_manager / zmq_manager
  *   --output-type         | zmq / ros2 / all
@@ -2159,7 +2160,8 @@ class G1Deploy {
       std::string zmq_out_topic = "g1_debug",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      int requested_encoder_mode = 0)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2366,7 +2368,8 @@ class G1Deploy {
         
         std::cout << "✓ Encoder model loaded successfully!" << std::endl;
         is_using_encoder_ = true;
-        initial_encoder_mode_ = 0;  // Encoder available, default to mode 0.
+        // 静态 CSV 参考轨迹不会像 ZMQ 协议那样自动携带模式，因此在初始化时使用显式参数。
+        initial_encoder_mode_ = requested_encoder_mode;
       } else {
         if (encoder_config_.dimension > 0) {
           std::cout << "Encoder config found but no encoder file provided - tokens can be set externally" << std::endl;
@@ -4119,6 +4122,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --disable-crc-check: disable CRC validation for MuJoCo simulation" << std::endl;
     std::cout << "  --obs-config <path>: specify observation configuration YAML file" << std::endl;
     std::cout << "  --encoder-file <path>: specify encoder ONNX file (optional)" << std::endl;
+    std::cout << "  --encoder-mode <0|1|2>: 初始编码器模式（0=G1，1=遥操作，2=SMPL；默认 0）" << std::endl;
     std::cout << "  --planner-precision <16|32>: specify precision to run the planner model at (default: 16)" << std::endl;
     std::cout << "  --policy-precision <16|32>: specify precision to run the policy model at (default: 32)" << std::endl;
     std::cout << "  --zmq-host <host>: ZMQ server host (default: localhost)" << std::endl;
@@ -4180,6 +4184,7 @@ int main(int argc, char const* argv[]) {
   std::string zmq_out_topic = "g1_debug";
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
+  int requestedEncoderMode = 0;  // 静态参考默认保持 G1 模式，避免改变历史部署行为。
   for (int i = 4; i < argc; i++) {
     if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
@@ -4202,6 +4207,23 @@ int main(int argc, char const* argv[]) {
         std::cerr << "Error: --encoder-file requires a path argument" << std::endl;
         exit(1);
       }
+    } else if (std::string(argv[i]) == "--encoder-mode") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --encoder-mode requires 0, 1, or 2" << std::endl;
+        exit(1);
+      }
+      try {
+        requestedEncoderMode = std::stoi(argv[i + 1]);
+      } catch (...) {
+        std::cerr << "Error: --encoder-mode must be an integer: " << argv[i + 1] << std::endl;
+        exit(1);
+      }
+      if (requestedEncoderMode < 0 || requestedEncoderMode > 2) {
+        std::cerr << "Error: --encoder-mode must be 0 (G1), 1 (teleop), or 2 (SMPL)" << std::endl;
+        exit(1);
+      }
+      std::cout << "[INFO] Initial encoder mode: " << requestedEncoderMode << std::endl;
+      i++;
     } else if (std::string(argv[i]) == "--planner-file") {
       if (i + 1 < argc) {
         plannerFile = argv[i + 1];
@@ -4441,7 +4463,8 @@ int main(int argc, char const* argv[]) {
     zmq_out_topic,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    requestedEncoderMode
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   
@@ -4468,4 +4491,3 @@ int main(int argc, char const* argv[]) {
   std::cout << "[DEBUG] Program exiting normally..." << std::endl;
   return 0;
 }
-

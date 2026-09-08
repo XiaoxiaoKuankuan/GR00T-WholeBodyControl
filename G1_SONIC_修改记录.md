@@ -120,3 +120,118 @@
 
 - 若需回滚，只撤销 `observation_config_sonic_release.yaml` 的本次更改；不应修改或删除
   通用 `observation_config.yaml`、ONNX/TRT 模型和训练 checkpoint。
+
+## 2026-09-08：取回十对 G1/SMPL PKL 并打通双编码器 MuJoCo 部署验证
+
+### 1. 任务范围与工作区保护
+
+- 所属分支：`feature/g1-native-sonic-training`；起始 HEAD：
+  `edc80bb06ad2c473607e363712652c03de712081`。
+- 修改前工作区只有用户已有的未跟踪文件 `g1.tar.gz`；本次没有读取、修改、暂存或删除它。
+- 本次只处理数据传输、离线格式转换和本机 MuJoCo 回环验证；没有启动、停止或修改
+  noetix-12 上的训练任务，没有连接真实 G1，也没有做真机下发。
+- 已核对 noetix-12 仓库为 `/root/home/liwei/GR00T-WholeBodyControl`，分支为
+  `feature/g1-native-sonic-training`，检查时 HEAD 与本地起始 HEAD 同为 `edc80bb06ad2`。
+
+### 2. 数据来源与十对样本
+
+- Robot 源目录：
+  `/data/datasets/bones-seed/sonic/motion_lib_bones_seed/robot_filtered`；单条文件是
+  30 Hz、外层仅含一个同名运动键的 joblib 字典，核心字段为 `root_trans_offset`、
+  `pose_aa(T,30,3)`、`dof(T,29)`、`root_rot(T,4)` 和 `fps`。
+- SMPL 源目录：
+  `/data/datasets/bones-seed/sonic/training_assets/data/smpl_filtered`；单条文件包含
+  `pose_aa(T,72)`、`transl(T,3)`、`smpl_joints(T,24,3)` 和 50 Hz `fps`。
+- 取回动作覆盖舞蹈、深蹲、弓步、挥手、行走、慢跑、跳跃、爬行和跪姿：
+  `dance_in_da_party_001__A464`、`macarena_001__A545`、`squat_001__A359`、
+  `forward_lunge_R_001__A359`、`wave_R_001__A430`、
+  `walking_quip_180_R_002__A428`、`jog_ff_loop_360_R_normal_pace_001__A454`、
+  `jump_and_land_light_001__A001`、`crawl_ff_loop_270_R_002__A232`、
+  `kneeling_start_001__A036`。
+- 原始数据保存在忽略目录
+  `data/noetix12_g1_smpl_10pairs_20260908/raw/{g1,smpl}`，共 20 个 PKL、约 4.1 MiB；
+  使用 rsync 经现有 noetix-12 SSH 隧道下载，远端与本地逐文件 SHA256 完全一致。
+- 生成的部署数据保存在同目录的 `deploy/{g1,smpl}`，`manifest.json` 记录每个源 PKL、
+  每个 CSV 和 `g1_29dof_rev_1_0.xml` 的 SHA256；这些数据产物受 `.gitignore` 保护，
+  不进入代码提交。
+
+### 3. 转换与部署代码修改
+
+- 新增 `tools_local/convert_paired_g1_smpl_pkl_to_deploy.py`：
+  - 使用训练 MotionLib 的 `Humanoid_Batch.fk_batch` 和同一 G1 29-DoF MJCF，将 Robot
+    `pose_aa` 从 30 Hz 按训练公式插值到 50 Hz；
+  - 将 29 自由度及完整刚体从 MuJoCo 顺序转换为 IsaacLab 顺序，再选取 `motion.yaml`
+    的 14 个跟踪刚体；FK 输出的 xyzw 四元数转换为部署 reader 要求的 wxyz；
+  - 对 SMPL 根执行 `axis-angle -> wxyz -> Y-up 到 Z-up -> remove_smpl_base_rot`，然后将
+    原始 `smpl_joints` 乘以逐帧根四元数逆，严格复现训练 mode 2 的观测生成；
+  - mode 2 保留配对 G1 的关节位置/速度，为 release encoder 的六个手腕关节条件提供数据；
+    SMPL 根位置采用配对 G1 pelvis，根朝向与根角速度来自处理后的 SMPL；
+  - 写盘前严格检查同名唯一配对、必需字段、维度、有限值、FPS、原始 `dof/root_rot`
+    自洽性、插值后帧数和四元数范数；已有输出目录一律拒绝覆盖。
+- 修改 `g1_deploy_onnx_ref.cpp`：新增 `--encoder-mode 0|1|2`，在本地 Encoder 成功加载后
+  将显式模式设置到所有静态参考轨迹及 planner motion。默认仍为 mode 0，不改变历史行为；
+  非整数或范围外值在模型加载前报错退出。
+- 修改 `gear_sonic_deploy/deploy.sh`：增加同名参数的帮助、校验、配置回显和命令透传。
+- 修改 `docs/source/references/motion_reference.md`：补充双 PKL 契约、转换命令、输出结构、
+  mode 0/mode 2 启动方式，以及 SMPL 模式仍依赖配对 G1 手腕条件的边界说明。
+- 生成但不提交 `data/noetix12_g1_smpl_10pairs_20260908/README_zh.md` 与
+  `mujoco_validation.json`，保存本地操作说明和本轮定量验证证据。
+
+### 4. 静态、格式与加载验证
+
+- Python `py_compile`、`ruff check`、`ruff format --check`、
+  `bash -n gear_sonic_deploy/deploy.sh`、`git diff --check`：通过。
+- 实际转换 10 对成功，得到 G1 mode 0 与 SMPL mode 2 共 20 条部署轨迹。Robot 插值后
+  帧数与同名 SMPL 帧数逐对完全相等，范围为 274 至 1375 帧，没有截断、补帧或静默对齐。
+- 十对处理后 SMPL 根与配对 G1 根的平均四元数角差为 1.185° 至 5.093°，单帧最大值为
+  12.317°；该结果支持当前 Y-up/Z-up 与 base rotation 方向，没有出现明显二次旋转。
+- `DEPLOY_MANIFEST_HASH_AND_ROW_CHECK=PASS files=180 pairs=10`：manifest 中 180 个输出文件
+  哈希全部复算一致，所有 CSV 数据行数都等于该运动声明的部署帧数。
+- 临时 C++ reader 验证程序直接调用生产 `MotionDataReader`：G1 根下 10 条均为
+  29 joints、14 bodies、14 body quaternions；SMPL 根下 10 条均为 29 joints、1 body、
+  1 body quaternion、24 SMPL joints、21 SMPL poses；输出
+  `CPP_MOTION_READER_g1=PASS motions=10` 与 `CPP_MOTION_READER_smpl=PASS motions=10`。
+- `just build` 完整通过并重新链接 `target/release/g1_deploy_onnx_ref`；底层程序和
+  `deploy.sh --help` 均显示新参数，`--encoder-mode 3` 按预期以退出码 1 拒绝。
+- 转换器对已有输出目录的覆盖保护按预期以退出码 1 抛出 `FileExistsError`，且在加载
+  G1 网格或写任何文件前结束。
+- 格式化后的最终转换器用单对舞蹈源文件重新生成临时输出，G1 与 SMPL 两个运动目录均与
+  正式输出逐文件一致，结果为 `FORMATTED_CONVERTER_REPRODUCIBILITY=PASS`。
+- 仓库已有 `FK.TestFKAndGlobalVelocities` 测试被调用，但其固定输入目录
+  `reference/bones_072925_test/` 在当前 checkout 不存在，因此该测试没有执行有效断言，
+  不把进程退出码 0 记作本轮通过证据。
+
+### 5. MuJoCo 同轨迹双模式运行证据
+
+- 使用当前 release 模型：Decoder SHA256
+  `c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed`，实际维度
+  `994 -> 29`；Encoder SHA256
+  `013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3`，实际维度
+  `1762 -> 64`；观测配置为 `policy/release/observation_config.yaml`。
+- 为保证公平性，mode 0 与 mode 2 分别从全新 MuJoCo 进程启动，均使用 `lo` 回环接口、
+  200 Hz 仿真目标频率、50 Hz 控制目标频率、`--disable-crc-check`，未打开真机设备。
+- 代表轨迹为 `dance_in_da_party_001__A464`，两侧均完整播放 497 帧。mode 0 日志中的
+  Encoder 模式始终为 0，首末帧墙钟间隔 9.920000 s、实测 50.000000 Hz；mode 2 始终
+  为 2，首末帧间隔 9.919991 s、实测 50.000045 Hz。两侧 action、token 和状态均为有限值，
+  仿真电机错误码非零计数均为 0，控制器均通过 `O` 正常退出。
+- 以日志中的实测关节转换回 IsaacLab 顺序，并与同帧配对 G1 参考比较：mode 0 直接
+  joint RMSE 为 0.6480 rad、MAE 为 0.4466 rad；mode 2 分别为 0.6537 rad、0.4526 rad。
+  mode 2 的直接 RMSE 高约 0.0057 rad，本单轨迹差异很小，但两个绝对误差都不低，不能
+  据此宣称达到高质量精确跟踪。
+- mode 0 的基座倾角 mean/p95/max/final 为 5.19°/10.20°/17.11°/3.19°；mode 2 为
+  4.43°/8.44°/12.19°/5.47°。两侧均完成整段且末帧仍接近直立；这只能说明本次仿真
+  没有在该指标上出现明显倒地，不能外推为十条轨迹整体质量或真机安全性。
+- 本轮采用无窗口运行并记录定量日志，没有保存视频；十条动作逐条视觉质量、接触质量、
+  脚滑和长时稳定性仍需在 MuJoCo 窗口中人工核验。未运行 Isaac Sim、训练或真机测试。
+
+### 6. 临时产物、风险与回滚
+
+- 两个临时 MuJoCo 进程和两个临时控制器均已正常停止；临时 CSV 日志、单动作软链接目录、
+  第一版转换备份、临时 C++ reader 源码与二进制在证据汇总后已移入系统回收站。
+- 保留用户需要的 20 个原始 PKL、20 条部署轨迹、manifest、中文说明和验证 JSON；没有
+  删除服务器源数据、正式训练数据、checkpoint、ONNX 或历史 TensorRT engine。
+- 风险边界：本轮只完整运行一条代表轨迹的两种模式；SMPL mode 2 的 G1 手腕条件来自
+  配对 Robot 轨迹，这是当前 release encoder 的固有输入契约，不是纯 SMPL-only 控制。
+- 代码回滚应只撤销转换工具、`--encoder-mode` 参数、启动脚本透传和文档修改；本地数据
+  位于独立忽略目录，可保留审计。不得使用 `git reset --hard`，也不得删除用户的
+  `g1.tar.gz`、远端原始数据或训练产物。

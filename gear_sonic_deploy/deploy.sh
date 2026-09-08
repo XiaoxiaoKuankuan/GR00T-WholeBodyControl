@@ -208,6 +208,7 @@ show_usage() {
     echo "  --obs-config PATH       Set the observation config file (default: policy/configs/example.yaml)"
     echo "  --planner PATH          Set the planner model path (default: planner/example.onnx)"
     echo "  --motion-data PATH      Set the motion data path (default: reference/example_motion/)"
+    echo "  --encoder-mode MODE     设置初始编码器模式：0=G1、1=遥操作、2=SMPL（默认：0）"
     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
@@ -242,6 +243,7 @@ MOTION_DATA_DEFAULT="reference/example/"
 INPUT_TYPE_DEFAULT="manager"
 OUTPUT_TYPE_DEFAULT="all"
 ZMQ_HOST_DEFAULT="localhost"
+ENCODER_MODE_DEFAULT="0"
 
 # Initialize with defaults (will be set after parsing)
 CHECKPOINT="$CHECKPOINT_DEFAULT"
@@ -251,6 +253,7 @@ MOTION_DATA="$MOTION_DATA_DEFAULT"
 INPUT_TYPE="$INPUT_TYPE_DEFAULT"
 OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
+ENCODER_MODE="$ENCODER_MODE_DEFAULT"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -289,6 +292,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             MOTION_DATA="$2"
+            shift 2
+            ;;
+        --encoder-mode)
+            if [[ -z "$2" ]] || [[ ! "$2" =~ ^[012]$ ]]; then
+                echo -e "${RED}Error: --encoder-mode requires 0 (G1), 1 (teleop), or 2 (SMPL)${NC}" >&2
+                exit 1
+            fi
+            ENCODER_MODE="$2"
             shift 2
             ;;
         --input-type)
@@ -509,6 +520,7 @@ echo -e "  Environment:        ${GREEN}$ENV_TYPE${NC}"
 echo -e "  Network Interface:  ${GREEN}$TARGET${NC}"
 echo -e "  Decoder Model:      ${GREEN}$CHECKPOINT_DECODER${NC}"
 echo -e "  Encoder Model:      ${GREEN}$CHECKPOINT_ENCODER${NC}"
+echo -e "  Encoder Mode:       ${GREEN}$ENCODER_MODE${NC}"
 echo -e "  Motion Data:        ${GREEN}$MOTION_DATA${NC}"
 echo -e "  Obs Config:         ${GREEN}$OBS_CONFIG${NC}"
 echo -e "  Planner:            ${GREEN}$PLANNER${NC}"
@@ -526,6 +538,7 @@ echo ""
 echo -e "${BLUE}just run g1_deploy_onnx_ref $TARGET $CHECKPOINT_DECODER $MOTION_DATA \\${NC}"
 echo -e "${BLUE}    --obs-config $OBS_CONFIG \\${NC}"
 echo -e "${BLUE}    --encoder-file $CHECKPOINT_ENCODER \\${NC}"
+echo -e "${BLUE}    --encoder-mode $ENCODER_MODE \\${NC}"
 echo -e "${BLUE}    --planner-file $PLANNER \\${NC}"
 echo -e "${BLUE}    --input-type $INPUT_TYPE \\${NC}"
 echo -e "${BLUE}    --output-type $OUTPUT_TYPE \\${NC}"
@@ -556,6 +569,7 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
         just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
             --obs-config "$OBS_CONFIG" \
             --encoder-file "$CHECKPOINT_ENCODER" \
+            --encoder-mode "$ENCODER_MODE" \
             --planner-file "$PLANNER" \
             --input-type "$INPUT_TYPE" \
             --output-type "$OUTPUT_TYPE" \
@@ -565,6 +579,7 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
         just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
             --obs-config "$OBS_CONFIG" \
             --encoder-file "$CHECKPOINT_ENCODER" \
+            --encoder-mode "$ENCODER_MODE" \
             --planner-file "$PLANNER" \
             --input-type "$INPUT_TYPE" \
             --output-type "$OUTPUT_TYPE" \

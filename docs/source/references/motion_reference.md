@@ -132,7 +132,11 @@ SMPL body poses in axis-angle representation (typically 21 poses × 3 coordinate
 Shape: `(timesteps, num_smpl_poses * 3)`
 
 ```{note}
-The **current reference motion tracking pipeline uses joint-based tracking only** (encoder mode 0). To enable SMPL-based reference tracking (encoder mode 2), you would need to modify the code to detect the presence of SMPL data and switch the encoder mode accordingly.
+The deployment executable accepts ``--encoder-mode 0|1|2``. Use mode ``0`` for a
+G1 joint reference and mode ``2`` for an SMPL reference. A mode-2 motion must also
+contain ``joint_pos.csv`` because the current SMPL encoder uses the paired G1 wrist
+joints as part of its observation. The default remains mode ``0`` for backward
+compatibility.
 ```
 
 ### `info.txt`
@@ -214,6 +218,51 @@ python reference/convert_motions.py <pkl_file> [output_dir]
 ```
 
 The pickle should be a dictionary where each key is a motion name and each value contains `joint_pos`, `joint_vel`, `body_pos_w`, `body_quat_w`, `body_lin_vel_w`, `body_ang_vel_w`, `_body_indexes`, and `time_step_total`.
+
+### Converting paired raw Robot/SMPL PKLs
+
+Bones-Seed training assets use a different two-file contract: the Robot PKL contains
+30 Hz G1 axis-angle data in MuJoCo order, while a same-named SMPL PKL contains 50 Hz
+SMPL pose and joint data. Use the dedicated converter from the repository root:
+
+```bash
+/home/weili/miniconda3/envs/env_isaaclab/bin/python \
+  tools_local/convert_paired_g1_smpl_pkl_to_deploy.py \
+  --robot-root data/noetix12_g1_smpl_10pairs_20260908/raw/g1 \
+  --smpl-root data/noetix12_g1_smpl_10pairs_20260908/raw/smpl \
+  --output-root data/noetix12_g1_smpl_10pairs_20260908/deploy
+```
+
+The converter uses the same G1 MJCF and ``Humanoid_Batch.fk_batch`` implementation
+as the training MotionLib, resamples G1 from 30 Hz to 50 Hz, converts MuJoCo order to
+IsaacLab order, and reproduces the training SMPL coordinate preprocessing. It rejects
+missing pairs, duplicate names, non-finite arrays, mismatched frames, unexpected FPS,
+and pre-existing output directories. It produces two independent motion roots:
+
+```text
+deploy/
+├── g1/                         # Run with --encoder-mode 0
+│   └── <motion_name>/
+├── smpl/                       # Run with --encoder-mode 2
+│   └── <motion_name>/
+└── manifest.json               # Source/output SHA256 and contract audit
+```
+
+For a MuJoCo comparison, launch the simulator and point two separate deployment runs
+at the corresponding roots:
+
+```bash
+cd gear_sonic_deploy
+./deploy.sh --motion-data ../data/noetix12_g1_smpl_10pairs_20260908/deploy/g1 \
+  --encoder-mode 0 --input-type keyboard --output-type zmq sim
+
+./deploy.sh --motion-data ../data/noetix12_g1_smpl_10pairs_20260908/deploy/smpl \
+  --encoder-mode 2 --input-type keyboard --output-type zmq sim
+```
+
+Run only one controller against a given simulator at a time. Mode 2 uses the processed
+SMPL root orientation and 24 root-local SMPL joints; its G1 joint CSV is retained only
+to provide the six paired wrist joints required by the released encoder.
 
 ---
 
