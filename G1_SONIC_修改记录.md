@@ -244,3 +244,35 @@
 - 拉取前再次确认 noetix-12 位于同名分支、HEAD 为 `edc80bb06ad2` 且工作区干净；随后
   使用 `git pull --ff-only origin feature/g1-native-sonic-training` 快进到 `a60aded`，
   拉取后工作区仍干净。该同步只更新服务器代码 checkout，没有启动或重启训练与部署进程。
+
+
+## 2026-09-08：GENMO 音乐会话部署实现（进行中）
+
+- 分支 feature/g1-native-sonic-training，起始 HEAD cf47eaced1f8ad7b4d7564112663085efc430d03，保留未跟踪 g1.tar.gz。
+- 用户授权实现 physics_v3 s100000、SONIC release SMPL mode 2、本机 MuJoCo 三进程同步播放。
+- 首批新增 music_session.hpp，提供请求去重、连续帧确认、不可变缓冲快照；控制器新增 music 输入与统一单调时钟帧选择，固定 mode 2，避免旧流接口追赶重置和模式回退。
+- 当前为源码阶段，尚未完成编译、仿真和同步验收。无训练和真机操作。
+- 回滚仅涉及新增音乐接口及显式 music 分支，不涉及模型、训练配置或历史轨迹。
+
+本次实现进展：新增 `gear_sonic/utils/mujoco_sim/music_session.py`；在 `configs.py`、`base_sim.py` 增加本机会话、固定步长绝对期限、播放时释放弹力带、故障冻结、音乐模式关闭跌倒自动重置及真实 qpos/qvel 日志；C++ 音乐输入锁定 mode 2、以单调时钟选帧，用户显式停止允许在未消费未来段加入 1 秒收尾。修正主线程 sleep(0.02) 被整型截断引起的忙循环，改为 20 ms sleep_for，降低与推理/仿真的 CPU 竞争。以上尚待端到端及故障验证。
+
+进展与验证：新增 `unit_tests/test_music_session.cpp`；4 项 C++ 协议测试通过。测试发现 release fast-math 消除了普通 isfinite 检查，已改为 IEEE754 位检查，NaN/Inf 明确拒绝；MuJoCo 会话 reset 后零四元数问题通过紧接 mj_forward 修复。新增实际控制周期统计及编码器输入审计，8 秒真实音频会话 436 次 Python/C++ 观测最大误差 8.47e-16，控制完整周期 P99 1.801 ms；无弹力带、无 reset，仿真实际步进 200.007 Hz，RTF 1.000037，基座最低 0.7133 m、最大倾角 17.072 度。新的请求类型校验、活动会话隔离及容量上下文修正仍需最终回归编译和故障注入。
+
+最终交付整理进展：补齐 `docs/sonic_music_input.md`、7 项 C++ 协议测试与 2 项 MuJoCo 会话单元测试；新 Python 文件经 Ruff 格式化。C++ 新会话清零使用帧与时间戳，完成操作拒绝已锁存故障，完整控制周期墙钟频率使用首尾实测控制时间。三进程 heartbeat/generation_delay/user_stop 注入通过（GENMO `outputs/sonic_music/fault_validation_20260908/results.json`）。读取本地 SDK 的 recurrent_thread.cpp.o 确认 CLOCK_MONOTONIC timerfd 周期调度，因此保留现有控制线程实现。初次 180 秒在线 FineDance 已完整结束，无跌倒/重置/弹力带；30 秒 Compas3D 也完成。最终帧与声卡回归、提交前检查进行中。
+
+最终验证完成：`outputs/sonic_music/20260908_192304_56097e25`，源曲 `outputs/server_music_wav_4set_10_20260818/finedance/100.wav` 的前 180 秒，seed 42。5400 帧 30 Hz SMPL、9000 帧音乐参考，加前后缀共 9160 帧，编号完全连续；17 个代码/模型/资产指纹与当前文件一致。
+
+| 指标 | 最终实测 |
+|---|---|
+| 播放中生产 | 58 窗，平均 75.02 ms，P95 77.62 ms |
+| 音频/实际参考时间误差 | P95 10.53 ms，最大 17.39 ms |
+| 完整控制周期计算 | P99 1.304 ms，墙钟 50.00006 Hz |
+| 物理步进和实时因子 | 200.00055 Hz，RTF 1.000003 |
+| GPU 总已用显存峰值 | 3.041 GiB，含显示及同时运行的模型 |
+| 控制状态 | 无弹力带、无跌倒、无 reset；最低基座 0.368 m，最大倾角 23.66° |
+| 双膝跟踪相位 | 约 40 ms 滞后，相关 0.959，只代表双膝信号 |
+| 足底接触点切向速度 | RMS 0.108 m/s，P95 0.117 m/s，存在脚滑 |
+
+测试与边界：GENMO 17 项、MuJoCo 会话 2 项、C++ 协议 7 项通过；Ruff 新文件检查、git diff --check 通过；三个实际三进程故障用例通过。8 秒固定观测审计、30 秒 Compas3D、两次 180 秒 FineDance 与 1.037 秒短尾窗完成。未经人工主观视听复核、未验证真机、未启动训练。部署资料/录像/模型和用户要求的失败现场保留在 GENMO outputs，未纳入 Git。回滚仅撤销本次新增音乐模式、适配/协调/评估/测试/文档及对应窄范围改动，不改原 checkpoint、数据、用户 agent.md 或 g1.tar.gz；模式默认值仍不启用音乐。源代码将在当前 feature 提交推送并只对同名服务器分支执行 ff-only。
+
+交付复核：最终完整录像为 GENMO `outputs/sonic_music/20260908_192304_56097e25/dance_with_music.mp4`，H.264 1280×720、50 FPS，AAC 48 kHz，总长 183 秒（两秒准备＋180 秒音乐＋一秒收尾），已检查实际帧画面与媒体流信息。评估工具将未开启观测审计的会话标记为 null，避免把未运行审计误记失败；原 8 秒已开启审计的通过证据保留。所有本次联调子进程已经退出；模型与媒体/故障归档按用户要求保留，其余临时包、编译审计对象和重复日志精确清理。

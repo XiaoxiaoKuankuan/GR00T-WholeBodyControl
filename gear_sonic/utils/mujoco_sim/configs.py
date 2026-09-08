@@ -66,6 +66,8 @@ def override_wbc_config(
     """Override WBC YAML values with dataclass values."""
     key_to_value = {
         "INTERFACE": config.interface,
+        "MUSIC_ENDPOINT": config.music_endpoint,
+        "MUSIC_LOG_PATH": config.music_log_path,
         "ENV_TYPE": config.env_type,
         "VERSION": config.wbc_version,
         "SIMULATOR": config.simulator,
@@ -132,6 +134,12 @@ class BaseConfig(ArgsConfigTemplate):
 
     sim_sync_mode: bool = False
     """Whether to run the control loop in sync mode."""
+
+    music_endpoint: str = ""
+    """显式启用本机音乐会话；空值保持既有仿真行为。"""
+
+    music_log_path: str = ""
+    """实际 qpos/qvel 的 JSONL 日志路径，已有文件拒绝覆盖。"""
 
     control_frequency: int = 50
     """Frequency of the control loop."""

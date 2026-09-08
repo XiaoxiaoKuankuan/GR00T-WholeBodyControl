@@ -512,7 +512,8 @@ class DefaultEnv:
             print(f"Warning: Robot has fallen, height: {self.mj_data.qpos[2]:.3f} m")
 
         if self.fall:
-            self.reset()
+            if not self.config.get("MUSIC_ENDPOINT"):
+                self.reset()
 
     def check_self_collision(self):
         robot_bodies = get_subtree_body_names(self.mj_model, self.mj_model.body(self.root_body).id)
@@ -525,6 +526,8 @@ class DefaultEnv:
 
     def reset(self):
         mujoco.mj_resetData(self.mj_model, self.mj_data)
+        # reset 后必须立即刷新派生姿态，否则下一次观测会读到零四元数。
+        mujoco.mj_forward(self.mj_model, self.mj_data)
 
 
 class BaseSimulator:
@@ -574,6 +577,13 @@ class BaseSimulator:
         self.init_publisher()
 
         self.sim_thread = None
+        # 音乐接口只在显式启用时创建，普通仿真不增加网络服务。
+        self.music_session = None
+        if self.config.get("MUSIC_ENDPOINT"):
+            from gear_sonic.utils.mujoco_sim.music_session import MusicSimSession
+            self.music_session = MusicSimSession(
+                self.config["MUSIC_ENDPOINT"], self.config.get("MUSIC_LOG_PATH", "")
+            )
 
     def start_as_thread(self):
         self.sim_thread = Thread(target=self.start)
@@ -599,6 +609,7 @@ class BaseSimulator:
         """Main simulation loop"""
         sim_cnt = 0
         ts = time.time()
+        music_deadline = time.monotonic()
 
         try:
             while self._running and (
@@ -607,7 +618,11 @@ class BaseSimulator:
             ):
                 step_start = time.monotonic()
 
-                self.sim_env.sim_step()
+                advance = self.music_session is None or self.music_session.before_step(self.sim_env)
+                if advance:
+                    self.sim_env.sim_step()
+                    if self.music_session:
+                        self.music_session.after_step(self.sim_env)
                 now = time.time()
                 if now - ts > 1 / 10.0 and self.redis_client is not None:
                     head_pose = self.sim_env.get_head_pose()
@@ -627,6 +642,13 @@ class BaseSimulator:
                 # Simple rate limiter (replaces ROS rate)
                 elapsed = time.monotonic() - step_start
                 sleep_time = self.sim_dt - elapsed
+                if self.music_session:
+                    # 绝对期限消除逐步 sleep 带来的长期累计漂移，物理 dt 始终固定。
+                    music_deadline += self.sim_dt
+                    sleep_time = music_deadline - time.monotonic()
+                    if not advance:
+                        music_deadline = time.monotonic()
+                        sleep_time = self.sim_dt
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
@@ -644,6 +666,9 @@ class BaseSimulator:
 
     def close(self):
         self._running = False
+        if getattr(self, "music_session", None):
+            self.music_session.close()
+            self.music_session = None
         try:
             if self.sim_env.image_publish_process is not None:
                 self.sim_env.image_publish_process.stop()

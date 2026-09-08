@@ -47,6 +47,7 @@
  *   --policy-fp16         | Use FP16 for policy TensorRT engine
  */
 #include <cmath>
+#include "../include/input_interface/music_session.hpp"
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <mutex>
@@ -185,6 +186,10 @@ class G1Deploy {
     // Input interface and buffered input data
     // =========================================================================
     std::unique_ptr<InputInterface> input_interface_;
+    // 音乐会话使用不可变参考快照，帧号与 Python 单调时钟共用同一个起点。
+    std::unique_ptr<MusicSession> music_session_;
+    std::string music_session_id_;
+    int64_t music_global_frame_ = 0;
     
     // Buffered input data (the real data to the policy engine)
     // has_*_data_ flags indicate whether the getter returned valid buffered data (true) or defaults (false)
@@ -2037,6 +2042,8 @@ class G1Deploy {
       }
       
       // Try each mode until one succeeds
+      // 音乐协议只有六腕参考有效，禁止缺失 SMPL 数据后回退到全关节编码器。
+      if (music_session_) modes_to_try = {2};
       for (size_t attempt = 0; attempt < modes_to_try.size(); ++attempt) {
         int mode_to_try = modes_to_try[attempt];
         current_motion_->SetEncodeMode(mode_to_try);
@@ -2100,6 +2107,13 @@ class G1Deploy {
           for (size_t i = 0; i < encoder_input_buffer.size() && i < encoder_obs_buffer_.size(); ++i) {
             encoder_input_buffer[i] = static_cast<float>(encoder_obs_buffer_[i]);
           }
+          if (music_session_) {
+            // 留存实际编码器输入，验收端可按同一帧与机器人朝向独立重组比较。
+            double dt=control_dt_;
+            auto history=state_logger_->GetLatest(1,dt);
+            music_session_->MarkObservation(encoder_obs_buffer_,history[0].base_quat,
+                ComputeApplyDeltaHeading(),music_global_frame_,operator_state.play);
+          }
           
           // Warn if we had to switch from intended mode
           if (current_motion_->GetEncodeMode() != intended_encoder_mode && attempt > 0) {
@@ -2161,7 +2175,8 @@ class G1Deploy {
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
       double initial_max_close_ratio = 1.0,
-      int requested_encoder_mode = 0)
+      int requested_encoder_mode = 0,
+      std::string music_endpoint = "tcp://127.0.0.1:5560")
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2451,6 +2466,11 @@ class G1Deploy {
       }
 
       // Initialize input interface based on type
+      if (input_type == "music") {
+        if (networkInterface != "lo" || !disable_crc_check || requested_encoder_mode != 2 || !is_using_encoder_)
+          throw std::runtime_error("音乐模式要求 lo 仿真接口、关闭 CRC 校验和已加载的 SMPL mode 2 编码器");
+        music_session_ = std::make_unique<MusicSession>(music_endpoint);
+      }
       if (input_type == "gamepad") {
         input_interface_ = std::make_unique<unitree::common::Gamepad>();
         std::cout << "Initialized gamepad input interface" << std::endl;
@@ -3151,6 +3171,8 @@ class G1Deploy {
      * @return True on success.
      */
     bool CurrentFrameAdvancement() {
+      // 音乐帧号由统一时钟决定，不走普通动作的自增、循环或追赶逻辑。
+      if (music_session_) return true;
       // get current motion and frame from planner when planner is enabled and initialized
       std::lock_guard<std::mutex> motion_lock(current_motion_mutex_);
       if (planner_ && planner_->planner_state_.enabled && planner_->planner_state_.initialized) {
@@ -3415,6 +3437,8 @@ class G1Deploy {
      */
     void Input() {
       if (operator_state.stop) { return; }
+      // 音乐会话由协调器控制，避免普通键盘切换动作污染已确认的时间线。
+      if (music_session_) return;
       
       // Update input interface (poll for new data)
       input_interface_->update();
@@ -3803,6 +3827,18 @@ class G1Deploy {
     void Control() {
       if (operator_state.stop) { return; }
 
+      if (music_session_ && program_state_ != ProgramState::INIT) {
+        auto view = music_session_->Read();
+        if (view.fault || !view.motion) return;
+        std::lock_guard<std::mutex> lock(current_motion_mutex_);
+        current_motion_ = view.motion; current_frame_ = view.local_frame;
+        operator_state.play = view.play; operator_state.start = true;
+        music_global_frame_ = view.global_frame;
+        if (music_session_id_ != view.session_id) {
+          music_session_id_ = view.session_id; reinitialize_heading_ = true;
+        }
+      }
+
       switch (program_state_) {
         case ProgramState::INIT:
           if (!InitControl()) {
@@ -4042,6 +4078,11 @@ class G1Deploy {
             return;
           }
 
+          if (music_session_) {
+            const double compute_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - obs_start_time).count();
+            music_session_->MarkControl(true, music_global_frame_, compute_ms);
+          }
           if (logging_counter_ % 50 == 0) {
             auto control_loop_end_time = std::chrono::steady_clock::now();
             auto obs_duration = std::chrono::duration_cast<std::chrono::microseconds>(obs_end_time - obs_start_time);
@@ -4106,7 +4147,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  motion_data_path: path to motion data directory (e.g., reference/bones_072925_test/)" << std::endl;
     std::cout << "\nOptions:" << std::endl;
     std::cout << "  --planner-file <path>: specify planner file (optional)" << std::endl;
-    std::cout << "  --input-type <keyboard|gamepad|gamepad_manager|manager|zmq|zmq_manager";
+    std::cout << "  --input-type <keyboard|gamepad|gamepad_manager|manager|zmq|zmq_manager|music";
 #if HAS_ROS2
     std::cout << "|ros2";
 #endif
@@ -4123,6 +4164,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --obs-config <path>: specify observation configuration YAML file" << std::endl;
     std::cout << "  --encoder-file <path>: specify encoder ONNX file (optional)" << std::endl;
     std::cout << "  --encoder-mode <0|1|2>: 初始编码器模式（0=G1，1=遥操作，2=SMPL；默认 0）" << std::endl;
+    std::cout << "  --music-endpoint <tcp://127.0.0.1:port>: 音乐会话接口（默认 5560，仅 lo 仿真）" << std::endl;
     std::cout << "  --planner-precision <16|32>: specify precision to run the planner model at (default: 16)" << std::endl;
     std::cout << "  --policy-precision <16|32>: specify precision to run the policy model at (default: 32)" << std::endl;
     std::cout << "  --zmq-host <host>: ZMQ server host (default: localhost)" << std::endl;
@@ -4185,6 +4227,7 @@ int main(int argc, char const* argv[]) {
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
   int requestedEncoderMode = 0;  // 静态参考默认保持 G1 模式，避免改变历史部署行为。
+  std::string musicEndpoint = "tcp://127.0.0.1:5560";
   for (int i = 4; i < argc; i++) {
     if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
@@ -4255,7 +4298,7 @@ int main(int argc, char const* argv[]) {
       if (i + 1 < argc) {
         inputType = argv[i + 1];
         // Validate input type based on what's available
-        bool valid_input = (inputType == "keyboard" || inputType == "gamepad" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
+        bool valid_input = (inputType == "music" || inputType == "keyboard" || inputType == "gamepad" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
 #if HAS_ROS2
         valid_input = valid_input || (inputType == "ros2");
 #endif
@@ -4366,6 +4409,9 @@ int main(int argc, char const* argv[]) {
         std::cerr << "Error: --logs-dir requires a path argument" << std::endl;
         exit(1);
       }
+    } else if (std::string(argv[i]) == "--music-endpoint") {
+      if (i + 1 >= argc) throw std::runtime_error("--music-endpoint 缺少地址");
+      musicEndpoint = argv[++i];
     } else if (std::string(argv[i]) == "--zmq-host") {
       if (i + 1 < argc) { zmq_host = argv[i + 1]; i++; }
     } else if (std::string(argv[i]) == "--zmq-port") {
@@ -4435,6 +4481,11 @@ int main(int argc, char const* argv[]) {
   }
 
   std::cout << "[DEBUG] Creating G1Deploy object..." << std::endl;
+  // 在模型加载和 DDS 初始化之前限制音乐模式的运行边界。
+  if (inputType == "music" && (networkInterface != "lo" || !disableCrcCheck || requestedEncoderMode != 2 || encoderFile.empty())) {
+    std::cerr << "音乐模式仅支持 lo 仿真、--disable-crc-check、--encoder-mode 2 和显式编码器" << std::endl;
+    return 1;
+  }
   G1Deploy custom(
     networkInterface,
     modelFile,
@@ -4464,7 +4515,8 @@ int main(int argc, char const* argv[]) {
     enableMotionRecording,
     initial_compliance,
     initial_max_close_ratio,
-    requestedEncoderMode
+    requestedEncoderMode,
+    musicEndpoint
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   
@@ -4472,16 +4524,16 @@ int main(int argc, char const* argv[]) {
 #if HAS_ROS2
   if (inputType == "ros2") {
     while (!custom.operator_state.stop && rclcpp::ok()) { 
-      sleep(0.02); 
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (!rclcpp::ok()) {
       std::cout << "[INFO] ROS2 shutdown detected (Ctrl+C)" << std::endl;
     }
   } else {
-    while (!custom.operator_state.stop) { sleep(0.02); }
+    while (!custom.operator_state.stop) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
   }
 #else
-  while (!custom.operator_state.stop) { sleep(0.02); }
+  while (!custom.operator_state.stop) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
 #endif
   
   std::cout << "[DEBUG] Stopping G1Deploy..." << std::endl;
