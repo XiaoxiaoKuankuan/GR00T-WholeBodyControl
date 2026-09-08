@@ -3036,3 +3036,10 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   schema、adaptive sampling 和 quarantine 已进入真实训练路径；iteration 227 仍只是
   100k 的极早期，不代表收敛、最终动作质量、sim2sim 或真机安全。按用户要求不等待训练
   结束，新 tmux、八个 worker、run、日志和 TensorBoard 均保留继续运行。
+- 12:03:35 八个 rank 首次在正式训练中同时轮换并重新加载各自的 1024 motions，实际覆盖
+  了 `prepare_adaptive_sampling_external_reset()` 路径。TensorBoard step `249--252` 的动作
+  评估增量依次约为 `4571.5/4005.625/4600.875/4559.5`，没有因 `reset_all()` 凭空增加
+  一整批 4096 个成功或失败；成功累计持续平滑上升，每步
+  `evaluations-failures-successes` 的绝对值不超过浮点日志舍入误差 `0.17`。最终复核到
+  iteration `264` 时八个 worker 仍在，GPU 显存约 `16.0--16.5 GiB`，全部严重错误计数仍为
+  0；这进一步确认主动换批只中断旧 episode，不污染自适应采样结果。
