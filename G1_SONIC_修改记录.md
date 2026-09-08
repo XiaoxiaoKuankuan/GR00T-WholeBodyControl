@@ -235,3 +235,12 @@
 - 代码回滚应只撤销转换工具、`--encoder-mode` 参数、启动脚本透传和文档修改；本地数据
   位于独立忽略目录，可保留审计。不得使用 `git reset --hard`，也不得删除用户的
   `g1.tar.gz`、远端原始数据或训练产物。
+
+### 7. Git 提交与 noetix-12 同步
+
+- 功能提交为 `a60adeddbcf9dc2067f2d2a0ee811c76af849515`，已推送到 GitHub 的
+  `feature/g1-native-sonic-training`；提交只包含上述五个代码、脚本与文档文件，没有
+  暂存 `g1.tar.gz` 或 `data/` 下的原始/生成数据。
+- 拉取前再次确认 noetix-12 位于同名分支、HEAD 为 `edc80bb06ad2` 且工作区干净；随后
+  使用 `git pull --ff-only origin feature/g1-native-sonic-training` 快进到 `a60aded`，
+  拉取后工作区仍干净。该同步只更新服务器代码 checkout，没有启动或重启训练与部署进程。
