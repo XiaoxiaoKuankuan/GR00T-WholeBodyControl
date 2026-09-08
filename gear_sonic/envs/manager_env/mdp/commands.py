@@ -346,6 +346,12 @@ class TrackingCommand(CommandTerm):
         self.motion_num_steps = self.motion_lib.get_motion_num_steps(self.motion_ids)
 
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # 第一次环境 reset 以及训练器主动换 motion batch 都不是一条真实 episode 的
+        # 成功或失败。该掩码由外部 reset 显式置位，并在 _resample_command 中消费；
+        # 普通环境 termination/timeout 不置位，因此仍会在旧 motion ID 被覆盖前结算。
+        self._adaptive_sampling_external_reset_pending = torch.ones(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
 
         # Object position randomization offset (per-env, resampled at reset)
         self._object_position_offset = torch.zeros(self.num_envs, 3, device=self.device)
@@ -2870,7 +2876,106 @@ class TrackingCommand(CommandTerm):
 
         return sampled_times
 
-    def _resample_command(self, env_ids: Sequence[int]):
+    def prepare_adaptive_sampling_external_reset(
+        self, env_ids: Sequence[int] | None = None
+    ) -> None:
+        """标记训练器主动 reset，使被中断的 episode 不进入自适应成败统计。
+
+        训练初始化、评估切换和 motion batch 轮换都会在没有真实 termination 的情况下
+        调用 ``env.reset()``。这些中断既不能算失败，也不能冒充 timeout 成功；包装器必须
+        在外部 reset 前调用本方法。环境步进内部的 termination/timeout reset 不经过这里，
+        会由 :meth:`_record_adaptive_sampling_before_resample` 正常结算。
+        """
+        if not self.use_adaptive_sampling:
+            return
+        if env_ids is None:
+            self._adaptive_sampling_external_reset_pending[:] = True
+            return
+        env_ids_tensor = torch.as_tensor(env_ids, dtype=torch.long, device=self.device).flatten()
+        self._adaptive_sampling_external_reset_pending[env_ids_tensor] = True
+
+    def _record_adaptive_sampling_before_resample(
+        self,
+        env_ids: Sequence[int],
+        *,
+        natural_completion: bool,
+    ) -> None:
+        """在覆盖旧 motion ID/时间游标前结算真实执行帧和 episode 结果。
+
+        Isaac Lab 会先 reset 命令、后调用 ``_update_command``；因此不能在后者中把
+        ``reset_terminated`` 与已经换新的 ``self.motion_ids`` 直接组合。本方法位于
+        重采样写入之前：环境 reset 路径使用旧 ID 记录最后一帧及 termination/timeout，
+        参考片段自然结束路径只记录一次成功，外部主动 reset 则明确丢弃未完成 episode。
+        """
+        if not self.use_adaptive_sampling or len(env_ids) == 0:
+            return
+
+        env_ids_tensor = torch.as_tensor(env_ids, dtype=torch.long, device=self.device).flatten()
+        external_reset = self._adaptive_sampling_external_reset_pending[env_ids_tensor]
+        reset_buf = getattr(self._env, "reset_buf", None)
+        if reset_buf is None:
+            env_reset = torch.zeros_like(external_reset)
+        else:
+            env_reset = reset_buf[env_ids_tensor].to(dtype=torch.bool)
+
+        if natural_completion:
+            # 刚被环境 reset 的新动作可能从片段末尾附近开始，但它尚未执行物理步，
+            # 不能在同一 command update 中被误记成自然完成。
+            outcome_mask = ~external_reset & ~env_reset
+            outcome_env_ids = env_ids_tensor[outcome_mask]
+            if len(outcome_env_ids) > 0:
+                success = torch.ones(len(outcome_env_ids), dtype=torch.bool, device=self.device)
+                failure = torch.zeros_like(success)
+                self.motion_lib.record_adaptive_sampling_outcomes(
+                    failure=failure,
+                    success=success,
+                    motion_ids=self.motion_ids[outcome_env_ids].clone(),
+                )
+        else:
+            outcome_mask = ~external_reset & env_reset
+            outcome_env_ids = env_ids_tensor[outcome_mask]
+            if len(outcome_env_ids) > 0:
+                failure = self._env.reset_terminated[outcome_env_ids].to(dtype=torch.bool).clone()
+                timed_out = self._env.reset_time_outs[outcome_env_ids].to(dtype=torch.bool).clone()
+                success = timed_out & ~failure
+                if (~(failure | success)).any():
+                    raise RuntimeError(
+                        "环境 reset 缺少 termination/timeout 原因，禁止写入不确定的自适应结果"
+                    )
+
+                old_motion_ids = self.motion_ids[outcome_env_ids].clone()
+                old_time_steps = (
+                    self.motion_start_time_steps[outcome_env_ids]
+                    + self.time_steps[outcome_env_ids]
+                ).clone()
+                motion_num_frames = self.motion_lib.get_time_step_total(old_motion_ids)
+                if ((old_time_steps < 0) | (old_time_steps >= motion_num_frames)).any():
+                    raise RuntimeError(
+                        "环境 reset 时旧参考帧索引越界，禁止污染自适应采样分箱统计"
+                    )
+
+                # reset 发生在 command compute 之前；这里补记刚刚真实执行、尚未在
+                # _update_command 中统计的最后一帧，并把失败归因到同一个旧动作。
+                self.motion_lib.update_adaptive_sampling(
+                    failure=failure,
+                    motion_ids=old_motion_ids,
+                    motion_time_steps=old_time_steps,
+                )
+                self.motion_lib.record_adaptive_sampling_outcomes(
+                    failure=failure,
+                    success=success,
+                    motion_ids=old_motion_ids,
+                )
+
+        # 不论这次重采样属于哪种来源，外部 reset 标记都只消费一次。
+        self._adaptive_sampling_external_reset_pending[env_ids_tensor] = False
+
+    def _resample_command(
+        self,
+        env_ids: Sequence[int],
+        *,
+        adaptive_sampling_natural_completion: bool = False,
+    ):
         """Resample motion clips, reset robot state, and position objects for given envs.
 
         This is the main episode-reset handler. It performs the following in order:
@@ -2886,7 +2991,13 @@ class TrackingCommand(CommandTerm):
 
         Args:
             env_ids: Environment indices being reset.
+            adaptive_sampling_natural_completion: 是否由参考片段自然播放到末帧触发；
+                仅供 ``_update_command`` 内部调用，Isaac Lab 的环境 reset 保持默认值。
         """
+        self._record_adaptive_sampling_before_resample(
+            env_ids,
+            natural_completion=adaptive_sampling_natural_completion,
+        )
         self.time_steps[env_ids] = 0
         # Variable frames: resample per-env num_frames at episode reset
         if self.variable_frames_enabled and len(env_ids) > 0:
@@ -3259,16 +3370,31 @@ class TrackingCommand(CommandTerm):
         """
         if self.use_adaptive_sampling:
             with common.Timer("update_adaptive_sampling"):
-                cur_time_steps = self.motion_start_time_steps + self.time_steps
-                self.motion_lib.update_adaptive_sampling(
-                    self._env.reset_terminated, self.motion_ids, cur_time_steps
-                )
+                # 环境 reset 已在 _resample_command 中使用旧 motion ID 结算；这里仅
+                # 统计本步没有 reset、因而 self.motion_ids 仍对应真实执行动作的环境。
+                reset_buf = getattr(self._env, "reset_buf", None)
+                if reset_buf is None:
+                    active_env_ids = torch.arange(self.num_envs, device=self.device)
+                else:
+                    active_env_ids = torch.where(~reset_buf.to(dtype=torch.bool))[0]
+                if len(active_env_ids) > 0:
+                    cur_time_steps = (
+                        self.motion_start_time_steps[active_env_ids]
+                        + self.time_steps[active_env_ids]
+                    )
+                    self.motion_lib.update_adaptive_sampling(
+                        failure=torch.zeros(
+                            len(active_env_ids), dtype=torch.bool, device=self.device
+                        ),
+                        motion_ids=self.motion_ids[active_env_ids],
+                        motion_time_steps=cur_time_steps,
+                    )
         self.time_steps += 1
         env_ids = torch.where(
             self.time_steps + self.motion_start_time_steps
             >= self.motion_lib.get_time_step_total(self.motion_ids)
         )[0]
-        self._resample_command(env_ids)
+        self._resample_command(env_ids, adaptive_sampling_natural_completion=True)
 
         # Exponential moving average update for running_ref_root_height.
         # ZL this should be moved to the recorders???

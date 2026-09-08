@@ -23,6 +23,11 @@ from gear_sonic.trl.utils import common
 from gear_sonic.utils.motion_lib import skeleton
 
 
+# 版本 2 表示动作结果在旧 motion ID 被覆盖前结算，并且 timeout 显式计为成功。
+# 旧 checkpoint 的分箱失败与 quarantine 统计可能来自 reset 后的新动作身份，禁止恢复。
+ADAPTIVE_SAMPLING_STATE_VERSION = 2
+
+
 class FixHeightMode(enum.Enum):
     no_fix = 0
     full_fix = 1
@@ -2788,7 +2793,9 @@ class MotionLibBase:
         )
         # 原有分箱统计是“帧曝光量 / 分箱长度”，用于困难时刻采样；它不是
         # 动作级的 episode 计数，长动作会因分箱数量而被稀释。quarantine 因此单独
-        # 统计“自然跑完或提前失败”的动作结果，确保失败率始终位于 [0, 1]。
+        # 统计“自然跑完、timeout 或提前失败”的动作结果，确保失败率始终位于 [0, 1]。
+        # 帧级统计与动作级结果必须通过不同接口写入，避免环境 reset 后的新 motion ID
+        # 错误继承上一条 episode 的 termination 结果。
         self.adp_samp_motion_num_evaluations = torch.zeros(
             self._num_unique_motions, device=self._device, dtype=torch.float32
         )
@@ -2828,6 +2835,7 @@ class MotionLibBase:
         if self.use_adaptive_sampling:
             state_dict.update(
                 {
+                    "adaptive_sampling_state_version": ADAPTIVE_SAMPLING_STATE_VERSION,
                     "adp_samp_num_episodes": self.adp_samp_num_episodes,
                     "adp_samp_num_failures": self.adp_samp_num_failures,
                     "adp_samp_dynamics_gate_failed": self.adp_samp_dynamics_gate_failed,
@@ -2847,14 +2855,22 @@ class MotionLibBase:
     def load_state_dict(self, state_dict):
         """从 checkpoint 恢复与当前数据集形状一致的自适应采样状态。
 
-        旧 checkpoint 只含分箱成功/失败统计时仍可恢复，新增的动力学和 quarantine
-        张量保持初始化值；数据集分箱数量变化时沿用历史行为并跳过恢复，避免把统计
-        套到错误动作上。
+        只有使用当前结算语义且分箱形状一致的状态才允许恢复。缺少版本号的旧
+        checkpoint 可能把上一条 episode 的失败记到 reset 后的新动作，因此其分箱、
+        动作失败率和 quarantine 状态全部跳过，网络权重仍可由训练器独立加载。
 
         Args:
             state_dict: ``get_state_dict()`` 生成的字典。
         """
         if self.use_adaptive_sampling and "adp_samp_num_episodes" in state_dict:
+            state_version = state_dict.get("adaptive_sampling_state_version", 0)
+            if isinstance(state_version, torch.Tensor):
+                state_version = int(state_version.item())
+            if int(state_version) != ADAPTIVE_SAMPLING_STATE_VERSION:
+                print(  # noqa: T201
+                    "checkpoint 的自适应采样状态使用旧结算语义，已跳过全部恢复并从零统计。"
+                )
+                return
             if len(self.adp_samp_num_failures) != len(state_dict["adp_samp_num_failures"]):
                 print("自适应采样分箱状态与当前数据集不匹配，已跳过恢复。")  # noqa: T201
                 return
@@ -2884,19 +2900,18 @@ class MotionLibBase:
         return
 
     def update_adaptive_sampling(self, failure, motion_ids, motion_time_steps):
-        """依据当前仿真步更新分箱曝光/失败统计和动作级结果。
+        """依据刚刚真实执行的参考帧更新分箱曝光与失败统计。
 
         所有环境的当前帧都增加对应分箱的长度归一化曝光量，提前终止还会
-        增加分箱失败权重；这两项继续服务于困难时刻采样。quarantine 使用另一组
-        动作级计数：提前失败或自然跑到末帧才形成一次评估，避免失败率受
-        分箱数量和动作长度影响。重复 ID 通过 ``bincount`` 批量累加。
+        增加分箱失败权重；这两项只服务于困难时刻采样。动作级 episode 结果必须
+        另行调用 :meth:`record_adaptive_sampling_outcomes`，从而强制调用方在旧动作
+        被重采样覆盖前明确提交成功或失败。重复 ID 通过 ``bincount`` 批量累加。
 
         Args:
             failure: 形状 ``(N,)`` 的布尔张量，表示哪些环境因失败（非 timeout）
                 被提前终止。
             motion_ids: 形状 ``(N,)`` 的当前加载批内动作索引。
-            motion_time_steps: 形状 ``(N,)`` 的当前参考帧索引，用于定位全局
-                分箱并判断是否自然到达末帧。
+            motion_time_steps: 形状 ``(N,)`` 的当前参考帧索引，仅用于定位全局分箱。
         """
         # Convert motion_ids to dataset motion ids if needed
         dataset_motion_ids = self.get_motion_ids_in_dataset(motion_ids)
@@ -2923,13 +2938,33 @@ class MotionLibBase:
                 )
                 self.adp_samp_num_failures += failure_counts * failure_counts_multiplier
 
-        # quarantine 的分母必须是真实动作结果次数，不能复用上方为分箱
-        # 采样设计的帧曝光量。自然到达动作末帧视为通过；在任意时刻被环境
-        # 提前终止视为失败。两者合并为一次动作级评估。
-        motion_num_frames = self.adp_samp_num_frames[dataset_motion_ids]
-        completed = motion_time_steps + 1 >= motion_num_frames
-        evaluated = failure | completed
+    def record_adaptive_sampling_outcomes(self, failure, success, motion_ids):
+        """记录已经结束的动作 episode，并维护 quarantine 的独立成功/失败证据。
+
+        本接口不接收时间游标，也不更新分箱曝光。调用方必须在重采样覆盖旧
+        ``motion_ids`` 前传入旧 episode 的身份，并显式区分提前失败与成功结束。
+        成功包括环境 timeout 和参考片段自然播放完成；人工换批或外部 reset 不应
+        调用本接口。这样动作级失败率不会被 reset 后的新动作和清零后的时间游标污染。
+
+        Args:
+            failure: 形状 ``(N,)`` 的布尔张量，表示因非 timeout termination 提前结束。
+            success: 形状 ``(N,)`` 的布尔张量，表示因 timeout 或自然播放完成而结束。
+            motion_ids: 形状 ``(N,)`` 的旧加载批内动作索引，必须属于刚结束的 episode。
+        """
+        if not (len(failure) == len(success) == len(motion_ids)):
+            raise ValueError(
+                "动作结果张量长度必须一致："
+                f"failure={len(failure)}, success={len(success)}, motion_ids={len(motion_ids)}"
+            )
+
+        failure = failure.to(device=self._device, dtype=torch.bool)
+        success = success.to(device=self._device, dtype=torch.bool)
+        if (failure & success).any():
+            raise ValueError("同一动作 episode 不能同时记录为失败和成功")
+
+        evaluated = failure | success
         if evaluated.any():
+            dataset_motion_ids = self.get_motion_ids_in_dataset(motion_ids)
             evaluation_counts = torch.bincount(
                 dataset_motion_ids[evaluated], minlength=self._num_unique_motions
             )

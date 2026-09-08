@@ -380,6 +380,13 @@ class ManagerEnvWrapper:
         return new_obs
 
     def reset(self, flatten_dict_obs=True):
+        # 包装器主动 reset 用于初始化、评估切换和 motion batch 轮换，不代表策略
+        # 成功或失败。必须在 env.reset() 覆盖旧 motion ID 前通知 TrackingCommand，
+        # 防止这类人工中断被错误写入 adaptive sampling/quarantine 证据。
+        if self.motion_command is not None and hasattr(
+            self.motion_command, "prepare_adaptive_sampling_external_reset"
+        ):
+            self.motion_command.prepare_adaptive_sampling_external_reset()
         obs, info = self.env.reset()
         new_obs = self.process_raw_obs(obs, flatten_dict_obs)
         # Initialize success_lift to False for all envs after reset (used unconditionally in step())
@@ -976,13 +983,24 @@ class ManagerEnvWrapper:
                     self._motion_lib.adp_samp_motion_quarantined.sum().float()
                 )
                 motion_evaluations = self._motion_lib.adp_samp_motion_num_evaluations
+                motion_failures = self._motion_lib.adp_samp_motion_num_failures
                 evaluated_mask = motion_evaluations > 0
                 extras["to_log"]["adp_samp/evaluated_motions"] = evaluated_mask.sum().float()
+                total_evaluations = motion_evaluations.sum()
+                total_failures = motion_failures.sum()
+                total_successes = total_evaluations - total_failures
+                extras["to_log"]["adp_samp/motion_evaluations_total"] = total_evaluations
+                extras["to_log"]["adp_samp/motion_failures_total"] = total_failures
+                extras["to_log"]["adp_samp/motion_successes_total"] = total_successes
+                extras["to_log"]["adp_samp/motion_failure_fraction_global"] = (
+                    total_failures / total_evaluations.clamp_min(1.0)
+                )
                 if evaluated_mask.any():
-                    # 只在至少有一次自然跑完/提前失败的动作上统计，避免
-                    # 未评估动作的零值把平均失败率人为压低。
+                    # 直接从实时累计结果计算，避免只在 200-iteration 全 GPU 同步点
+                    # 更新的缓存失败率掩盖结算时序错误。逐动作均值与上方按 episode
+                    # 加权的全局失败比例同时记录，二者分别反映覆盖面和总体成败。
                     evaluated_failure_rates = (
-                        self._motion_lib.adp_samp_motion_failure_rate[evaluated_mask]
+                        motion_failures[evaluated_mask] / motion_evaluations[evaluated_mask]
                     )
                     extras["to_log"]["adp_samp/motion_failure_rate_mean"] = (
                         evaluated_failure_rates.mean()

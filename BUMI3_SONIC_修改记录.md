@@ -2932,3 +2932,55 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   和 checkpoint 链都已运行；iteration 112 仍是 100k 训练的极早期，不代表模型已收敛、
   达到 G1 动作效果、通过 sim2sim 或满足真机安全。本轮按用户要求不等待训练结束，tmux、
   launcher、8 个 worker、正式日志和 run 全部保留继续运行。
+
+### 9. 修复自适应采样跨 episode 错误归因并停止污染训练
+
+- 2026-09-08 对上述正式训练做相同步数日志审计时发现确定性矛盾：停止前最新窗口的
+  `time_out` 达到约 `0.8174`，表示绝大多数 episode 没有提前失败，但
+  `adp_samp/motion_failure_rate_mean` 仍为 `1.0000`。`model_step_020000.pt` 中动作级
+  `5,951,915` 次评估被记录为 `5,951,880` 次失败，仅 `35` 次成功；当时已有
+  `25,720/95,358` 条动作进入 quarantine，停止前实时日志进一步升至 `26,222` 条。
+  该数量不能解释为 BUMI 数据质量结论。
+- 源码和 Isaac Lab 实际步进顺序确认根因：`ManagerBasedRLEnv.step()` 先计算上一条
+  episode 的 `reset_terminated/reset_time_outs`，再执行 `_reset_idx()`；命令 reset 会在
+  `TrackingCommand._resample_command()` 中覆盖 `motion_ids` 并清零 `time_steps`，随后才
+  调用 `_update_command()`。旧实现此时把上一条 episode 的 termination 与新动作 ID、
+  新动作时间游标传给 `update_adaptive_sampling()`，因而同时污染分箱失败位置、动作级
+  失败率和 quarantine，不是单纯日志命名错误。
+- 用户授权停止当前训练后，于 2026-09-08 11:32:29 CST 只向精确 tmux
+  `sonic_bumi3_native_fullfix_v1_8gpu` 发送一次 `Ctrl-C`；launcher `2531165` 和八个
+  worker `2531304--2531311` 在 6 秒内全部退出，GPU 没有残留 compute process。旧训练
+  最终记录到 iteration `21305`，`last.pt` 于 11:32:12 完整落盘；旧 run、固定 checkpoint、
+  `last.pt` 与正式日志均保留，严重错误关键字仍全部为 0，但其 adaptive/quarantine 状态
+  已知受污染，不得用于 full resume。
+- `commands.py` 将结算移动到重采样覆盖旧 ID/时间之前：普通 termination/timeout 使用
+  旧 `motion_ids` 和旧最终帧同时写入分箱统计与动作结果；没有 reset 的环境才在
+  `_update_command()` 更新本步曝光；参考片段自然结束显式记一次成功。新增外部 reset
+  标记，使训练初始化、评估切换和 motion batch 轮换的 `reset_all()` 只中断 episode，
+  不冒充成功或失败；同一步刚 reset、尚未执行物理步的新动作也不会被误记为自然完成。
+- `motion_lib_base.py` 把帧级 `update_adaptive_sampling()` 与动作级
+  `record_adaptive_sampling_outcomes()` 拆开。后者要求调用方显式提交互斥的 failure/success，
+  将非 timeout termination 记为失败，将 timeout 或自然完成记为成功；长度不一致或同一
+  episode 同时成功/失败会立即报错。checkpoint 新增
+  `adaptive_sampling_state_version=2`；缺少该版本的旧状态会完整跳过 adaptive 恢复，避免
+  修复代码后重新载入已经错位的分箱、失败率与 quarantine，网络权重仍可独立加载。
+- `manager_env_wrapper.py` 在所有主动 `env.reset()` 前声明外部中断；同时新增动作评估总数、
+  失败总数、成功总数和按 episode 加权的全局失败比例日志，并直接由实时累计张量计算逐
+  动作失败率，不再等待每 200 iteration 的同步缓存刷新。保留原有 adaptive sampling、
+  dynamics gate 与 quarantine 配置为启用状态，修复的是证据归属和可观测性，不是关闭功能。
+- 新增 `test_tracking_adaptive_sampling_timing.py`，其中文模块说明锁定旧结果先于 ID/时间
+  覆盖、post-reset 更新不得读取旧 termination、外部 reset 必须先声明中断等生产源码契约；
+  扩展 `test_motion_lib_adaptive_quarantine.py`，覆盖帧统计不得隐式生成动作结果、非末帧
+  timeout 成功、冲突结果拒绝以及旧 checkpoint 状态拒绝恢复。首次测试唯一失败是 AST
+  没有识别 `getattr(..., "reset_buf")` 的安全访问写法，修正测试后定向结果为
+  `15 passed`；包含 BUMI3、PPO、MotionLib、sim2sim 和数据工具的相关回归为
+  `74 passed, 4 warnings in 6.91s`，warning 均为既有 TRL/SciPy/转义弃用提示；新增的
+  重复 motion ID 用例还确认多个并行环境执行同一动作时，成功和失败按真实 episode 数
+  聚合，不会因 ``bincount`` 合并丢失成功证据。
+- 五个修改/新增 Python 文件通过 `py_compile`、`git diff --check` 与 Ruff 致命错误检查；
+  两个测试文件通过完整 Ruff check/format check。显式设置临时 BUMI worktree 为
+  `PYTHONPATH` 后，本地 `validate_bumi3_integration.py` 通过并确认 `21 DoF/22 bodies/50 Hz`、
+  actor `690`、critic `1227`、tokenizer `1262` 与 decoder `754 -> 21`。第一次未设
+  `PYTHONPATH` 时误从受保护的主工作区 G1 分支导入并失败，未修改该主工作区；正确重跑结果
+  才作为本轮验证证据。服务器提交同步、真实 Isaac reset/step 和新八卡从零训练证据将在
+  后续交付记录中追加，不能由本地单元测试替代。
