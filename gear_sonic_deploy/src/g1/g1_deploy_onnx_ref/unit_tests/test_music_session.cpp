@@ -127,3 +127,49 @@ TEST(MusicSession, InvalidSeqAndActivePrepareAreRejected) {
   EXPECT_FALSE(s.Request(bad)["ok"].get<bool>());
   EXPECT_TRUE(s.Read().fault);
 }
+
+TEST(MusicSession, ResidentRequiresManualEnableAndKeepsIdleDuringPreparation) {
+  MusicSession s("tcp://127.0.0.1:5560",false);
+  ASSERT_TRUE(s.Request(Req("status",9,""))["ok"]);
+  ASSERT_TRUE(s.Request(Req("resident",0),Packet(0,10))["ok"]);
+  EXPECT_FALSE(s.Read().control_enabled);
+  EXPECT_EQ(s.Read().global_frame,-1);
+  ASSERT_TRUE(s.Request(Req("enable",1))["ok"]);
+  s.MarkControl(true,-1);
+  auto prepare=Req("prepare",2); prepare["audio_frames"]=600;
+  ASSERT_TRUE(s.Request(prepare)["ok"]);
+  ASSERT_TRUE(Append(s,3,0,450)["ok"]);
+  EXPECT_EQ(s.Read().motion->timesteps,10);
+  EXPECT_TRUE(s.Read().control_enabled);
+  auto start=Req("start",4); auto epoch=MusicSession::NowNs()+200000000;
+  start["epoch_ns"]=epoch; ASSERT_TRUE(s.Request(start)["ok"]);
+  EXPECT_EQ(s.Read().global_frame,-1);
+  EXPECT_EQ(s.Read(epoch+200000000).global_frame,10);
+  auto playing=s.Read(epoch+220000000).motion;
+  ASSERT_TRUE(s.Request(Req("stand",5),Packet(0,10))["ok"]);
+  EXPECT_EQ(s.Read(epoch+240000000).motion,playing);
+  EXPECT_EQ(s.Read(epoch+240000000).global_frame,12);
+}
+
+TEST(MusicSession, ResidentPreparationCanCancelAndReuseSameHeadingIdentity) {
+  MusicSession s("tcp://127.0.0.1:5560",false);
+  ASSERT_TRUE(s.Request(Req("resident",0),Packet(0,10))["ok"]);
+  ASSERT_TRUE(s.Request(Req("enable",1))["ok"]);
+  s.MarkControl(true,-1);
+  auto prepare=Req("prepare",2); prepare["audio_frames"]=100;
+  ASSERT_TRUE(s.Request(prepare)["ok"]);
+  ASSERT_TRUE(Append(s,3,0,260)["ok"]);
+  auto cancel=Req("stand",4); cancel["return_to_idle"]=true;
+  ASSERT_TRUE(s.Request(cancel,Packet(0,10))["ok"]);
+  auto status=s.Request(Req("status",5));
+  EXPECT_EQ(status["state"],"standing");
+  EXPECT_EQ(status["received_frame"],-1);
+  EXPECT_TRUE(status["control_ready"].get<bool>());
+  prepare["seq"]=6;
+  ASSERT_TRUE(s.Request(prepare)["ok"]);
+  EXPECT_EQ(s.Read().session_id,"test");
+  EXPECT_TRUE(s.Read().control_enabled);
+  EXPECT_TRUE(s.Read(MusicSession::NowNs()+2000000000LL).fault);
+  prepare["seq"]=7;
+  EXPECT_FALSE(s.Request(prepare)["ok"].get<bool>());
+}

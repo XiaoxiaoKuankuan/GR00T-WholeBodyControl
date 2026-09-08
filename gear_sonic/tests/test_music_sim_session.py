@@ -28,7 +28,7 @@ def session():
 def fake_env():
     env = SimpleNamespace(
         mj_data=SimpleNamespace(time=0.0, qpos=np.array([0.0, 0.0, 0.8, 1.0, 0.0, 0.0, 0.0]), qvel=np.zeros(6)),
-        elastic_band=SimpleNamespace(enable=True),
+        elastic_band=SimpleNamespace(enable=True, point=np.array([0, 0, 1])),
     )
     env.reset = lambda: None
     return env
@@ -67,3 +67,37 @@ def test_fall_and_new_session_do_not_reuse_epoch(session):
     assert session.reset_pending
     with pytest.raises(ValueError):
         session.request(dict(op="start", session_id="a", seq=1, epoch_ns=1))
+
+
+def test_resident_keys_and_tracks_preserve_robot_state(session):
+    env = fake_env()
+    resets = []
+    env.reset = lambda: resets.append(True)
+    session.request(dict(op="status", session_id="", seq=9))
+    session.request(dict(op="resident", session_id="resident", seq=0))
+    assert session.before_step(env) and env.elastic_band.enable
+    assert env.elastic_band.point[2] == pytest.approx(0.999)
+    assert session.keyboard("]")
+    session.before_step(env)
+    assert session.enable_requests == 1 and env.elastic_band.enable
+    session.request(dict(op="prepare", session_id="resident", seq=1))
+    assert not session.reset_pending
+    assert session.keyboard("9")
+    session.before_step(env)
+    assert not env.elastic_band.enable
+    with patch("time.monotonic_ns", return_value=1_000_000_000):
+        session.request(dict(op="start", session_id="resident", seq=2, epoch_ns=1_200_000_000))
+    with patch("time.monotonic_ns", return_value=1_200_000_000):
+        session.before_step(env)
+        assert not env.elastic_band.enable
+        env.mj_data.time = 0.005
+        session.after_step(env)
+    assert session.keyboard("p")
+    session.request(dict(op="finish", session_id="resident", seq=3))
+    session.before_step(env)
+    assert session.stop_requests == 1
+    assert session.state == "standing" and session.sim_origin is None
+    session.request(dict(op="prepare", session_id="resident", seq=4))
+    session.before_step(env)
+    assert not resets and env.mj_data.time == 0.005
+    assert not env.elastic_band.enable

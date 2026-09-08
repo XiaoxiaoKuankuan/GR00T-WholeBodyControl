@@ -198,7 +198,7 @@ class DefaultEnv:
                 self.viewer = mujoco.viewer.launch_passive(
                     self.mj_model,
                     self.mj_data,
-                    key_callback=self.elastic_band.MujuocoKeyCallback,
+                    key_callback=self.handle_viewer_key,
                     show_left_ui=False,
                     show_right_ui=False,
                 )
@@ -454,6 +454,13 @@ class DefaultEnv:
 
     def update_viewer(self):
         if self.viewer is not None:
+            session = getattr(self, "music_session", None)
+            if session and session.resident and self.viewer.cam.type == mujoco.mjtCamera.mjCAMERA_FIXED:
+                # MuJoCo 原生 ] 还会切换到机载相机；常驻起控后恢复全身跟踪画面。
+                with self.viewer.lock():
+                    self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                    self.viewer.cam.trackbodyid = self.mj_model.body("pelvis").id
+                    self.viewer.cam.fixedcamid = -1
             self.viewer.sync()
 
     def update_viewer_camera(self):
@@ -494,7 +501,18 @@ class DefaultEnv:
 
         return render_caches
 
+    def handle_viewer_key(self, key):
+        """音乐常驻按键通过会话队列处理，其余吊绳按键继续使用原有行为。"""
+        session = getattr(self, "music_session", None)
+        if session and 0 <= key < 128 and session.keyboard(chr(key).lower()):
+            return
+        if self.elastic_band:
+            self.elastic_band.MujuocoKeyCallback(key)
+
     def handle_keyboard_button(self, key):
+        session = getattr(self, "music_session", None)
+        if session and session.keyboard(key.lower()):
+            return
         if self.elastic_band:
             self.elastic_band.handle_keyboard_button(key)
 
@@ -584,6 +602,7 @@ class BaseSimulator:
             self.music_session = MusicSimSession(
                 self.config["MUSIC_ENDPOINT"], self.config.get("MUSIC_LOG_PATH", "")
             )
+            self.sim_env.music_session = self.music_session
 
     def start_as_thread(self):
         self.sim_thread = Thread(target=self.start)

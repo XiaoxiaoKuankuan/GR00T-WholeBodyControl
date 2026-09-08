@@ -11,6 +11,8 @@
  * 对应音乐第一个采样。缓冲容量为 15 秒，保留已消费的十帧历史；播放过程不会因为
  * 新包到达而重置帧号或朝向。欠载、心跳丢失及非法有效会话数据会锁存故障，交给
  * 协调器同时停止音频和 MuJoCo，只有新的 prepare 才能开始下一次会话。
+ * 常驻模式通过 resident/stand/enable 管理独立站姿参考和人工起控；每首音乐只清理
+ * 自己的时间线，保留控制状态与初始朝向。站姿包持续刷新且不进入无限增长的帧队列。
  */
 #pragma once
 
@@ -42,6 +44,7 @@ class MusicSession {
     int64_t global_frame = 0;
     bool play = false, fault = false;
     std::string session_id;
+    bool control_enabled = true;
   };
   static int64_t NowNs() {
     timespec ts{};
@@ -86,22 +89,50 @@ class MusicSession {
           return found->second.second;
         }
       }
-      if (op == "prepare") {
-        if (sid.empty() || sid == session_id_) throw std::runtime_error("prepare 必须使用新的 session_id");
+      if (op == "resident") {
+        if (sid.empty() || !session_id_.empty()) throw std::runtime_error("常驻初始化需要空闲的新控制器");
+        auto incoming = DecodeStanding(binary);
+        session_id_=sid; resident_=true; control_enabled_=false;
+        // 服务探测使用匿名序号；新会话必须清除探测缓存，不能把它当作业务请求历史。
+        replies_.clear(); reply_order_.clear(); last_seq_=-1;
+        idle_motion_=MakeSnapshot(incoming); state_="standing"; error_.clear();
+        ++idle_updates_;
+      } else if (op == "prepare") {
+        const bool continuing = resident_ && sid == session_id_;
+        if (sid.empty() || (sid == session_id_ && !continuing)) throw std::runtime_error("prepare 必须使用新的 session_id");
+        if (resident_ && (!continuing || (state_ != "standing" && state_ != "finished")))
+          throw std::runtime_error("常驻音乐只能从站姿开始，故障不得通过换歌清除");
+        if (continuing && seq <= last_seq_) throw std::runtime_error("seq 已过期或顺序错误");
         if (state_ == "playing" || state_ == "armed" || state_ == "prepared") throw std::runtime_error("现有会话仍在活动");
         const int64_t audio_frames = request.at("audio_frames").get<int64_t>();
         const int64_t prefix = request.value("audio_start_frame", int64_t(100));
         if (audio_frames < 1 || audio_frames > 3600000 || prefix < 50 || prefix > 250)
           throw std::runtime_error("音频帧数或起舞前缀越界");
         session_id_ = sid; audio_frames_ = audio_frames; prefix_ = prefix;
-        frames_.clear(); motion_.reset(); replies_.clear(); reply_order_.clear();
-        base_ = 0; received_ = -1; consumed_ = used_frame_ = 0; epoch_ns_ = control_ns_ = 0; complete_ = false;
-        state_ = "prepared"; error_.clear(); last_seq_ = -1; control_ready_ = false;
+        frames_.clear(); motion_.reset();
+        if (!continuing) { replies_.clear(); reply_order_.clear(); last_seq_=-1; control_ready_=false; control_ns_=0; }
+        base_ = 0; received_ = -1; consumed_ = 0; used_frame_ = resident_ ? -1 : 0; epoch_ns_ = 0; complete_ = false;
+        state_ = "prepared"; error_.clear();
         ticks_.clear(); audit_=Json::object();
       } else if (op != "status" || !sid.empty()) {
         if (sid.empty() || sid != session_id_) throw std::runtime_error("session_id 不匹配");
         if (seq <= last_seq_) throw std::runtime_error("seq 已过期或顺序错误");
-        if (op == "append") {
+        if (op == "stand") {
+          if (!resident_ || state_ == "fault" || state_ == "stopped") throw std::runtime_error("当前状态不能更新常驻站姿");
+          auto incoming=DecodeStanding(binary);
+          if (request.value("return_to_idle",false)) {
+            const bool before_music = state_ == "armed" && NowNs() < epoch_ns_;
+            if (state_ != "finished" && state_ != "prepared" && state_ != "standing" && !before_music)
+              throw std::runtime_error("必须先完成表演收尾再恢复常驻站姿");
+            state_="standing"; epoch_ns_=0; received_=-1; consumed_=base_=0;
+            frames_.clear(); motion_.reset(); complete_=false; ticks_.clear();
+          }
+          idle_motion_=MakeSnapshot(incoming); ++idle_updates_;
+        } else if (op == "enable") {
+          if (!resident_ || state_ == "fault" || state_ == "stopped" || !idle_motion_)
+            throw std::runtime_error("尚未准备常驻站姿，不能进入 SONIC 控制");
+          control_enabled_=true;
+        } else if (op == "append") {
           if (complete_ || state_ == "fault" || state_ == "stopped") throw std::runtime_error("当前会话不可追加");
           auto incoming = Decode(binary);
           if (request.at("start_frame").get<int64_t>() != received_ + 1 ||
@@ -183,7 +214,9 @@ class MusicSession {
   View Read(int64_t now = NowNs()) {
     std::lock_guard<std::mutex> lock(mutex_);
     bool active = state_ == "armed" || state_ == "playing";
-    if (active && now - heartbeat_ns_ > 1500000000LL) { state_ = "fault"; error_ = "协调器心跳超时"; }
+    if ((active || resident_) && now - heartbeat_ns_ > 1500000000LL) { state_ = "fault"; error_ = "协调器心跳超时"; }
+    if (resident_ && (state_ == "standing" || state_ == "prepared" || (state_ == "armed" && now < epoch_ns_)))
+      return View{idle_motion_,0,-1,true,false,session_id_,control_enabled_};
     bool play = active && now >= epoch_ns_ && state_ != "fault";
     int64_t frame = play ? (now - epoch_ns_) / 20000000LL : consumed_;
     if (play) {
@@ -195,13 +228,14 @@ class MusicSession {
     }
     if (state_ != "fault") consumed_ = frame;
     View result{motion_, int(std::max<int64_t>(0, consumed_ - base_)), consumed_, play,
-                state_ == "fault" || state_ == "stopped", session_id_};
+                state_ == "fault" || state_ == "stopped", session_id_,control_enabled_};
     return result;
   }
   void MarkControl(bool ready, int64_t used_frame, double compute_ms = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     control_ready_ = ready; used_frame_ = used_frame; control_ns_ = NowNs(); compute_ms_ = compute_ms;
-    ticks_.emplace_back(control_ns_,compute_ms);
+    // 常驻待机不积累历史耗时，完整周期统计仅覆盖本次音乐时间线。
+    if (state_ == "playing" || state_ == "armed") ticks_.emplace_back(control_ns_,compute_ms);
   }
   void MarkObservation(const std::vector<double>& observation, const std::array<double,4>& base,
                        const std::array<double,4>& heading, int64_t frame, bool play) {
@@ -218,6 +252,7 @@ class MusicSession {
                 {"received_frame", received_}, {"used_frame", used_frame_},
                 {"buffer_seconds", std::max<int64_t>(0, received_ - consumed_) / 50.0},
                 {"encoder_mode", 2}, {"control_ready", control_ready_},
+                {"resident",resident_},{"control_enabled",control_enabled_},{"idle_updates",idle_updates_},
                 {"control_ns", control_ns_}, {"compute_ms", compute_ms_},
                 {"epoch_ns", epoch_ns_}, {"monotonic_ns", NowNs()}};
   }
@@ -265,19 +300,27 @@ class MusicSession {
     }
     return result;
   }
-  void PublishSnapshot() {
+  std::vector<Frame> DecodeStanding(const std::string& data) {
+    auto incoming=Decode(data);
+    if (incoming.size()!=10) throw std::runtime_error("站姿包必须包含十帧未来参考");
+    for (int i=0;i<10;++i) if (decoded_indices_[i]!=i) throw std::runtime_error("站姿包帧号必须为 0 至 9");
+    return incoming;
+  }
+  template <typename Frames>
+  std::shared_ptr<const MotionSequence> MakeSnapshot(const Frames& frames) {
     auto out = std::make_shared<MotionSequence>();
-    out->name = "music"; out->ReserveCapacity(int(frames_.size()),29,1,1,24,21);
-    out->timesteps = int(frames_.size()); out->SetEncodeMode(2); out->SetBodyPartIndexes({0});
-    int i=0; for (const auto& frame : frames_) {
+    out->name = "music"; out->ReserveCapacity(int(frames.size()),29,1,1,24,21);
+    out->timesteps = int(frames.size()); out->SetEncodeMode(2); out->SetBodyPartIndexes({0});
+    int i=0; for (const auto& frame : frames) {
       std::copy(frame.joint_pos.begin(),frame.joint_pos.end(),out->JointPositions(i));
       std::copy(frame.joint_vel.begin(),frame.joint_vel.end(),out->JointVelocities(i));
       out->BodyQuaternions(i)[0]=frame.quat;
       std::copy(frame.joints.begin(),frame.joints.end(),out->SmplJoints(i));
       std::copy(frame.pose.begin(),frame.pose.end(),out->SmplPoses(i)); ++i;
     }
-    motion_ = out;
+    return out;
   }
+  void PublishSnapshot() { motion_=MakeSnapshot(frames_); }
   void Serve() {
     try {
       zmq::context_t context(1); zmq::socket_t socket(context,zmq::socket_type::rep);
@@ -310,9 +353,12 @@ class MusicSession {
   std::mutex mutex_, start_mutex_;
   std::condition_variable started_;
   bool server_ready_=false, complete_=false, control_ready_=false;
+  bool resident_=false, control_enabled_=true;
+  int64_t idle_updates_=0;
   std::string server_error_;
   std::atomic<bool> running_{true}; std::thread thread_;
   std::deque<Frame> frames_; std::shared_ptr<const MotionSequence> motion_;
+  std::shared_ptr<const MotionSequence> idle_motion_;
   std::vector<int64_t> decoded_indices_;
   int64_t base_=0, received_=-1, consumed_=0, used_frame_=0, audio_frames_=0, prefix_=100;
   int64_t epoch_ns_=0, heartbeat_ns_=0, control_ns_=0, last_seq_=-1;

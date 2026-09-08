@@ -8,7 +8,7 @@
 
 ```bash
 cd /home/weili/GENMO
-.venv/bin/python -B scripts/demo/demo_music_sonic.py --audio /path/song.wav --launch-local
+.venv/bin/python -B scripts/demo/demo_music_sonic.py --resident --launch-local
 ```
 
 如果需要手动保持三个进程，先在 SONIC 根目录启动仿真：
@@ -31,7 +31,11 @@ target/release/g1_deploy_onnx_ref lo \
   --logs-dir /absolute/new/sonic_logs
 ```
 
-最后运行 GENMO 入口并省略 `--launch-local`。PD 初始化、准备参考、朝向校准、弹力带释放和起舞全部由会话协调，不需要 Enter/T/R。默认自然结束后保持站立；播放中 Ctrl+C 经统一入口淡出和收尾。故障冻结仿真，重新创建会话，不自动重播、追帧或回退到其他编码器模式。
+最后运行 GENMO 常驻入口并省略 `--launch-local`。MuJoCo 初始保持吊绳，PD 初始化后在 **MuJoCo 窗口按 `]` 起控，再按 `9` 松绳**。GENMO 每 100 ms 持续发送十帧默认站姿，双臂默认外展 15°；SONIC 仍以 50 Hz 闭环跟踪。GENMO 终端输入 `play /path/song.wav` 播放，`stop` 或窗口 `P` 收尾后继续站立，`quit` 才退出。表演期间 Ctrl+C 停止本首，待机期间 Ctrl+C 退出。终端也接受 `]`、`9`。
+
+换歌仅清理本首音乐的参考缓冲及 epoch，保持 SONIC 控制、机器人位置、吊绳状态与唯一 heading 校准。准备下一首时仍读取独立站姿快照，预约时刻才切入音乐前缀；自然结束和主动停止都回到持续站姿发送。普通单首自动起控/松绳模式仍可使用 `--audio /path/song.wav --launch-local` 且不加 `--resident`。故障冻结仿真，不自动重播、追帧或回退编码器模式。
+
+常驻 `resident` 请求可带 `hang_height`，默认 0.82 m；仿真平滑降低吊绳锚点，按 `9` 仍完全解除拉力。此设置针对原 1 m 悬空长时间运行策略后偶发落地失稳，普通单首模式的锚点不变。窗口 `]` 起控后恢复跟踪 pelvis 的全身视角，防止 MuJoCo 内置相机切换快捷键遮住机器人。
 
 ## 本机请求协议
 
@@ -39,6 +43,9 @@ target/release/g1_deploy_onnx_ref lo \
 
 | 操作 | 控制器参数和语义 |
 |---|---|
+| `resident` | 在新控制器建立常驻会话，附件为十帧站姿；默认不进入策略控制 |
+| `stand` | 刷新独立站姿快照；播放中不改音乐时间线；`return_to_idle=true` 在收尾完成或准备取消后恢复待机 |
+| `enable` | 人工请求进入 SONIC；之后换歌保持此状态 |
 | `prepare` | 新 session_id、audio_frames、audio_start_frame=100；清除旧缓冲；活动会话不可覆盖 |
 | `append` | start_frame、end_frame 和动作附件；必须紧接已接收末帧 |
 | `start` | epoch_ns，未来 0.1～10 秒；需已预热且收到足够连续参考 |
@@ -48,6 +55,8 @@ target/release/g1_deploy_onnx_ref lo \
 | `stop` + graceful=true | start_frame 至少领先消费帧 10 帧，并附 60 帧收尾；仅显式用户停止可以替换未消费未来段 |
 
 MuJoCo 支持 `prepare/start/status/stop/finish`，不接受动作附件。两端保留最近 16 个请求的精确应答，客户端一次只允许一个未完成请求，超时重试使用相同编号和内容；更旧请求明确拒绝。缺帧、重叠、错误会话、错误类型、非有限数和非单位四元数均拒绝。C++ release 启用 fast-math，因此浮点有效性按 IEEE754 位模式检查。
+
+常驻模式的 `prepare` 使用同一 session_id 和继续递增的 seq，只能从站姿/已完成状态开始，不清除控制就绪状态或 heading。匿名服务探测的序号缓存在 `resident` 初始化时清除。MuJoCo 另支持 `resident` 和 `key`（`]`、`9`、`p`）；GLFW 回调投递同一事件队列，由仿真线程执行，状态中的 `enable_requests/stop_requests` 供 GENMO 转发。常驻 `prepare` 不 reset，`start` 不自动松绳，`finish` 回到站姿；站姿待机同样检测心跳和落地后的跌倒。
 
 | 字段 | 形状 | 类型/约定 |
 |---|---|---|

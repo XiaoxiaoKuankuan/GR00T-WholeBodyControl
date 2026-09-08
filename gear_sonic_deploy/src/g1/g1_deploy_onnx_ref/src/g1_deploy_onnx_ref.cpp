@@ -580,7 +580,8 @@ class G1Deploy {
         std::cout << "**********************************************************" << std::endl;
       }
 
-      if (current_frame_ == 0) {
+      // 音乐和常驻站姿只在首次起控校准，反复出现局部第零帧不能重写整场朝向基准。
+      if (current_frame_ == 0 && !music_session_) {
         const auto motion_body_quat_init = current_motion_->BodyQuaternions(0);
         init_ref_data_root_rot_array_ = motion_body_quat_init[0];
       }
@@ -3832,7 +3833,7 @@ class G1Deploy {
         if (view.fault || !view.motion) return;
         std::lock_guard<std::mutex> lock(current_motion_mutex_);
         current_motion_ = view.motion; current_frame_ = view.local_frame;
-        operator_state.play = view.play; operator_state.start = true;
+        operator_state.play = view.play; operator_state.start = view.control_enabled;
         music_global_frame_ = view.global_frame;
         if (music_session_id_ != view.session_id) {
           music_session_id_ = view.session_id; reinitialize_heading_ = true;
