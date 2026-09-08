@@ -2984,3 +2984,55 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `PYTHONPATH` 时误从受保护的主工作区 G1 分支导入并失败，未修改该主工作区；正确重跑结果
   才作为本轮验证证据。服务器提交同步、真实 Isaac reset/step 和新八卡从零训练证据将在
   后续交付记录中追加，不能由本地单元测试替代。
+
+### 10. 同步修复并从零重启八卡 adaptive/quarantine 正式训练
+
+- 功能、测试和第 9 节记录提交为 `1be4f928ded1ac956ea9f377ed9707b13da216ae`，已推送到
+  GitHub `feature/bumi-native-sonic-full-training`。`noetix-volc` 同名分支在没有训练进程、
+  8 张 GPU 均空闲且工作区干净时，通过 `git pull --ff-only` 从 `b8ec71c` 快进到该提交，
+  同步后仍干净；未执行 force push、rebase、reset、stash 或覆盖用户文件。
+- 服务器 `/root/miniconda3/envs/liwei_lab/bin/python` 复跑同一相关回归，结果为
+  `74 passed, 4 warnings in 10.29s`，`py_compile` 与 `git diff --check` 通过。服务器
+  `validate_bumi3_integration.py --device cuda:0` 退出码为 0，并再次确认 21 DoF、22 body、
+  50 Hz、Actor/Critic/tokenizer/decoder 契约；headless 节点仍打印既有 Vulkan
+  `ERROR_INCOMPATIBLE_DRIVER`，但没有阻止配置和资产运行时校验。
+- 新训练于 2026-09-08 11:49:18 CST 从提交 `1be4f92` 启动，tmux 为
+  `sonic_bumi3_native_adaptive_timing_v2_8gpu`，launcher PID `2934249`，八个直属 worker
+  PID `2934386--2934393`。正式 run 为
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/
+  sonic_bumi3_native_adaptive_timing_v2_scratch_100k-20260908_114918`，正式日志为
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_native_adaptive_timing_v2_8gpu_20260908_114918.log`。
+  命令使用端口 `29517`、8 个 accelerate rank、每 rank `4096` env、100000 iteration，
+  并显式设置 `resume=false`、`checkpoint=null`、`auto_load_latest=false`，没有继承旧模型、
+  optimizer 或受污染的 adaptive/quarantine 状态。
+- 新 run 自己落盘的 resolved `config.yaml` SHA256 为
+  `f15d54faf9d9175e0fa39134ef712adc2490ae6b59246291abe216ddff97fd94`；其中
+  `adaptive_sampling.enable=true`、`dynamics_gate.enable=true`、`quarantine.enable=true`，
+  uniform 比例 `0.1`、高失败阈值 `0.90`、最少评估 `5`、最少新增评估 `3`、连续确认
+  `3` 均已生效。训练继续使用三源 base-anchor-v2 Robot `95,358` 条动作和对应 SMPL 索引。
+- iteration 9 的实时日志首次闭合新守恒指标：动作评估约 `51,343.918`，失败
+  `51,083.375`、成功 `260.542`，三者仅有日志小数舍入误差；全局失败比例 `0.9949`
+  与随机策略早期 `time_out=0.0046` 的数量级一致。旧实现同阶段之后会逐渐形成“timeout
+  很高但动作失败率几乎 1”的矛盾，新实现已经能持续累积非零成功结果。
+- step 100 原子 `last.pt` 完整 `torch.load`：文件大小 `392,861,574` bytes，
+  `state.global_step=100`、`max_steps=100000`、`episode=3,276,800`；环境状态包含
+  `adaptive_sampling_state_version=2`。checkpoint 中动作评估 `635,846`，失败 `633,536`、
+  成功 `2,310`，严格满足 `evaluations=failures+successes`；已评估动作 `1,017`、门禁失败
+  `310`、quarantine `0`。四个 optimizer 参数组 LR 为 Actor 两组 `1.51875e-4`、Critic
+  两组 `3e-4`，独立学习率仍正确。
+- step 200 完成第一次真实跨 8 卡 adaptive 同步并保存 checkpoint：动作评估
+  `1,194,983.625`，失败 `1,189,855.875`、成功 `5,127.75`，全局失败比例 `0.995709`；
+  所有逐动作张量 finite 且满足 `failures <= evaluations`，quarantine 始终是 gate-failed
+  集合的子集。8 rank OR 合并后已评估动作 `7,833`、gate-failed `2,332`；这些动作的
+  连续高失败确认最大值恰为 `1`，未达到配置要求的 `3`，因此 quarantine 仍为 `0`，说明
+  第一次同步没有像旧实现一样立即错误隔离动作。
+- 最终本轮复核到 TensorBoard step `227`：新 run 有 `145` 类 scalar、`32,743` 个已采样
+  数据点，空 tag 和 NaN/Inf 都为 0。最新动作评估约 `1,329,145.375`，失败
+  `1,322,997.75`、成功 `6,147.708`；`time_out=0.01154`，全局失败比例约 `0.99542`，
+  二者随随机策略早期学习开始同步改善。8 个 worker 仍存活，8 张 GPU 显存约
+  `16.0--16.8 GiB`，正式日志中 Traceback、OOM、NCCL、RuntimeError 和 Hydra job error
+  均为 0，训练启动后内核日志没有 NVRM Xid。
+- 以上证据确认修复后的 reset/step、动作结果归属、timeout 成功、跨 GPU 同步、checkpoint
+  schema、adaptive sampling 和 quarantine 已进入真实训练路径；iteration 227 仍只是
+  100k 的极早期，不代表收敛、最终动作质量、sim2sim 或真机安全。按用户要求不等待训练
+  结束，新 tmux、八个 worker、run、日志和 TensorBoard 均保留继续运行。
