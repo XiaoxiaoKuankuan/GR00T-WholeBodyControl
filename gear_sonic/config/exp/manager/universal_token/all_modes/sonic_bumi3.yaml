@@ -235,6 +235,9 @@ manager_env:
             max_acceleration_ratio: 1.0
           quarantine:
             enable: true
+            # 随机初始化策略几乎对所有动作都失败；最近一次全 GPU 同步窗口的全局
+            # 动作成功率达到 20% 前只更新基线，不累计隔离证据，避免冷启动误隔离大集。
+            min_global_success_rate: 0.20
             high_failure_rate: 0.90
             min_motion_episodes: 5.0
             min_new_motion_episodes: 3.0

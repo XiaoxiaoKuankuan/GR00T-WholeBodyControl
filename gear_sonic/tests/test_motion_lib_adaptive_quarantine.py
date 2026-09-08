@@ -42,6 +42,11 @@ def _minimal_quarantine_lib() -> MotionLibBase:
     motion_lib.adp_samp_motion_quarantined = torch.zeros(2, dtype=torch.bool)
     motion_lib.adp_samp_quarantine_consecutive = torch.zeros(2, dtype=torch.long)
     motion_lib.adp_samp_quarantine_eval_episodes = torch.zeros(2)
+    motion_lib.adp_samp_quarantine_eval_failures = torch.zeros(2)
+    motion_lib.adp_samp_quarantine_global_eval_episodes = torch.tensor(0.0)
+    motion_lib.adp_samp_quarantine_global_eval_failures = torch.tensor(0.0)
+    motion_lib.adp_samp_quarantine_global_window_success_rate = torch.tensor(0.0)
+    motion_lib.adp_samp_quarantine_ready = torch.tensor(False)
     motion_lib.adp_samp_motion_num_evaluations = torch.zeros(2)
     motion_lib.adp_samp_motion_num_failures = torch.zeros(2)
     motion_lib.adp_samp_motion_failure_rate = torch.zeros(2)
@@ -49,6 +54,7 @@ def _minimal_quarantine_lib() -> MotionLibBase:
     motion_lib.use_adaptive_sampling = True
     motion_lib.use_adaptive_quarantine = True
     motion_lib.quarantine_cfg = {
+        "min_global_success_rate": 0.0,
         "high_failure_rate": 0.9,
         "min_motion_episodes": 5.0,
         "min_new_motion_episodes": 3.0,
@@ -108,9 +114,42 @@ def test_low_failure_evidence_resets_consecutive_counter() -> None:
     assert motion_lib.adp_samp_quarantine_consecutive[0].item() == 1
 
     motion_lib.adp_samp_motion_num_evaluations[:] = 9.0
-    motion_lib.adp_samp_motion_num_failures[:] = 4.5
+    motion_lib.adp_samp_motion_num_failures[:] = 6.0
     motion_lib._update_adaptive_sampling_quarantine()
     assert motion_lib.adp_samp_quarantine_consecutive[0].item() == 0
+
+
+def test_quarantine_waits_for_recent_global_maturity_and_discards_cold_start() -> None:
+    """冷启动失败不得触发隔离，也不得污染策略成熟后的逐动作窗口。"""
+
+    motion_lib = _minimal_quarantine_lib()
+    motion_lib.quarantine_cfg["min_global_success_rate"] = 0.2
+
+    # 第一同步窗口全部失败：只向前移动基线，不积累隔离证据。
+    motion_lib.adp_samp_motion_num_evaluations[:] = 60.0
+    motion_lib.adp_samp_motion_num_failures[:] = 60.0
+    motion_lib._update_adaptive_sampling_quarantine()
+    assert motion_lib.adp_samp_quarantine_ready.item() is False
+    assert motion_lib.adp_samp_quarantine_consecutive.tolist() == [0, 0]
+    assert motion_lib.adp_samp_quarantine_eval_episodes.tolist() == [60.0, 60.0]
+    assert motion_lib.adp_samp_quarantine_eval_failures.tolist() == [60.0, 60.0]
+
+    # 第二同步窗口已经成熟，而且动作 0 的新增窗口零失败。虽然它从训练开始的
+    # 累计失败率仍高于 90%，也不得继承冷启动失败来增加连续计数。
+    motion_lib.adp_samp_motion_num_evaluations += torch.tensor([3.0, 20.0])
+    motion_lib.adp_samp_motion_num_failures += torch.tensor([0.0, 0.0])
+    motion_lib._update_adaptive_sampling_quarantine()
+    assert motion_lib.adp_samp_quarantine_ready.item() is True
+    assert motion_lib.adp_samp_quarantine_consecutive.tolist() == [0, 0]
+    assert motion_lib.adp_samp_motion_failure_rate[0].item() > 0.9
+
+    # 只有成熟后的三个独立高失败增量窗口，才会隔离门禁失败的动作 0。
+    for expected_count in (1, 2, 3):
+        motion_lib.adp_samp_motion_num_evaluations += torch.tensor([3.0, 20.0])
+        motion_lib.adp_samp_motion_num_failures += torch.tensor([3.0, 0.0])
+        motion_lib._update_adaptive_sampling_quarantine()
+        assert motion_lib.adp_samp_quarantine_consecutive[0].item() == expected_count
+    assert motion_lib.adp_samp_motion_quarantined.tolist() == [True, False]
 
 
 def test_motion_outcomes_count_early_failure_and_natural_completion() -> None:

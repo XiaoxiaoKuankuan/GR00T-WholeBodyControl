@@ -982,6 +982,12 @@ class ManagerEnvWrapper:
                 extras["to_log"]["adp_samp/quarantined_motions"] = (
                     self._motion_lib.adp_samp_motion_quarantined.sum().float()
                 )
+                extras["to_log"]["adp_samp/quarantine_global_window_success_rate"] = (
+                    self._motion_lib.adp_samp_quarantine_global_window_success_rate
+                )
+                extras["to_log"]["adp_samp/quarantine_ready"] = (
+                    self._motion_lib.adp_samp_quarantine_ready.float()
+                )
                 motion_evaluations = self._motion_lib.adp_samp_motion_num_evaluations
                 motion_failures = self._motion_lib.adp_samp_motion_num_failures
                 evaluated_mask = motion_evaluations > 0

@@ -23,9 +23,9 @@ from gear_sonic.trl.utils import common
 from gear_sonic.utils.motion_lib import skeleton
 
 
-# 版本 2 表示动作结果在旧 motion ID 被覆盖前结算，并且 timeout 显式计为成功。
-# 旧 checkpoint 的分箱失败与 quarantine 统计可能来自 reset 后的新动作身份，禁止恢复。
-ADAPTIVE_SAMPLING_STATE_VERSION = 2
+# 版本 3 同时要求：旧 motion ID 覆盖前结算、timeout 显式计成功、quarantine 只使用
+# 策略成熟后的增量评估窗口。旧 checkpoint 的累计失败率可能受冷启动随机策略污染。
+ADAPTIVE_SAMPLING_STATE_VERSION = 3
 
 
 class FixHeightMode(enum.Enum):
@@ -2770,8 +2770,13 @@ class MotionLibBase:
             self.quarantine_cfg.get("min_new_motion_episodes", 3.0)
         )
         consecutive_evaluations = int(self.quarantine_cfg.get("consecutive_evaluations", 3))
+        min_global_success_rate = float(
+            self.quarantine_cfg.get("min_global_success_rate", 0.2)
+        )
         if not 0.0 <= high_failure_rate <= 1.0:
             raise ValueError("quarantine.high_failure_rate 必须位于 [0, 1]")
+        if not 0.0 <= min_global_success_rate <= 1.0:
+            raise ValueError("quarantine.min_global_success_rate 必须位于 [0, 1]")
         if min_motion_episodes < 0.0 or min_new_motion_episodes <= 0.0:
             raise ValueError("quarantine 的累计回合数必须非负，新增回合数必须严格大于零")
         if consecutive_evaluations <= 0:
@@ -2790,6 +2795,21 @@ class MotionLibBase:
         )
         self.adp_samp_quarantine_eval_episodes = torch.zeros(
             self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_quarantine_eval_failures = torch.zeros(
+            self._num_unique_motions, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_quarantine_global_eval_episodes = torch.tensor(
+            0.0, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_quarantine_global_eval_failures = torch.tensor(
+            0.0, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_quarantine_global_window_success_rate = torch.tensor(
+            0.0, device=self._device, dtype=torch.float32
+        )
+        self.adp_samp_quarantine_ready = torch.tensor(
+            False, device=self._device, dtype=torch.bool
         )
         # 原有分箱统计是“帧曝光量 / 分箱长度”，用于困难时刻采样；它不是
         # 动作级的 episode 计数，长动作会因分箱数量而被稀释。quarantine 因此单独
@@ -2844,6 +2864,15 @@ class MotionLibBase:
                     "adp_samp_quarantine_eval_episodes": (
                         self.adp_samp_quarantine_eval_episodes
                     ),
+                    "adp_samp_quarantine_eval_failures": (
+                        self.adp_samp_quarantine_eval_failures
+                    ),
+                    "adp_samp_quarantine_global_eval_episodes": (
+                        self.adp_samp_quarantine_global_eval_episodes
+                    ),
+                    "adp_samp_quarantine_global_eval_failures": (
+                        self.adp_samp_quarantine_global_eval_failures
+                    ),
                     "adp_samp_motion_num_evaluations": (
                         self.adp_samp_motion_num_evaluations
                     ),
@@ -2882,6 +2911,7 @@ class MotionLibBase:
                 "adp_samp_motion_quarantined",
                 "adp_samp_quarantine_consecutive",
                 "adp_samp_quarantine_eval_episodes",
+                "adp_samp_quarantine_eval_failures",
                 "adp_samp_motion_num_evaluations",
                 "adp_samp_motion_num_failures",
             )
@@ -2896,6 +2926,21 @@ class MotionLibBase:
                     )
                     continue
                 target[:] = source.to(device=self._device, dtype=target.dtype)
+            scalar_state_names = (
+                "adp_samp_quarantine_global_eval_episodes",
+                "adp_samp_quarantine_global_eval_failures",
+            )
+            for state_name in scalar_state_names:
+                if state_name not in state_dict:
+                    continue
+                target = getattr(self, state_name)
+                source = state_dict[state_name]
+                if source.numel() != 1:
+                    print(  # noqa: T201
+                        f"自适应采样标量状态 {state_name} 形状错误，已跳过该项恢复。"
+                    )
+                    continue
+                target.copy_(source.to(device=self._device, dtype=target.dtype))
             self.sync_and_compute_adaptive_sampling(sync_across_gpus=False)
         return
 
@@ -3016,9 +3061,12 @@ class MotionLibBase:
     def _update_adaptive_sampling_quarantine(self) -> None:
         """依据新增训练证据更新动作 quarantine，且不自动解除既有隔离。
 
-        一条动作必须同时满足：原始参考动力学门禁失败、累计回合数足够、从上次
-        有效评估后又积累了足够新回合、动作级失败率持续高于阈值。只有连续满足
-        配置次数后才隔离；任一次有效评估不再高失败会把连续计数清零。调用方只在
+        随机初始化策略几乎会在所有动作上失败，因此只有最近全 GPU 同步窗口的
+        全局动作成功率达到成熟门槛后才允许积累 quarantine 证据；门槛之前持续把
+        当前累计量保存为基线，避免冷启动失败进入后续窗口。一条动作还必须同时
+        满足：原始参考动力学门禁失败、累计回合数足够、从上次评估后又积累足够
+        新回合，并且本次新增窗口的
+        失败率持续高于阈值。任一成熟窗口不再高失败会清零连续计数。调用方只在
         全 GPU 统计同步点执行本方法，保证各 rank 得到相同隔离集合。
         """
 
@@ -3033,22 +3081,72 @@ class MotionLibBase:
             self.quarantine_cfg.get("min_new_motion_episodes", 3.0)
         )
         consecutive_evaluations = int(self.quarantine_cfg.get("consecutive_evaluations", 3))
+        min_global_success_rate = float(
+            self.quarantine_cfg.get("min_global_success_rate", 0.2)
+        )
 
-        new_evidence = (
-            motion_episodes - self.adp_samp_quarantine_eval_episodes
-        ) >= min_new_motion_episodes
+        motion_failures = self.adp_samp_motion_num_failures
+        new_motion_episodes = motion_episodes - self.adp_samp_quarantine_eval_episodes
+        new_motion_failures = motion_failures - self.adp_samp_quarantine_eval_failures
+        negative_tolerance = -1.0e-5
+        if (
+            (new_motion_episodes < negative_tolerance).any()
+            or (new_motion_failures < negative_tolerance).any()
+        ):
+            raise RuntimeError("quarantine 动作增量统计不得为负，checkpoint 或同步状态可能不一致")
+        new_motion_episodes = new_motion_episodes.clamp_min(0.0)
+        new_motion_failures = new_motion_failures.clamp_min(0.0)
+        if (new_motion_failures > new_motion_episodes + 1.0e-5).any():
+            raise RuntimeError("quarantine 新增失败数不得大于新增评估数")
+
+        total_evaluations = motion_episodes.sum()
+        total_failures = motion_failures.sum()
+        global_new_evaluations = (
+            total_evaluations - self.adp_samp_quarantine_global_eval_episodes
+        )
+        global_new_failures = total_failures - self.adp_samp_quarantine_global_eval_failures
+        if global_new_evaluations < negative_tolerance or global_new_failures < negative_tolerance:
+            raise RuntimeError("quarantine 全局增量统计不得为负，checkpoint 或同步状态可能不一致")
+        global_new_evaluations = global_new_evaluations.clamp_min(0.0)
+        global_new_failures = global_new_failures.clamp_min(0.0)
+        if global_new_failures > global_new_evaluations + 1.0e-5:
+            raise RuntimeError("quarantine 全局新增失败数不得大于新增评估数")
+        global_window_success_rate = (
+            global_new_evaluations - global_new_failures
+        ) / global_new_evaluations.clamp_min(1.0)
+        self.adp_samp_quarantine_global_window_success_rate.copy_(
+            global_window_success_rate
+        )
+        self.adp_samp_quarantine_global_eval_episodes.copy_(total_evaluations)
+        self.adp_samp_quarantine_global_eval_failures.copy_(total_failures)
+        quarantine_ready = (
+            global_new_evaluations > 0.0
+        ) & (global_window_success_rate >= min_global_success_rate)
+        self.adp_samp_quarantine_ready.copy_(quarantine_ready)
+
+        if not bool(quarantine_ready.item()):
+            # 冷启动期间不累计“连续高失败”；同时向前移动成功/失败基线，使策略
+            # 成熟后的第一个窗口只包含新证据，不被早期随机失败永久拖高。
+            self.adp_samp_quarantine_consecutive.zero_()
+            self.adp_samp_quarantine_eval_episodes.copy_(motion_episodes)
+            self.adp_samp_quarantine_eval_failures.copy_(motion_failures)
+            return
+
+        new_evidence = new_motion_episodes >= min_new_motion_episodes
         eligible = (
             new_evidence
             & (motion_episodes >= min_motion_episodes)
             & self.adp_samp_dynamics_gate_failed
             & ~self.adp_samp_motion_quarantined
         )
-        high_failure = motion_failure_rate >= high_failure_rate
+        window_failure_rate = new_motion_failures / new_motion_episodes.clamp_min(1.0)
+        high_failure = window_failure_rate >= high_failure_rate
         reset_mask = eligible & ~high_failure
         increment_mask = eligible & high_failure
         self.adp_samp_quarantine_consecutive[reset_mask] = 0
         self.adp_samp_quarantine_consecutive[increment_mask] += 1
         self.adp_samp_quarantine_eval_episodes[eligible] = motion_episodes[eligible]
+        self.adp_samp_quarantine_eval_failures[eligible] = motion_failures[eligible]
 
         newly_quarantined = (
             self.adp_samp_quarantine_consecutive >= consecutive_evaluations

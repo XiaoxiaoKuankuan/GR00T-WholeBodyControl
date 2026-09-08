@@ -3043,3 +3043,45 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `evaluations-failures-successes` 的绝对值不超过浮点日志舍入误差 `0.17`。最终复核到
   iteration `264` 时八个 worker 仍在，GPU 显存约 `16.0--16.5 GiB`，全部严重错误计数仍为
   0；这进一步确认主动换批只中断旧 episode，不污染自适应采样结果。
+
+### 11. 修复冷启动累计失败过早触发 quarantine
+
+- 第 10 节运行证明了动作结果身份和结算时序已经正确，但继续审计旧污染 run 的历史
+  TensorBoard 后发现第二个独立问题：旧实现每 `200` iteration 用“从训练开始累计的逐动作
+  失败率”增加连续计数；随机初始化策略的动作成功率约为 `0.4%--0.5%`，而配置只要求连续
+  `3` 次同步。因此最早大约 `600` iteration 就可能开始隔离。旧 run 中 quarantine 首次在
+  step `638` 变为 `793` 条，step `805` 已达到 `1,538` 条，最终升至 `26,222` 条；这说明即使
+  修复 motion ID 错配，冷启动累计失败仍可能在策略尚无基本跟踪能力时把动力学门禁失败的
+  大量动作误判为永久坏动作。
+- 为避免用不完整的 v2 方案继续消耗算力，2026-09-08 12:07:39 CST 对精确 tmux
+  `sonic_bumi3_native_adaptive_timing_v2_8gpu` 发送一次 `Ctrl-C`。launcher `2934249` 与八个
+  worker `2934386--2934393` 在 6 秒内退出，最终记录到 iteration `326`；8 张 GPU 没有残留
+  compute process。该诊断 run、step 100/200 checkpoint、正式日志和 TensorBoard 全部保留，
+  没有删除、覆盖或作为后续 full resume 来源。
+- quarantine 新增 `min_global_success_rate=0.20` 成熟门槛。这里的全局成功率不是训练开始以来
+  的累计值，而是最近一次全 GPU adaptive 同步窗口中的 `成功 episode / 全部已结算 episode`：
+  窗口成功率不足 20% 时，隔离开关 `quarantine_ready=false`，连续高失败计数强制归零，并把
+  当前逐动作成功/失败量保存为新基线。这样早期随机策略的失败既不能触发隔离，也不会拖慢
+  后续成熟门槛。
+- 策略最近窗口达到成熟门槛后，每条动作也改用“当前累计量减去上次有效基线”的增量窗口
+  失败率，而不是生命周期累计失败率。动作只有同时满足参考动力学门禁失败、累计 episode
+  不少于 `5`、本窗口新增 episode 不少于 `3`、本窗口失败率不低于 `0.90`，并连续 `3` 个
+  独立成熟窗口满足条件，才进入 quarantine；任一成熟低失败窗口都会把该动作连续计数清零。
+  每次全局同步都单独推进全局窗口基线，而逐动作基线在证据足够时才推进，避免低频动作永远
+  达不到最小窗口样本数。
+- checkpoint 自适应状态版本由 `2` 提升为 `3`，新增逐动作失败基线和全局成功/失败窗口基线；
+  v1/v2 或无版本状态会全部跳过 adaptive/quarantine 恢复，防止旧累计口径继续进入新训练。
+  TensorBoard 新增 `adp_samp/quarantine_global_window_success_rate` 与
+  `adp_samp/quarantine_ready`，可以直接区分“策略还没成熟”和“成熟后动作连续失败”。BUMI3
+  集成验证器同步锁定配置中的 `0.20`，防止后续配置修改意外移除冷启动保护。
+- 新增回归构造了全失败冷启动窗口、成熟后的低失败窗口和三个成熟高失败窗口：第一阶段
+  ready 与连续计数均为 0；第二阶段即使动作生命周期累计失败率仍超过 90%，也不继承旧失败；
+  最后只有动力学门禁失败动作在三个新增窗口后被隔离。全部 BUMI3/PPO/MotionLib/sim2sim/
+  数据工具相关回归结果为 `75 passed, 4 warnings in 6.98s`，定向测试为
+  `16 passed, 2 warnings`；修改文件 `py_compile`、`git diff --check`、测试 Ruff 和生产代码
+  致命错误检查通过。使用当前临时 BUMI worktree 的显式 `PYTHONPATH` 运行
+  `validate_bumi3_integration.py --device cuda:0` 通过，确认 21 DoF、22 body、50 Hz 与模型维度
+  契约；headless 平台信息仍有既有提示，但不影响本次非仿真步进的配置/资产校验。
+- 本节至此记录的是本地确定性修复和验证。服务器提交同步、新 scratch 8 卡启动、第一次
+  step 200 全 GPU 同步以及 motion batch reload 的真实证据将在启动后继续追加；在取得这些
+  证据前，不把单元测试等同于服务器训练健康或最终模型效果。

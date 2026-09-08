@@ -655,6 +655,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert adaptive_sampling["dynamics_gate"]["max_acceleration_ratio"] == 1.0
     assert adaptive_sampling["quarantine"] == {
         "enable": True,
+        "min_global_success_rate": 0.2,
         "high_failure_rate": 0.9,
         "min_motion_episodes": 5.0,
         "min_new_motion_episodes": 3.0,
