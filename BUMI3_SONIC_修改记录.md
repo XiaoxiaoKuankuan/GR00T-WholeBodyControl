@@ -3085,3 +3085,48 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本节至此记录的是本地确定性修复和验证。服务器提交同步、新 scratch 8 卡启动、第一次
   step 200 全 GPU 同步以及 motion batch reload 的真实证据将在启动后继续追加；在取得这些
   证据前，不把单元测试等同于服务器训练健康或最终模型效果。
+- 上述功能与本节本地记录提交为 `db4a65fd989a449e5f62d182eacd162a6f68c7eb`，已推送
+  GitHub 同名 feature 分支。`noetix-volc` 同步前位于 `b413c35`、工作区干净且 8 张 GPU
+  空闲，通过 `git pull --ff-only` 快进到 `db4a65f`；服务器复跑相同回归为
+  `75 passed, 4 warnings in 10.46s`，`py_compile`、`git diff --check` 与完整 BUMI3 集成
+  验证通过。服务器仍有既有 headless Vulkan 提示，但没有阻止训练的 PhysX 创建或 PPO。
+- 第一次启动于 12:16:36 进入真实 PPO 后，路径审计发现命令把 `experiment_dir` 传成裸目录名；
+  尽管 resolved `base_dir` 为 `/data/sonic_bumi3/runs`，训练入口仍会优先直接使用裸
+  `experiment_dir`，导致 run 建在代码仓库根目录。该 run 在 iteration `43` 被优雅停止，
+  8 个 worker 全部退出、GPU 回到空闲；没有从中恢复。为保留诊断材料而非删除，其完整目录
+  已移动到 `/data/sonic_bumi3/runs/aborted_startup/
+  sonic_bumi3_native_adaptive_maturity_v3_scratch_100k-20260908_121636`，正式日志仍为
+  `/data/sonic_bumi3/formal_logs/
+  sonic_bumi3_native_adaptive_maturity_v3_8gpu_20260908_121636.log`，服务器 Git 工作区恢复干净。
+- 最终 scratch run 于 2026-09-08 12:21:24 CST 从 `db4a65f` 启动，tmux 为
+  `sonic_bumi3_native_adaptive_maturity_v3_8gpu`，launcher PID `2953400`，八个 worker 为
+  `2953537--2953544`。正式目录为 `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/
+  universal_token/all_modes/sonic_bumi3_native_adaptive_maturity_v3_scratch_100k-
+  20260908_122124`，正式日志为 `/data/sonic_bumi3/formal_logs/
+  sonic_bumi3_native_adaptive_maturity_v3_8gpu_20260908_122124.log`。命令显式使用 8 rank、
+  每 rank 4096 env、100000 iteration，并设置 `resume=false`、`checkpoint=null`、
+  `auto_load_latest=false`；resolved 配置 SHA256 为
+  `ad98aef7757bfd2f1ffc69bd419b5201f084493db2cbb8d90d669d07c71fffe6`，其中绝对 run 路径、
+  三源 v2 Robot/SMPL 路径以及 adaptive/dynamics gate/quarantine/20% 成熟门槛均已生效。
+- step 100 的 `last.pt` 完整加载：`adaptive_sampling_state_version=3`，动作评估 `635,508`、
+  失败 `633,212`、成功 `2,296`，严格满足守恒；quarantine 和连续计数最大值均为 0。
+  Actor 两个参数组实际 LR 为 `6.75e-5`，Critic 两组保持 `3e-4`。这证明新 schema、动作结果
+  和独立学习率已进入真实 checkpoint 路径。
+- step 200 首次完成跨 8 卡同步后，checkpoint 中评估 `1,204,729`、失败 `1,199,750`、成功
+  `4,979`，最近窗口成功率为 `0.00413288`，明显低于 `0.20`。全局评估/失败基线与当前总数
+  差值均为 0，逐动作评估/失败基线最大差值也均为 0，说明冷启动分支确实只推进基线；
+  7,833 条动作已有证据、2,332 条参考动作动力学门禁失败，但 `quarantine_ready=0`、连续计数
+  最大值 `0`、quarantine `0`。所有自适应浮点张量 finite，checkpoint 当时 SHA256 为
+  `68a7b06f8ed3288ee4692c9c0d65f06c2cc2eace44847ee51d2cff59e77e4547`；`last.pt` 后续会被
+  新 checkpoint 覆盖，因此该哈希只对应 step 200 快照时刻。
+- TensorBoard 到 step `219` 已有 `149` 个 scalar tag、`32,631` 个 scalar 点，NaN/Inf 为 0；
+  它直接记录窗口成功率 `0.00413288`、`quarantine_ready=0` 和 quarantine `0`。iteration
+  `249` 左右首次完成 8 rank 的 1024-motion 换批：step 245--249 每步新增评估约
+  `4,899--4,979`，换批 step 250 为 `4,156`，随后 step 251--256 为 `4,572--4,690`；没有额外
+  增加一整批 4096 个虚假成功或失败。各步 `evaluations-failures-successes` 绝对偏差最大约
+  `0.17`，只来自跨 rank float 平均/日志精度；换批加载子进程退出后恢复为精确 8 个 worker。
+- 最终本节复核到 iteration `293`：tmux、launcher 和 8 个 worker 均存活，8 张 GPU 约占
+  `16.0--17.0 GiB` 且抽样利用率 `86%--89%`；正式日志中 Traceback、OOM、NCCL error、
+  RuntimeError 与 Hydra job error 均为 0，服务器 Git 工作区干净。训练按用户要求继续运行；
+  当前证据只证明结算时序、冷启动门禁、自适应换批和八卡运行健康，不代表策略已收敛、达到
+  G1 动作效果、通过 sim2sim 或满足真机安全。
