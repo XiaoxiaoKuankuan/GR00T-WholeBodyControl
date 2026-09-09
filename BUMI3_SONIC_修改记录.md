@@ -3134,6 +3134,10 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 
 ## 2026-09-09：按用户指定调整 BUMI3 采样、学习率、奖励、质量及终止阈值
 
+> 最终质量语义：用户已明确确认 `[0.8, 1.2]` 为乘数，使用 `operation=scale`，
+> 即原腰部质量的 80%～120%。其余采样、学习率、奖励与阈值改动继续有效；
+> 初次加法理解错误及其纠正过程单独记录在本节末尾。
+
 ### 修改来源与工作区
 
 - 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
@@ -3143,8 +3147,8 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `a33789d1d8ada5091dcfaadfed3f138a8e9d189f`；用户已有的未跟踪 `g1.tar.gz` 保留。
   本轮在 `/tmp/bumi-config-20260909` 的独立 BUMI worktree 修改，不切换 G1 分支。
 - 用户明确指定采样比例、Actor/Critic LR、关闭的奖励、腰部质量区间和终止阈值。
-  腰部质量的 `[-0.8, 1.2]` 按 kg 增量处理，因此使用 `operation=add`；原腰部
-  质量为 5.27167 kg，随机后为 4.47167～6.47167 kg。机器人资产没有修改。
+  腰部质量按用户最终确认的 `[0.8, 1.2]` 倍数处理，使用 `operation=scale`；原腰部
+  质量为 5.27167 kg，随机后为 4.217336～6.326004 kg。机器人资产没有修改。
 
 ### 逐文件改动与理由
 
@@ -3154,14 +3158,14 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
      KL 只调整 Actor 的既有实现继续使用。
    - 切换奖励组合并移除 anti-shake 的子参数，确保局部关键点奖励
      `tracking_vr_5point_local` 与防抖奖励 `anti_shake_ang_vel` 均不进入实际组合。
-   - 腰部质量从乘法 `[0.8, 1.5]` 改为加法 `[-0.8, 1.2]` kg，目标仍精确限定
+   - 腰部质量从原来的 `[0.8, 1.5]` 倍缩小为 `[0.8, 1.2]` 倍，目标仍精确限定
      `waist_yaw_link`，不匹配左右 wrist_yaw link。BUMI3 本身没有手腕 yaw body。
    - 双肘高度终止阈值由 0.12 m 改为 0.20 m；双脚 XYZ 阈值原本继承 0.20 m，
      本次显式写入 0.20 m。双肘低姿态阈值仍为 0.25 m，分类根高度仍为 0.40 m。
 2. 新增 `gear_sonic/config/manager_env/rewards/tracking/base_no_local_keypoint_no_anti_shake_feet_acc.yaml`：
    沿用当前 G1 分支同名组合的十项奖励清单，使用完整中文说明；BUMI3 入口另加力矩
    限制，组成十一项有效奖励。没有改写公共奖励函数，点位元数据和网络维度保持兼容。
-3. `gear_sonic/tools/validate_bumi3_integration.py`：同步奖励清单、质量加法区间、
+3. `gear_sonic/tools/validate_bumi3_integration.py`：同步奖励清单、质量乘法区间、
    独立 LR、均匀占比及双肘阈值断言；保留其他奖励与 BUMI 分支 G1/H2 默认配置的
    兼容性检查，防止校验器误拒新配置或漏掉奖励被重新加入。
 
@@ -3199,3 +3203,30 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   组合文件；不执行 reset/强推，不修改旧 run 的 config.yaml、checkpoint 或用户数据。
 - 提交后按本分支持续授权推送 origin，并在 noetix-volc 的同名分支执行
   `git pull --ff-only`；验证、提交和同步完成后清理本轮临时 worktree。
+
+
+### 服务器同步复验及用户对质量语义的纠正
+
+- 参数提交 `532d7149f509f3b63bf0ba910474dbbf5730d476` 已推送 origin，并在
+  noetix-volc 同名分支以 `git pull --ff-only` 同步。服务器实际解释器为
+  `/root/miniconda3/envs/liwei_lab/bin/python`；配置/资产静态检查、四组 LR 检查通过，
+  既有 PPO 测试为 `7 passed, 1 warning in 5.27s`；正式 launcher 与 8 个 worker 均存活。
+- 用户随后明确纠正：腰部质量仍应使用乘法。前一提交把 `[-0.8, 1.2]` 解释为 kg
+  增量属于理解错误，该加法设置不应作为最终交付。因为负乘数会产生负质量，已向用户
+  确认乘数是否应为 `[0.8, 1.2]`；确认前不把负区间直接写入乘法配置，不启动新训练。
+- 采样 uniform=0.9、Actor/Critic=2e-5/1e-3、关闭两项奖励、仅选择腰部质量随机化、
+  双肘和双脚常规阈值均 0.2 m 已通过服务器复验；质量项等待按用户确认的乘数修正。
+
+
+### 最终腰部质量修正
+
+- 用户确认质量乘数为 `[0.8, 1.2]`。修正 `sonic_bumi3.yaml` 为
+  `mass_distribution_params=[0.8,1.2]`、`operation=scale`，并同步配置注释与
+  `validate_bumi3_integration.py` 的断言。腰部原质量 5.27167 kg，对应随机区间
+  4.217336～6.326004 kg；原有 COM 随机化不变，左右手腕仍不属于质量随机化目标。
+- 该修正只涉及质量区间和运算方式，不改动已验证的采样比例、学习率、奖励清单、
+  终止阈值、机器人资产或训练器逻辑。使用新的普通提交保留纠正过程，不改写前次提交。
+- 本地最终 Hydra 组合、资产指纹/拓扑、G1/H2 兼容配置与网络维度静态复验通过，
+  输出 `FINAL_BUMI3_CONFIG_AND_ASSET=PASS`；`py_compile` 和 `git diff --check` 通过。
+  独立 LR 的 7 项本地与服务器测试已在前述提交通过，本次不修改 trainer，因此仅复验
+  受影响的配置契约；同步服务器后再核对最终质量乘数。

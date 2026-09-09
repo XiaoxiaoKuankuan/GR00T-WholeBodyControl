@@ -437,9 +437,9 @@ def _validate_event_compatibility(bumi_manager: dict, release_manager: dict) -> 
             mass_params = bumi_event["params"]
             assert mass_params["asset_cfg"]["name"] == "robot"
             assert mass_params["asset_cfg"]["body_names"] == "waist_yaw_link"
-            # 只允许腰部原始质量加上 kg 增量；精确 body 名同时排除了左右手腕。
-            assert mass_params["mass_distribution_params"] == [-0.8, 1.2]
-            assert mass_params["operation"] == "add"
+            # 只允许用户确认的腰部质量倍数；精确 body 名同时排除了左右手腕。
+            assert mass_params["mass_distribution_params"] == [0.8, 1.2]
+            assert mass_params["operation"] == "scale"
             continue
         assert _without_body_names(bumi_event) == _without_body_names(release_event), (
             f"BUMI3 event {event_name} 出现未授权的函数、范围或执行时机变化"

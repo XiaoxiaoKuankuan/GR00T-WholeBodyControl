@@ -6,7 +6,7 @@
 # quarantine 与 Actor/Critic 学习率。编码器使用不含 Teleop 的 Robot+SMPL
 # 双路配置。BUMI3 的跟踪锚点统一为浮动根 ``base_link``，跟踪 body 不包含
 # 左右 leg-yaw 连杆；关闭局部关键点和双肘防抖奖励，保留已有点位元数据兼容观测。
-# ``waist_yaw_link`` 同时承担 COM 随机化和 -0.8～1.2 kg 的增量质量随机化；KP/KD、踝关节
+# ``waist_yaw_link`` 同时承担 COM 随机化和 0.8～1.2 倍质量随机化；KP/KD、踝关节
 # armature 随机化以及执行器 0～4 个 physics step 的随机延迟仍保持关闭。训练
 # motion/SMPL 路径必须由 CLI 显式提供，避免把 G1 数据误用于 21 DoF BUMI3。
 
@@ -62,7 +62,7 @@ manager_env:
 
   events:
     # COM 和质量扰动都只作用于腰部 yaw 连杆，不选择左右 wrist_yaw 连杆。
-    # 质量范围单位是 kg：在原始质量上增加 -0.8～1.2，负下界不能作为缩放倍数。
+    # 质量使用用户确认的正乘数 0.8～1.2，即原始质量的 80%～120%。
     # 踝关节 armature 与 KP/KD 随机化继续关闭，避免同时引入额外训练变量。
     base_com:
       params:
@@ -72,8 +72,8 @@ manager_env:
       params:
         asset_cfg:
           body_names: "waist_yaw_link"
-        mass_distribution_params: [-0.8, 1.2]
-        operation: "add"
+        mass_distribution_params: [0.8, 1.2]
+        operation: "scale"
     randomize_ankle_armature: null
     randomize_actuator_gains: null
 
