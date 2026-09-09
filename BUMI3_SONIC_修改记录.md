@@ -3230,3 +3230,18 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   输出 `FINAL_BUMI3_CONFIG_AND_ASSET=PASS`；`py_compile` 和 `git diff --check` 通过。
   独立 LR 的 7 项本地与服务器测试已在前述提交通过，本次不修改 trainer，因此仅复验
   受影响的配置契约；同步服务器后再核对最终质量乘数。
+
+
+### 最终服务器确认
+
+- 质量修正提交 `72d4c01fa1b45a839ae93a2f820e43f10930a683` 已推送 origin；服务器在
+  同名分支、预期旧 HEAD、干净工作区三项检查通过后执行 `git pull --ff-only`。
+- 服务器最终配置/资产/网络维度检查输出 `REMOTE_FINAL_BUMI3_CONFIG_AND_ASSET=PASS`，
+  确认腰部质量 `scale [0.8,1.2]`、uniform=0.9、Actor/Critic=2e-5/1e-3、两项奖励
+  完全不存在、双肘/双脚常规阈值均为 0.2 m、双肘低姿态阈值仍 0.25 m。
+- 本地与服务器文件 SHA256 一致：
+  - `sonic_bumi3.yaml`：`9043aef4a82a204609aade90267ef08b78bac1906a784f0341fa8ec1bf331f02`。
+  - `validate_bumi3_integration.py`：`19f5f9adb81416426154ee7415ebe2c69e87cbc8db8a79ab0b09377cebc5330e`。
+- 服务器工作区干净；launcher `2953400` 与 worker `2953537～2953544` 全部存活。
+  没有重启或修改旧 run 的 resolved 配置，当前训练仍使用 9 月 8 日启动时的旧参数。
+  新参数已进入本地和服务器代码，须在后续启动时加载，不宣称已有新参数训练效果。
