@@ -3309,3 +3309,81 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `REMOTE_LOCAL_FILE_HASHES_MATCH=PASS`，服务器工作区干净。
 - 正式 launcher `2953400` 与八个 worker `2953537～2953544` 均存活，未重启或
   更改其启动参数；本次验证不构成新阈值的仿真或训练效果验证。
+
+## 2026-09-09：按用户要求停止旧任务并从零启动更新配置的八卡 BUMI 训练
+
+### 授权、代码来源与旧任务保留
+
+- 用户明确要求在 `noetix-volc` 停止当前训练并重新开始八卡 BUMI 训练；结合本轮
+  配置调整，按“从零训练”执行，不恢复旧模型、优化器或自适应统计。
+- 启动代码为 `feature/bumi-native-sonic-full-training` 的
+  `053a9c94df35a427490d1d7c3f4fe95349e17879`，本地、origin 和服务器起点一致。
+  服务器 `/home/liwei/GR00T-WholeBodyControl` 工作区干净。主工作区仍在 G1 分支，
+  `g1.tar.gz` 原样保留；本轮仅在临时 BUMI worktree 补充操作记录，不改训练实现。
+- 停止前核对 `/proc` 中的真实 launcher 命令、工作目录、八个 rank 与对应 run，
+  2026-09-09 14:12:04 CST 向已确认的 launcher `2953400` 发送 SIGINT；随后确认
+  launcher 与旧 worker `2953537～2953544` 全部退出，GPU 无计算进程，29517 端口释放。
+  未使用宽泛进程匹配或强制杀死无关进程，既有 TensorBoard 未作改动。
+- 原正式 run 保留于
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_native_adaptive_maturity_v3_scratch_100k-20260908_122124`。
+  停止前后核对完整固定编号 `model_step_030000.pt` 为 393243856 bytes，SHA256 均为
+  `9649b2e5b70fec829ae2bc201a3ed3ea8b7f7bb7729bcc4cae47a7687d497334`；旧模型、
+  配置和正式日志均未删除或覆盖。
+
+### 新训练入口及启动参数
+
+- 新任务实际提交启动时间：2026-09-09 14:12:24 CST；tmux：
+  `sonic_bumi3_uniform90_ee040_8gpu_20260909_141204`。
+- 解释器：`/root/miniconda3/envs/liwei_lab/bin/python`；使用同环境的 accelerate
+  `launch --num_processes=8 --main_process_port=29517`，入口为 `gear_sonic/train_agent_trl.py`。
+  环境显式设置 `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`、`OMP_NUM_THREADS=1`。
+- 配置入口：`+exp=manager/universal_token/all_modes/sonic_bumi3`；显式指定
+  `+resume=false checkpoint=null auto_load_latest=false use_wandb=false headless=True`、
+  `num_envs=4096`、`algo.config.num_learning_iterations=100000`，即每卡 4096 个环境、
+  总计 32768 个环境，计划训练 100000 次迭代。
+- 数据沿用 `/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2/train/`
+  下 `robot_all` 与 `smpl_all`，通过 motion_file/smpl_motion_file 的命令行 override
+  明确指定；`exclude_motion_keys=[]`。启动前已确认两个目录存在。
+- 新 run 使用独立绝对路径，避免旧历史中裸 `experiment_dir` 落到仓库根目录的问题：
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204`。
+- 正式日志：
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_uniform90_ee040_8gpu_20260909_141204.log`。
+  同目录同名前缀 `.sh` 为带详细中文说明的实际启动脚本，`.json` 保存完整 argv、
+  新旧路径、代码提交、旧 checkpoint 指纹与操作状态；这些正式运行记录保留在服务器，
+  不把生成日志或模型提交到 Git。启动脚本 `bash -n` 通过。
+
+### 配置与运行验证
+
+- 启动前服务器调用既有资产、XML/mesh 和 Hydra 配置校验，输出
+  `PRELAUNCH_CONFIG_ASSET_PASS`。确认 uniform=0.9、Actor/Critic 初始 LR=2e-5/1e-3、
+  两项指定奖励关闭、质量仅作用腰部且 scale [0.8,1.2]、双肘常规/低姿态
+  0.20/0.40 m、双脚三维 0.20 m。动作噪声、COM 和 timeout 补偿逻辑保持现状。
+- 14:12:44 的 `/proc` 核查确认新 launcher 为 `3269510`，worker 为
+  `3269523～3269530`，RANK/LOCAL_RANK 精确覆盖 0～7、WORLD_SIZE 均为 8。
+  此时正在创建 Isaac Lab 环境，尚不能只据进程存活宣称 PPO 已正常训练。
+- 14:13:50 已读取新 run 自己的 `config.yaml`，对从零训练开关、每卡环境数、总迭代、
+  绝对实验目录、独立初始 LR、采样比例、腰部质量目标/乘数、双肘/双脚阈值和关闭的
+  两项奖励逐项断言通过，输出 `NEW_RUN_RESOLVED_CONFIG=PASS`；配置 SHA256 为
+  `a903075d6cdf3685cd07173beacf4609cb8b3c164be73ee53c6a15762b288c89`。
+  环境实际创建日志确认 21 维动作、690 维 policy、1227 维 critic、11 项有效奖励。
+- 14:14:47 确认真实 PPO 从 iteration 1 持续推进到 11，八个 rank 均存活且仍对应新
+  run。GPU 0～7 在训练中约使用 15.1～15.6 GiB，采样利用率 50%～89%。
+  新 TensorBoard 位于本 run 的 `tensorboard/`，检查到 step 11：145 个 scalar tag、
+  1595 个数据点，NaN/Inf 为 0；奖励约 0.60096、value loss 约 0.009109、KL 约
+  0.006010、动作 std 约 0.05756。初期数值仅用于确认从零训练正常推进。
+- 独立学习率实际日志确认：step 11 的 `lr/actor_actual=0.000151875`，
+  `lr/critic_actual=0.001`。Actor 从配置初值 2e-5 按既有 KL 规则动态调整，Critic
+  保持 1e-3；不能把 Actor 后续动态数值当作初始配置未生效。
+- 扫描新正式日志，Traceback、CUDA OOM、DistBackendError、ChildFailedError、
+  RuntimeError、Hydra job error 和 NCCL error/failed 均为 0。保留了服务器既有
+  headless 图形初始化问题：`ERROR_INCOMPATIBLE_DRIVER` 出现 24 次，但此后环境
+  创建和实际 PPO 迭代均正常推进，不能将这些图形日志笼统报告为“零报错”。
+- 本轮启动的是用户授权的正式训练，模型、日志和会话继续保留；没有额外启动冒烟
+  任务，也不把初期运行正常解释为训练已收敛或动作质量已改善。
+
+### 恢复与后续边界
+
+- 如用户要求回到旧任务，应另行确认恢复哪个完整 checkpoint 及其原始配置，不能直接
+  把旧优化器和自适应状态混入本次新配置。需要停止新任务时，应先核对上述新 run 与
+  真实进程身份，再只停止该任务；不删除旧 run、正式模型或数据。
+- 本记录提交推送后按持续授权同步到服务器，文档同步不影响已经启动的训练参数。
