@@ -5,8 +5,8 @@
 # 主体，并显式覆盖 BUMI3 的机器人名称、跟踪强点、低姿态 termination、坏动作
 # quarantine 与 Actor/Critic 学习率。编码器使用不含 Teleop 的 Robot+SMPL
 # 双路配置。BUMI3 的跟踪锚点统一为浮动根 ``base_link``，跟踪 body 不包含
-# 左右 leg-yaw 连杆，局部强点仅保留腰部与双肘，anti-shake 也只约束双肘。
-# ``waist_yaw_link`` 同时承担 COM 随机化和 0.8～1.5 倍质量随机化；KP/KD、踝关节
+# 左右 leg-yaw 连杆；关闭局部关键点和双肘防抖奖励，保留已有点位元数据兼容观测。
+# ``waist_yaw_link`` 同时承担 COM 随机化和 -0.8～1.2 kg 的增量质量随机化；KP/KD、踝关节
 # armature 随机化以及执行器 0～4 个 physics step 的随机延迟仍保持关闭。训练
 # motion/SMPL 路径必须由 CLI 显式提供，避免把 G1 数据误用于 21 DoF BUMI3。
 
@@ -23,7 +23,7 @@ defaults:
   - override /manager_env/observations/critic: privileged_mf_hist
   - override /manager_env/events: tracking/level0_4
   - override /manager_env/terminations: tracking/base_adaptive_strict_ori_foot_xyz
-  - override /manager_env/rewards: tracking/base_5point_local_feet_acc
+  - override /manager_env/rewards: tracking/base_no_local_keypoint_no_anti_shake_feet_acc
 
 use_manager_env: true
 
@@ -59,14 +59,10 @@ manager_env:
         sensor_cfg:
           body_names:
             - "^(?!l_ankle_roll_link$)(?!r_ankle_roll_link$)(?!l_elbow_pitch_link$)(?!r_elbow_pitch_link$).+$"
-    anti_shake_ang_vel:
-      params:
-        body_names:
-          - "l_elbow_pitch_link"
-          - "r_elbow_pitch_link"
 
   events:
-    # COM 和质量扰动都只作用于腰部 yaw 连杆；质量按原始值乘以 0.8～1.5。
+    # COM 和质量扰动都只作用于腰部 yaw 连杆，不选择左右 wrist_yaw 连杆。
+    # 质量范围单位是 kg：在原始质量上增加 -0.8～1.2，负下界不能作为缩放倍数。
     # 踝关节 armature 与 KP/KD 随机化继续关闭，避免同时引入额外训练变量。
     base_com:
       params:
@@ -76,8 +72,8 @@ manager_env:
       params:
         asset_cfg:
           body_names: "waist_yaw_link"
-        mass_distribution_params: [0.8, 1.5]
-        operation: "scale"
+        mass_distribution_params: [-0.8, 1.2]
+        operation: "add"
     randomize_ankle_armature: null
     randomize_actuator_gains: null
 
@@ -91,7 +87,8 @@ manager_env:
         root_height_threshold: 0.40
     foot_pos_xyz:
       params:
-        # threshold 不在 BUMI3 重复覆盖，直接继承 G1 基线 0.20 m。
+        # 显式锁定双脚三维位置误差阈值，避免父配置变化后偏离用户指定的 0.20 m。
+        threshold: 0.20
         body_names:
           - "l_ankle_roll_link"
           - "r_ankle_roll_link"
@@ -99,7 +96,7 @@ manager_env:
       params:
         # anchor 与末端高度必须使用同一套姿态分类边界，否则同一帧会被两套
         # termination 规则作出矛盾判断。双肘仍是 BUMI3 的末端高度检查对象。
-        threshold: 0.12
+        threshold: 0.20
         down_threshold: 0.25
         root_height_threshold: 0.40
         body_names:
@@ -175,6 +172,8 @@ manager_env:
         adaptive_sampling:
           # BUMI3 显式开启，避免未来父配置关闭后只保留一组不生效的门禁参数。
           enable: true
+          # 与当前 G1 正式入口一致：混合项采用 10% 困难分布和 90% 均匀分布。
+          uniform_sampling_rate: 0.9
           adp_samp_failure_rate_max_over_mean: 200
           # 动力学门禁只检查原始参考关节轨迹，不使用加噪或拼接后的训练增强。
           # 速度上限来自 BUMI3 当前 Isaac Lab 执行器配置，并按 MuJoCo 数据关节名
@@ -265,7 +264,7 @@ algo:
     # Actor 维持保守更新，Critic 使用独立且更快的学习率；trainer 会把二者放入
     # 具名 optimizer 参数组，KL 控制器只允许改 Actor 参数组。
     actor_learning_rate: 2e-5
-    critic_learning_rate: 3e-4
+    critic_learning_rate: 1e-3
     empty_cache_every_n_ppo_epoch: -1
     num_steps_per_env: 24
     use_clampped_std: true

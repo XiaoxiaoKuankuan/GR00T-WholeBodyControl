@@ -1,0 +1,19 @@
+# SONIC 跟踪训练奖励组合：保留根节点、全身相对姿态、速度、动作平滑、
+# 关节限位、非期望接触和脚踝加速度约束。局部关键点 tracking_vr_5point_local
+# 与角速度防抖 anti_shake_ang_vel 不进入组合，因此训练配置中不会出现这两项。
+# 本组合沿用 G1 分支同名组合的奖励清单，各奖励的函数、权重及尺度仍来自 terms；
+# BUMI3 的力矩限制由实验入口另行添加。点位元数据和观测维度不受奖励关闭影响。
+
+defaults:
+  - terms/tracking_anchor_pos@_here_
+  - terms/tracking_anchor_ori@_here_
+  - terms/tracking_relative_body_pos@_here_
+  - terms/tracking_relative_body_ori@_here_
+  - terms/tracking_body_linvel@_here_
+  - terms/tracking_body_angvel@_here_
+  - terms/action_rate_l2@_here_
+  - terms/joint_limit@_here_
+  - terms/undesired_contacts@_here_
+  - terms/feet_acc@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.rewards.RewardsCfg

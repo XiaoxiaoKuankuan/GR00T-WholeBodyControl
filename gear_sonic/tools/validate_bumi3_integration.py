@@ -385,18 +385,20 @@ def _without_body_names(value):
 
 
 def _validate_reward_compatibility(bumi_manager: dict, release_manager: dict) -> None:
-    """确认 BUMI3 只新增获准的力矩限制奖励，其余奖励保持发布版契约。"""
+    """确认 BUMI3 关闭获准的两项奖励，增加力矩约束，其余项保持发布版契约。"""
 
     bumi_rewards = bumi_manager["rewards"]
     release_rewards = release_manager["rewards"]
-    assert set(bumi_rewards) == set(release_rewards) | {"torque_limits"}, (
-        "BUMI3 除 torque_limits 外出现未授权的 reward 项变化"
+    disabled_rewards = {"tracking_vr_5point_local", "anti_shake_ang_vel"}
+    assert disabled_rewards.isdisjoint(bumi_rewards), "已关闭的 BUMI3 奖励被重新装配"
+    assert set(bumi_rewards) == (set(release_rewards) - disabled_rewards) | {"torque_limits"}, (
+        "BUMI3 除关闭局部关键点、防抖及增加力矩限制外出现未授权的奖励项变化"
     )
     release_compatible_rewards = {
         key: value for key, value in bumi_rewards.items() if key != "torque_limits"
     }
     assert _without_body_names(release_compatible_rewards) == _without_body_names(
-        release_rewards
+        {key: value for key, value in release_rewards.items() if key not in disabled_rewards}
     ), (
         "BUMI3 既有 reward 除 body_names 外的函数、weight、std 或参数与 "
         "sonic_release 不一致"
@@ -435,8 +437,9 @@ def _validate_event_compatibility(bumi_manager: dict, release_manager: dict) -> 
             mass_params = bumi_event["params"]
             assert mass_params["asset_cfg"]["name"] == "robot"
             assert mass_params["asset_cfg"]["body_names"] == "waist_yaw_link"
-            assert mass_params["mass_distribution_params"] == [0.8, 1.5]
-            assert mass_params["operation"] == "scale"
+            # 只允许腰部原始质量加上 kg 增量；精确 body 名同时排除了左右手腕。
+            assert mass_params["mass_distribution_params"] == [-0.8, 1.2]
+            assert mass_params["operation"] == "add"
             continue
         assert _without_body_names(bumi_event) == _without_body_names(release_event), (
             f"BUMI3 event {event_name} 出现未授权的函数、范围或执行时机变化"
@@ -615,10 +618,6 @@ def _validate_resolved_configs() -> dict[str, int | float]:
 
     _validate_reward_compatibility(bumi_manager, release_manager)
     _validate_event_compatibility(bumi_manager, release_manager)
-    assert bumi_manager["rewards"]["anti_shake_ang_vel"]["params"]["body_names"] == [
-        "l_elbow_pitch_link",
-        "r_elbow_pitch_link",
-    ]
     terminations = bumi_manager["terminations"]
     assert terminations["foot_pos_xyz"]["params"]["threshold"] == 0.20
     assert terminations["foot_pos_xyz"]["params"]["body_names"] == [
@@ -629,7 +628,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert terminations["anchor_pos"]["params"]["threshold_adaptive"] is True
     assert terminations["anchor_pos"]["params"]["down_threshold"] == 0.25
     assert terminations["anchor_pos"]["params"]["root_height_threshold"] == 0.4
-    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.12
+    assert terminations["ee_body_pos"]["params"]["threshold"] == 0.20
     assert terminations["ee_body_pos"]["params"]["body_names"] == [
         "l_elbow_pitch_link",
         "r_elbow_pitch_link",
@@ -640,9 +639,10 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert terminations["anchor_ori_full"]["params"]["threshold"] == 0.20
 
     assert bumi_algo["config"]["actor_learning_rate"] == 2e-5
-    assert bumi_algo["config"]["critic_learning_rate"] == 3e-4
+    assert bumi_algo["config"]["critic_learning_rate"] == 1e-3
     adaptive_sampling = motion_lib_cfg["adaptive_sampling"]
     assert adaptive_sampling["enable"] is True
+    assert adaptive_sampling["uniform_sampling_rate"] == 0.9
     assert adaptive_sampling["dynamics_gate"]["enable"] is True
     assert adaptive_sampling["dynamics_gate"]["dof_names"] == (
         EXPECTED_BUMI3_MUJOCO_DOF_NAMES

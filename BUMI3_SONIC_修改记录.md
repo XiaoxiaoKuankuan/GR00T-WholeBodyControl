@@ -3130,3 +3130,72 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   RuntimeError 与 Hydra job error 均为 0，服务器 Git 工作区干净。训练按用户要求继续运行；
   当前证据只证明结算时序、冷启动门禁、自适应换批和八卡运行健康，不代表策略已收敛、达到
   G1 动作效果、通过 sim2sim 或满足真机安全。
+
+
+## 2026-09-09：按用户指定调整 BUMI3 采样、学习率、奖励、质量及终止阈值
+
+### 修改来源与工作区
+
+- 所属分支：`feature/bumi-native-sonic-full-training`；起始 HEAD：
+  `ca1351f6e31c1ba0843d6b12414d585f4f9536fd`。本地 BUMI 分支、origin 同名分支和
+  noetix-volc `/home/liwei/GR00T-WholeBodyControl` 修改前一致，服务器工作区干净。
+- 主工作区 `/home/weili/GR00T-WholeBodyControl` 位于 G1 分支，起始 HEAD 为
+  `a33789d1d8ada5091dcfaadfed3f138a8e9d189f`；用户已有的未跟踪 `g1.tar.gz` 保留。
+  本轮在 `/tmp/bumi-config-20260909` 的独立 BUMI worktree 修改，不切换 G1 分支。
+- 用户明确指定采样比例、Actor/Critic LR、关闭的奖励、腰部质量区间和终止阈值。
+  腰部质量的 `[-0.8, 1.2]` 按 kg 增量处理，因此使用 `operation=add`；原腰部
+  质量为 5.27167 kg，随机后为 4.47167～6.47167 kg。机器人资产没有修改。
+
+### 逐文件改动与理由
+
+1. `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：
+   - 显式设置 `uniform_sampling_rate=0.9`，即混合项采用 10% 困难分布加 90% 均匀分布。
+   - Actor 初始 LR 保持 `2e-5`，Critic LR 从 `3e-4` 改为 `1e-3`；独立参数组与
+     KL 只调整 Actor 的既有实现继续使用。
+   - 切换奖励组合并移除 anti-shake 的子参数，确保局部关键点奖励
+     `tracking_vr_5point_local` 与防抖奖励 `anti_shake_ang_vel` 均不进入实际组合。
+   - 腰部质量从乘法 `[0.8, 1.5]` 改为加法 `[-0.8, 1.2]` kg，目标仍精确限定
+     `waist_yaw_link`，不匹配左右 wrist_yaw link。BUMI3 本身没有手腕 yaw body。
+   - 双肘高度终止阈值由 0.12 m 改为 0.20 m；双脚 XYZ 阈值原本继承 0.20 m，
+     本次显式写入 0.20 m。双肘低姿态阈值仍为 0.25 m，分类根高度仍为 0.40 m。
+2. 新增 `gear_sonic/config/manager_env/rewards/tracking/base_no_local_keypoint_no_anti_shake_feet_acc.yaml`：
+   沿用当前 G1 分支同名组合的十项奖励清单，使用完整中文说明；BUMI3 入口另加力矩
+   限制，组成十一项有效奖励。没有改写公共奖励函数，点位元数据和网络维度保持兼容。
+3. `gear_sonic/tools/validate_bumi3_integration.py`：同步奖励清单、质量加法区间、
+   独立 LR、均匀占比及双肘阈值断言；保留其他奖励与 BUMI 分支 G1/H2 默认配置的
+   兼容性检查，防止校验器误拒新配置或漏掉奖励被重新加入。
+
+### G1 分支对照与本轮未改的问题
+
+- 当前 G1 分支 `a33789d` 的 `sonic_release.yaml` 已显式配置 uniform=0.9、
+  Actor/Critic 初始 LR=2e-5/1e-3、关闭上述两项奖励，并将质量随机化收窄到 torso_link。
+- G1 与 BUMI 都保留“加载动作批次时抽样、重置回合时再抽样”的两层实现，也都把
+  重复载入 motion 的 bins 重复加入 active bins；本轮按用户要求改参数，没有改这部分
+  算法。因此 10%/90% 描述的是混合参数，不保证所有动作最终访问次数的严格比例。
+- 本轮仍保留 std 上限 0.5、entropy_coef=0.01、腰部 COM 随机化、现有坏动作隔离条件、
+  全模型统一梯度裁剪以及终止/timeout 同时触发时的既有价值补偿行为。这些剩余项需要
+  另行修改或验证，不能把此次配置检查视为已经解决全部训练效果问题。
+
+### 验证与运行边界
+
+- 本地解释器为 `/home/weili/miniconda3/envs/sonic/bin/python`，PyTorch 2.7.0+cu128。
+  调用校验器的 `_validate_repository_assets()`、`_validate_xml_and_meshes()` 与
+  `_validate_resolved_configs()` 均通过，输出 `BUMI3_CONFIG_AND_ASSET_STATIC_CHECK=PASS`。
+  确认 11 项有效奖励、两项关闭奖励不存在、mass add [-0.8,1.2] 仅作用腰部、uniform=0.9、
+  LR=2e-5/1e-3、ee/foot 常规阈值均为 0.2；21 DoF、50 Hz、actor=690、critic=1227、
+  tokenizer=1262、decoder 754→21 保持不变，G1/H2 配置组合兼容性通过。
+- 既有 `python -m pytest -q gear_sonic/tests/test_ppo_optimizer_and_kl.py -p no:cacheprovider`
+  通过：`7 passed, 1 warning in 2.73s`，warning 为既有 TRL experimental 提示。
+  另将本轮真实 Hydra 配置的 LR 输入小型 Actor/Critic 参数组构造函数，四组实际 LR 为
+  actor=2e-5/2e-5、critic=1e-3/1e-3，输出 `CONFIG_TO_OPTIMIZER_GROUPS=PASS`。
+- 修改后的校验器 `py_compile` 和 `git diff --check` 通过；本地各可用解释器未安装 Ruff，
+  未执行该可选检查，未为此修改环境依赖。服务器同步后继续复验。
+- 本轮不启动仿真或新训练，也不停止、恢复现有正式八卡任务。现有进程于 2026-09-08
+  启动时已加载旧配置，更新仓库文件不会让内存中的训练参数自动变化。
+
+### 回滚方法
+
+- 需要恢复时，以单独的反向提交撤销本轮入口与校验器差异，并在无引用后删除新增奖励
+  组合文件；不执行 reset/强推，不修改旧 run 的 config.yaml、checkpoint 或用户数据。
+- 提交后按本分支持续授权推送 origin，并在 noetix-volc 的同名分支执行
+  `git pull --ff-only`；验证、提交和同步完成后清理本轮临时 worktree。
