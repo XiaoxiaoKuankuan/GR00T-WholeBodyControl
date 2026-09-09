@@ -3295,3 +3295,17 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 服务器仓库同步不会热更新 9 月 8 日启动的正式任务，新值须在后续启动时加载。
 - 需要回滚时以新的反向提交恢复入口与校验器对应值并补记日志，不改写历史，不改
   正式 run 的配置、checkpoint 或用户数据。提交和服务器复验后清理本轮临时工作区。
+
+### 服务器复验结果
+
+- 参数提交 `7ce9253360970ee61cdd72f38dae9f67ebba6d2f` 已推送 GitHub，并在
+  noetix-volc 的同名分支通过 `git pull --ff-only` 同步；同步前已核对预期旧提交
+  和干净工作区，没有合并、变基、强推或切换服务器分支。
+- 服务器使用 `/root/miniconda3/envs/liwei_lab/bin/python` 运行上述三个既有静态
+  校验函数，输出 `REMOTE_BUMI3_EE_THRESHOLD_CONFIG_AND_ASSET=PASS`。
+  实际组合确认双肘常规/低姿态 0.20/0.40 m、姿态分类根高 0.40 m、检查对象为
+  左右 elbow_pitch link；COM 仍为腰部 x±0.025 m、y/z±0.05 m。
+- 两个改动代码/配置文件的 SHA256 与本地记录完全一致，输出
+  `REMOTE_LOCAL_FILE_HASHES_MATCH=PASS`，服务器工作区干净。
+- 正式 launcher `2953400` 与八个 worker `2953537～2953544` 均存活，未重启或
+  更改其启动参数；本次验证不构成新阈值的仿真或训练效果验证。
