@@ -360,7 +360,7 @@
   `pyzmq`，导致两个既有部署测试在 collection 阶段中止；没有将该次尝试记为全回归通过。
   本轮新增 PPO 定向测试已独立完整通过。
 
-### 5. noetix-12 启动前核验与待完成项
+### 5. noetix-12 启动前核验
 
 - `2026-09-09 11:50 CST` 只读核验：服务器实际主机名 `noetix`，仓库为
   `/root/home/liwei/GR00T-WholeBodyControl`，分支和 HEAD 与本地一致且工作区干净；
@@ -368,9 +368,8 @@
 - 旧 100k 正式实验已经完成到 `model_step_100000.pt`/`last.pt`，保留于独立历史目录，
   本轮不会覆盖或删除。新训练将使用新的绝对实验目录，并显式设置 `checkpoint=null`、
   `resume=false`、`auto_load_latest=false`、8 个进程和 `300000` iterations。
-- 功能提交、GitHub 推送、服务器 `git pull --ff-only`、服务器同环境定向测试、正式八卡
-  启动、首轮 resolved config/optimizer group/TensorBoard 标签和进程健康证据，待功能提交
-  后继续补充。本地尚未运行 Isaac Sim reset/step，训练收敛、MuJoCo 质量和真机安全均未验证。
+- 本地尚未运行 Isaac Sim reset/step；后续正式启动的运行时证据记录在第 7 节。训练收敛、
+  MuJoCo 动作质量和真机安全不属于本轮启动验证结论。
 
 ### 6. 回滚方法
 
@@ -379,3 +378,37 @@
   整轮 KL 控制、实际 LR 日志与对应测试，不能只删日志标签后保留半套参数组逻辑。
 - 新训练使用独立目录，回滚代码不需要删除正式输出；不得使用 `git reset --hard`、强推、
   清理 `g1.tar.gz` 或删除历史 100k 模型。
+
+### 7. Git 同步、服务器复验与正式八卡启动
+
+- 功能提交为 `29979166509eb4fb8f978b0e752ee6d3eddd3836`，已推送到
+  `origin/feature/g1-native-sonic-training`；本地提交后仍只保留未跟踪的 `g1.tar.gz`。
+  noetix-12 在确认同名分支、旧 HEAD、干净工作区且无训练进程后，使用
+  `git pull --ff-only` 快进到同一提交；服务器拉取后工作区保持干净。
+- 服务器 `/root/miniconda3/envs/jump` 重复执行定向测试，结果同为
+  `7 passed, 1 warning`；Python 编译、`git diff --check` 和 Hydra 配置组合通过，输出
+  `REMOTE_G1_RESOLVED_CONFIG_CONTRACT=PASS`。
+- 第一次启动尝试的字符串 grep 门禁把 SSH 命令本身包含的训练脚本文本误识别为既有进程，
+  因而在创建 tmux、run 目录和训练进程之前拒绝启动；没有产生失败 run 或需要删除的临时
+  产物。随后改为按真实进程 `comm` 和独立 argv 精确检查，再执行正式启动。
+- 正式训练于 `2026-09-09 12:00:17 CST` 从零启动：
+  - tmux：`sonic_g1_90u_sep_lr_300k_8gpu`；
+  - launcher PID：`2748117`；8 个 worker PID：`2748263` 至 `2748270`；
+  - 分布式端口：`29519`；
+  - run：`/data/sonic_g1/runs/TRL_G1_Track/g1_sonic_90uniform_no_local_sep_lr_8gpu_scratch_300k-20260909_120017`；
+  - log：`/data/sonic_g1/formal_logs/g1_sonic_90uniform_no_local_sep_lr_8gpu_scratch_300k_20260909_120017.log`。
+- 正式 run 的 resolved `config.yaml` SHA256 为
+  `f56332a47ff729ae7cb911f14069ecd361206d46b2dcf850524db56a5dbb53aa`。脚本核验
+  `resume=false`、`checkpoint=null`、`auto_load_latest=false`、`world_size=8`、
+  `num_envs=4096`、`iterations=300000`，并逐项确认本轮采样、奖励、质量随机化、
+  Termination、LR 和数据绝对路径，输出 `FORMAL_RESOLVED_CONFIG_GATE=PASS`。
+- 8 个 rank 均完成 129,785 条训练动作索引加载，并各自载入 1,024 条当前 motion batch；
+  Reward Manager 运行时只显示 10 个奖励项，关闭的局部五点和 anti-shake 不在其中。
+- iteration 25 时 TensorBoard 有 120 个 scalar 标签和 25 个连续记录点；
+  `train/lr/actor_actual` 当前为 `1.51875e-4`，它从初始 `2e-5` 经低 KL 自适应上调；
+  `train/lr/critic_actual` 的 25 个点始终为 `1e-3`。两项数值均从实际 optimizer group
+  读取，证明 KL 只改变 Actor。关闭奖励的 TensorBoard 标签均不存在。
+- iteration 25 快照中，8 张 GPU 显存约 `18.21–18.98 GiB`、利用率约 `65%–74%`；
+  tmux、launcher 和 8 个 worker 均存活。正式日志中的 Traceback、CUDA OOM、NCCL、
+  Hydra job error 和 RuntimeError 计数均为 0。该早期快照仅证明配置生效和训练运行健康，
+  不代表 300k 已完成、策略已收敛、困难动作质量改善或可安全部署到真机。
