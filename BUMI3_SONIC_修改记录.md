@@ -3245,3 +3245,53 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 服务器工作区干净；launcher `2953400` 与 worker `2953537～2953544` 全部存活。
   没有重启或修改旧 run 的 resolved 配置，当前训练仍使用 9 月 8 日启动时的旧参数。
   新参数已进入本地和服务器代码，须在后续启动时加载，不宣称已有新参数训练效果。
+
+## 2026-09-09：双肘低姿态高度误差容限放宽至 0.40 m
+
+### 来源、范围与修改理由
+
+- 用户明确要求将低姿态双肘原来的 0.25 m 容限改为 0.40 m；本次不调整其余训练参数。
+- 所属分支为 `feature/bumi-native-sonic-full-training`，起始提交为
+  `281bb8438efd19a0cc037851d1fd187722c46296`。本地 BUMI、origin 与 noetix-volc
+  同名分支起点一致且干净；主工作区仍在 G1 分支，受保护的 `g1.tar.gz` 未作改动。
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3.yaml`：仅将
+  `manager_env.terminations.ee_body_pos.params.down_threshold` 从 0.25 改为 0.40，
+  补充中文注释，区分“双肘高度误差容限”与“参考根高度分类边界”两个 0.40 m。
+  检查对象仍是左右 elbow_pitch link，检查的是 Z 方向高度误差，并非双肘三维距离。
+- `gear_sonic/tools/validate_bumi3_integration.py`：同步上述低姿态阈值断言，保留
+  正常双肘 0.20 m、参考根高度分类 0.40 m、anchor 低姿态 0.25 m 和双脚三维
+  0.20 m 的既有断言；公共终止函数、机器人资产、网络结构和 G1/H2 配置不变。
+- 来源为当前 BUMI 入口和用户本轮明确要求，未引入其他机器人参数或修改任何资产。
+
+### 核查结论与未修改项
+
+- Actor 的初始动作标准差为 0.05，但它是可学习参数，现有标准差夹紧范围为
+  `[0.001, 0.5]`；0.5 是标准差的上限，不是每次高斯随机量的绝对上限。
+  此处探索噪声与启动时关节默认位置扰动、回合重置时初始关节姿态扰动是不同机制。
+- 腰部 COM 事件为 `startup`，作用 `waist_yaw_link`，在原刚体局部 COM 上加均匀
+  扰动：x 为 `[-0.025, 0.025]` m，y/z 各为 `[-0.05, 0.05]` m；本轮不改。
+- 动作末尾 timeout 与失败 termination 可以同时为真。动作采样统计使用
+  `success = timed_out & ~failure`，正确记录失败；包装器仍直接将 `truncated`
+  交给训练器作 timeout 价值补偿，未排除同时失败的情况。本轮仅解释现有问题，
+  不修改奖励补偿、终止语义或噪声参数；没有据此推断该重叠事件的实际频率。
+
+### 验证、运行边界及回滚
+
+- 本地使用 `/home/weili/miniconda3/envs/sonic/bin/python`，调用既有校验器的
+  `_validate_repository_assets()`、`_validate_xml_and_meshes()` 和
+  `_validate_resolved_configs()`，输出 `LOCAL_BUMI3_CONFIG_AND_ASSET=PASS`。
+  Hydra 实际组合确认双肘常规/低姿态为 0.20/0.40 m、根高度分类为 0.40 m；
+  anchor 常规/低姿态仍为 0.12/0.25 m，双脚仍为 0.20 m，COM 范围不变。
+  G1/H2 配置兼容性通过；21 维动作、50 Hz、Actor 690、Critic 1227、tokenizer
+  1262 和 decoder 754→21 不变。校验器源码内存编译与 `git diff --check` 通过。
+- 首次验证后的诊断打印误将 motion 配置视为含 `params` 的字典，打印阶段出现
+  `KeyError: 'params'`；配置校验本身已通过。修正临时诊断命令的访问路径并完整
+  重新执行后通过，该打印失误未涉及仓库代码或训练进程。
+- 修改后关键文件 SHA256：
+  - `sonic_bumi3.yaml`：`3e58f45f2382713a7968587623f0d263e0b7adac5faa0154e8ce23482e528611`。
+  - `validate_bumi3_integration.py`：`8ae9a6d3faf58d58078d14779c99cfbdf006ec9bd8a351763317ff95a9349272`。
+- 不运行仿真 reset/step、训练冒烟或正式新训练：本轮只有一个终止配置值变化，
+  使用现有配置校验即可验证参数契约；用户未要求启动或重启训练。
+- 服务器仓库同步不会热更新 9 月 8 日启动的正式任务，新值须在后续启动时加载。
+- 需要回滚时以新的反向提交恢复入口与校验器对应值并补记日志，不改写历史，不改
+  正式 run 的配置、checkpoint 或用户数据。提交和服务器复验后清理本轮临时工作区。

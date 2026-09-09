@@ -634,7 +634,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "r_elbow_pitch_link",
     ]
     assert terminations["ee_body_pos"]["params"]["threshold_adaptive"] is True
-    assert terminations["ee_body_pos"]["params"]["down_threshold"] == 0.25
+    assert terminations["ee_body_pos"]["params"]["down_threshold"] == 0.40
     assert terminations["ee_body_pos"]["params"]["root_height_threshold"] == 0.4
     assert terminations["anchor_ori_full"]["params"]["threshold"] == 0.20
 

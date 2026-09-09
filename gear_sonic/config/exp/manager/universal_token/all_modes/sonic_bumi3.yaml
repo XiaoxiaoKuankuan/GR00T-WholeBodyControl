@@ -96,8 +96,10 @@ manager_env:
       params:
         # anchor 与末端高度必须使用同一套姿态分类边界，否则同一帧会被两套
         # termination 规则作出矛盾判断。双肘仍是 BUMI3 的末端高度检查对象。
+        # 低姿态下将双肘高度误差容限放宽至 0.40 m，允许蹲伏动作有更大的跟踪偏差；
+        # 下方根高度 0.40 m 仍仅用于姿态分类，正常姿态的误差容限保持 0.20 m。
         threshold: 0.20
-        down_threshold: 0.25
+        down_threshold: 0.40
         root_height_threshold: 0.40
         body_names:
           - "l_elbow_pitch_link"
