@@ -296,3 +296,86 @@
 - 交付与保留：常驻目录含每首音频、SMPL、50 Hz 参考、真实仿真状态、acceptance.json 和前后真实窗口截图；`tracks/0002_25042946/dance_with_music.mp4` 为同一真实状态的 33 秒带音乐回放录像。`/home/weili/GENMO/outputs/sonic_music/validation_20260908_resident` 保存单元/编译/落地/接口回归、资产一致性和汇总。原高悬挂失败现场位于 `/home/weili/GENMO/outputs/sonic_music/20260908_resident_final`，修复后首轮落地及音乐记录位于同级 `20260908_resident_final_v2`。这些是用户原计划要求保留的验证与失败证据，不进 Git；本次 /tmp 临时目录在归档必要记录后精确清理。
 - 边界：站姿发送常驻不等于已经验证无限时长；本轮完整常驻验收约 122 秒，另有较长站姿及三次落地检查。未重新训练模型，未操作真机；舞蹈仍有足底滑动，第一首接触点切向速度 RMS 约 0.102 m/s。主观音乐与舞蹈观感以实际窗口/录像为准。
 - 回滚：仅撤销本次常驻协调器、站姿/时间线参数、resident 协议、按键/相机/悬挂准备和对应测试/文档；不回退原音乐部署、模型、机器人资产或用户文件。按仓库约定在当前 feature 提交推送，服务器只对同名分支执行 ff-only，不启动训练。
+
+
+## 2026-09-09：调整 G1 训练采样、奖励、随机化、Termination 与独立学习率
+
+### 1. 修改范围和工作区保护
+
+- 所属分支：`feature/g1-native-sonic-training`；起始 HEAD 为
+  `ea93ec3d252320e4aacdcac8685e4c38e49b726c`，修改前与远端同名分支一致。
+- 修改前唯一未提交内容是用户已有的未跟踪文件 `g1.tar.gz`；本轮不读取、不修改、
+  不暂存该文件，也不清理历史训练、checkpoint、部署产物或用户数据。
+- 本轮只调整 G1 `sonic_release` 正式训练加载链及共用 PPO trainer；不修改机器人
+  关节顺序、动作维度、观测构成、Robot/SMPL 数据、MJCF/URDF 或部署模型。
+
+### 2. 配置改动
+
+- `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_release.yaml`：
+  - 将 `uniform_sampling_rate` 显式设为 `0.9`。源码混合公式为
+    `failure_prob * (1 - uniform_sampling_rate) + uniform_prob * uniform_sampling_rate`，
+    因此最终语义是 `10%` 困难失败率分布加 `90%` 均匀分布，而不是相反。
+  - 显式设置 Actor LR 为 `2e-5`、Critic LR 为 `1e-3`、训练迭代数为 `300000`。
+  - 质量随机化目标由 `.*wrist_yaw.*|torso_link` 收窄为 `torso_link`，只关闭两侧
+    wrist-yaw link 的质量随机化，其他 domain randomization 项保持不变。
+  - `ee_body_pos.params.threshold` 从 `0.15 m` 调整为 `0.20 m`；低姿态动作的
+    `down_threshold=0.75 m` 沿用原自适应 Termination 配置，没有被本轮改写。
+- 新增
+  `gear_sonic/config/manager_env/rewards/tracking/base_no_local_keypoint_no_anti_shake_feet_acc.yaml`：
+  从奖励组合层不装配 `tracking_vr_5point_local` 和 `anti_shake_ang_vel`，使二者在
+  resolved config 中完全不存在；其余根节点、相对全身、速度、动作变化、关节限位、
+  非期望接触与脚踝加速度奖励保持原定义。
+
+### 3. PPO 独立学习率与 KL 控制
+
+- `gear_sonic/trl/trainer/ppo_trainer.py` 参考已验证的 BUMI 分支实现，按参数名前缀
+  建立具名 `actor`、`critic`、`auxiliary` optimizer role，并在每个 role 内继续区分
+  decay/no-decay；所有可训练参数必须恰好进入一个组，否则立即报错。
+- Actor 参数组初始化为 `2e-5`，Critic 参数组初始化为 `1e-3`；附加模块沿用 Actor
+  初始 LR，但不受策略 KL 控制。初始化会从实际 optimizer group 反查并核验配置，
+  防止 YAML 已修改而真实 optimizer 仍共用学习率。
+- KL 不再在每个 micro-batch loss 中修改全部参数组。现在完整 PPO iteration 的全部
+  epoch/minibatch/microbatch 完成后，汇总全 GPU 的 `policy/approxkl_avg`，每轮只调用
+  一次控制器，并且只改 `actor` role；Critic LR 保持 `1e-3`。
+- adaptive KL 模式不再创建 HuggingFace scheduler，避免第二个调度器在轮末覆盖 Actor
+  LR。TensorBoard 新增 `lr/actor_actual`、`lr/critic_actual`，数值直接读取实际
+  optimizer group；兼容标签 `lr` 继续等于真实 Actor LR。
+- 新 optimizer checkpoint 带 role/schema 元数据；恢复旧版 decay/no-decay 两组
+  checkpoint 时按参数名确定性迁移 Adam 状态，Actor 恢复旧实际 LR，Critic 使用当前
+  独立配置 LR。虽然本轮正式训练要求从零启动，该兼容逻辑用于避免以后恢复时静默错配。
+
+### 4. 测试与静态验证
+
+- 新增 `gear_sonic/tests/test_ppo_optimizer_and_kl.py`，以小型纯 PyTorch Actor/Critic
+  覆盖参数组完整性、`2e-5/1e-3` 独立 LR、高 KL 只调整 Actor、adaptive 模式禁用
+  scheduler、新旧 optimizer checkpoint 恢复，以及 KL 调整每 iteration 只出现一次。
+- 定向测试结果：`7 passed, 1 warning`；唯一 warning 是 TRL experimental API 的既有
+  提示。Python `py_compile/compileall` 通过，新增测试 Ruff 全量检查通过，生产 trainer
+  的 Ruff 致命错误集合 `E9,F63,F7,F82` 通过，`git diff --check` 通过。
+- 使用 Hydra 对 `+exp=manager/universal_token/all_modes/sonic_release` 做真实组合，结果为：
+  uniform `0.9`、困难分量 `0.1`、两个关闭奖励均不存在、质量随机化仅 `torso_link`、
+  `ee_body_pos=0.2`、Actor/Critic LR 为 `2e-5/1e-3`、迭代数 `300000`，输出
+  `G1_RESOLVED_CONFIG_CONTRACT=PASS`。
+- 尝试收集 `gear_sonic/tests` 全目录时，环境缺少与本轮无关的可选依赖 `msgpack` 和
+  `pyzmq`，导致两个既有部署测试在 collection 阶段中止；没有将该次尝试记为全回归通过。
+  本轮新增 PPO 定向测试已独立完整通过。
+
+### 5. noetix-12 启动前核验与待完成项
+
+- `2026-09-09 11:50 CST` 只读核验：服务器实际主机名 `noetix`，仓库为
+  `/root/home/liwei/GR00T-WholeBodyControl`，分支和 HEAD 与本地一致且工作区干净；
+  没有 `train_agent_trl.py`/`accelerate launch` 训练进程，8 张 RTX 4090 D 均空闲。
+- 旧 100k 正式实验已经完成到 `model_step_100000.pt`/`last.pt`，保留于独立历史目录，
+  本轮不会覆盖或删除。新训练将使用新的绝对实验目录，并显式设置 `checkpoint=null`、
+  `resume=false`、`auto_load_latest=false`、8 个进程和 `300000` iterations。
+- 功能提交、GitHub 推送、服务器 `git pull --ff-only`、服务器同环境定向测试、正式八卡
+  启动、首轮 resolved config/optimizer group/TensorBoard 标签和进程健康证据，待功能提交
+  后继续补充。本地尚未运行 Isaac Sim reset/step，训练收敛、MuJoCo 质量和真机安全均未验证。
+
+### 6. 回滚方法
+
+- 配置回滚只需恢复 `sonic_release.yaml` 的旧奖励组合及原采样、随机化、Termination、
+  LR/迭代设置，并删除本轮新增奖励组合；trainer 回滚需整体撤销具名 optimizer group、
+  整轮 KL 控制、实际 LR 日志与对应测试，不能只删日志标签后保留半套参数组逻辑。
+- 新训练使用独立目录，回滚代码不需要删除正式输出；不得使用 `git reset --hard`、强推、
+  清理 `g1.tar.gz` 或删除历史 100k 模型。

@@ -15,7 +15,7 @@ defaults:
   - override /manager_env/observations/critic: privileged_mf_hist
   - override /manager_env/events: tracking/level0_4
   - override /manager_env/terminations: tracking/base_adaptive_strict_ori_foot_xyz
-  - override /manager_env/rewards: tracking/base_5point_local_feet_acc
+  - override /manager_env/rewards: tracking/base_no_local_keypoint_no_anti_shake_feet_acc
 
 use_manager_env: true
 
@@ -37,6 +37,18 @@ manager_env:
   rewards:
     feet_acc:
       weight: -2.5e-6
+  # 仍随机化 torso_link 质量，但从质量随机化目标中移除两侧 wrist_yaw link。
+  events:
+    randomize_rigid_body_mass:
+      params:
+        asset_cfg:
+          body_names: "torso_link"
+  # 末端高度误差的常规终止阈值由 0.15 m 放宽到 0.20 m；低姿态动作继续使用
+  # ee_body_pos_adaptive 自身的 down_threshold=0.75 m。
+  terminations:
+    ee_body_pos:
+      params:
+        threshold: 0.2
   config:
     robot:
       type: g1_model_12_dex
@@ -68,6 +80,9 @@ manager_env:
             "balance",
           ]
         adaptive_sampling:
+          # uniform_sampling_rate 是均匀分量权重；设为 0.9 即
+          # 10% 困难失败率分布 + 90% 均匀分布。
+          uniform_sampling_rate: 0.9
           adp_samp_failure_rate_max_over_mean: 200
         motion_file: data/motion_lib_bones_seed/robot_filtered
         smpl_motion_file: data/bones_seed_smpl
@@ -75,6 +90,10 @@ manager_env:
 
 algo:
   config:
+    # Actor/Critic 使用独立 optimizer 参数组；KL 自适应控制只更新 Actor 组。
+    actor_learning_rate: 2e-5
+    critic_learning_rate: 1e-3
+    num_learning_iterations: 300000
     empty_cache_every_n_ppo_epoch: -1
     num_steps_per_env: 24
     use_clampped_std: true
@@ -105,4 +124,3 @@ algo:
         decoders:
           g1_kin:
             outputs: ["command_multi_future_nonflat", "motion_anchor_ori_b_mf_nonflat"]
-       
