@@ -3387,3 +3387,61 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   把旧优化器和自适应状态混入本次新配置。需要停止新任务时，应先核对上述新 run 与
   真实进程身份，再只停止该任务；不删除旧 run、正式模型或数据。
 - 本记录提交推送后按持续授权同步到服务器，文档同步不影响已经启动的训练参数。
+
+## 2026-09-10：回传最新 BUMI SONIC 训练的 30000 轮完整模型
+
+### 来源与操作范围
+
+- 用户要求将 noetix-volc 最新 BUMI SONIC 训练模型传回本地，预计在 3 万轮左右。
+  实时核查确认活动任务是 2026-09-09 启动的 uniform90/ee040 八卡训练；15:45:23 CST
+  日志为 iteration 30622，最新已完整保存的固定编号模型为 `model_step_030000.pt`，
+  保存时间为 2026-09-10 15:14:03 CST。未复制持续变化的 `last.pt`，未停止或重启训练。
+- 本次操作所在 BUMI 分支为 `feature/bumi-native-sonic-full-training`，记录前本地、
+  origin 与服务器 HEAD 均为 `5cccb8df5223bcfe5836a85827820e6254d2aa1c`，已跟踪文件
+  干净；用户未跟踪的 `g1.tar.gz` 原样保留。训练实际启动代码仍为 `053a9c9`，
+  `5cccb8d` 仅增加上一轮重启记录。本次不改训练代码、配置或机器人资产。
+- 远端来源目录：
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204`。
+- 本地新建独立交付目录：
+  `/home/weili/GR00T-WholeBodyControl/models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204`。
+  目录先前不存在，不覆盖历史模型；同时回传该 run 的 `config.yaml`、`meta.yaml`，
+  并在目录内保存生成的 `transfer_manifest_20260910.json`。上述模型与运行元数据
+  属于既有 `models/` 忽略范围，不提交到 Git；只提交本条中文操作记录。
+
+### 远端模型与配置确认
+
+- 远端使用 `/root/miniconda3/envs/liwei_lab/bin/python`，限制为 CPU 和单线程，
+  对固定 checkpoint 执行 `torch.load(..., map_location="cpu", weights_only=False)`，
+  成功读取 `state.global_step=30000`、`state.max_steps=100000`；包含 45 个 policy
+  状态项、17 个 value 状态项、4 个 optimizer 参数组，以及 scheduler/env 状态。
+  加载前后文件大小和纳秒修改时间一致，确认没有在写入中读取该模型。
+- 同目录配置确认 robot=bumi3、uniform=0.9、Actor/Critic 初始 LR=2e-5/1e-3、
+  双肘常规/低姿态阈值为 0.20/0.40 m，确属本轮新配置训练，不是旧 run 的同名 30k。
+- 源文件大小与 SHA256：
+  - `model_step_030000.pt`：393243856 bytes；
+    `281dac49d29a2f816ecb71538bbc1ecf15190399d4dd8992c97ec8c28a59e495`。
+  - `config.yaml`：27211 bytes；
+    `a903075d6cdf3685cd07173beacf4609cb8b3c164be73ee53c6a15762b288c89`。
+  - `meta.yaml`：40 bytes；
+    `9194a2e11925a35277193b5707f51e1cd684d7ab6274e8127be032ec0318f852`。
+
+### 传输及验证
+
+- 使用 `rsync --partial --info=progress2` 通过固定 SSH Host `noetix-volc` 传到显式
+  `.part` 路径，每个文件只有在大小及 SHA256 与远端一致后才原子改名为正式文件。
+  三份文件全部传输成功且哈希与上述来源一致，没有覆盖旧目录或遗留 `.part` 文件。
+- 2026-09-10 15:56:32 CST 使用本地 `/home/weili/miniconda3/envs/sonic/bin/python`
+  与 PyTorch 2.7.0+cu128，CPU 加载验证输出 `LOCAL_HASH_AND_CPU_LOAD=PASS`，
+  确认 global_step=30000、max_steps=100000、policy/value 状态项 45/17、优化器
+  4 组，以及随模型配置的 BUMI 身份和最新阈值/采样契约。
+  首次临时验证命令将 `OnlineTrainerState` 误作字典索引，发生 TypeError；模型
+  反序列化本身成功，修正为按属性读取后完整复验通过，未修改任何模型内容。
+- 15:56:15 CST 远端复核确认 launcher `3269510` 与 worker `3269523～3269530`
+  全部仍对应本次正式 run，训练已推进到 iteration 30838；最新固定编号仍为
+  `model_step_030000.pt`。传输全过程未发送训练控制信号或修改远端模型/配置。
+- `transfer_manifest_20260910.json` 已标记 complete，保存源文件指纹、双端路径、
+  本地加载结果、完成时间和传输后的远端运行快照；源文件大小及 SHA256 可据此复核。
+- 此次仅回传训练 checkpoint 及配套配置，不执行 ONNX 导出、仿真评估或训练恢复；
+  文件完整、可以加载不代表模型已经收敛或通过仿真/真机验证。
+- 如需撤销本地副本，应先确认无调用方引用，再仅处理上述独立交付目录；远端正式
+  模型与训练目录保持原样，不以回滚传输为由删除服务器产物或改写 Git 历史。
