@@ -3714,3 +3714,9 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   目录。关键命令、数据和结果归档后，已仅清理
   `/tmp/bumi-g1-pd-20260910-w4j5x099`（50 文件、36170 bytes），输出
   `TASK_TEMP_CLEANUP_PASS`。正式模型、五对数据、用户 `g1.tar.gz` 保留。
+- 功能提交 `40434dd7578558a8d63af38e79d3f9bfff613e58` 已推送到 GitHub 当前分支。
+  2026-09-10 17:58:20 CST，`noetix-volc` 核对同分支、原 HEAD 和干净工作区后
+  `git pull --ff-only` 从 `393ae3e` 快进到该提交；五个 Python 文件静态编译通过，
+  新 XML/YAML 的 SHA-256 与本地一致，服务器工作区干净。原 launcher 与八个
+  worker 的 PID、启动 tick、训练命令及 cwd 在拉取前后均通过核对，输出
+  `SERVER_SYNC_PASS`。后续仅补记同步证据，不改变已验证实现。
