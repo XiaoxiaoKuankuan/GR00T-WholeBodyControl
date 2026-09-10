@@ -3922,3 +3922,5 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 前走首帧最大参考关节速度约 31.937 rad/s；将整段目标窗口冻结并把初始化速度设为零，不等价于播放此动态动作。两编码器等待都会摔倒而自动播放均不摔，说明此样本不适合当前首帧保持；查看时使用 `--autoplay`。未为规避此限制改动控制器、强写物理状态或删样本。
 - 旧 wave 的纯 SMPL 默认站姿入口另验证等待 10s、完整播放和末尾保持 5s，最大倾角约 11.26°，未摔倒。新十对其余九条等待/播放未见明显摔倒；不将此有限样本结果表述为全数据集动作质量合格。
 - 本轮未启动 Isaac Lab GUI、未重训、未进行人工 GUI 或实机验收；训练函数数值一致性、MuJoCo 动力学及键盘队列路径为已执行检查。原8卡训练在同步前 PID/启动 tick/cwd/命令均与上轮一致，服务器同分支 HEAD 6ba4ef3，工作区干净。
+- 功能提交 `a7592c9ea9b713809de44de5214547ca62d5b4ee` 已推送 GitHub 当前分支；noetix-volc 同分支通过 `git pull --ff-only` 从 6ba4ef3 快进到该提交，工作区干净。5 个相关 Python 文件静态编译通过，相关源码及 XML/YAML 指纹与本地一致。同步前后 launcher 3269510（start_ticks=964046165）和八个 worker 3269523～3269530（start_ticks=964046505）的 PID、启动 tick、cwd 和完整命令逐项完全一致，输出 `SERVER_SMPL_ENTRY_SYNC_PASS`。后续仅追加审计记录，不改变已经验证的实现。
+- 测试与传输关键证据已归档后，确认本线程执行进程结束，并检查可读进程的 cmdline/cwd/fd 无目录引用，仅清理精确专用目录 `/tmp/bumi-smpl-entry-20260910-uIz0Bc`（158 文件，618252 bytes），输出 `TASK_TEMP_CLEANUP_PASS`。正式十对数据、旧五对、模型、测试源码和用户 g1.tar.gz 保留。该临时路径此后仅作历史来源记录。
