@@ -2,7 +2,8 @@
 
 BUMI3 使用独立的 Python MuJoCo sim2sim 入口，不复用 G1 C++ 部署程序中的 29 电机、
 Unitree DDS 和硬件映射。训练网络仍保留内部键名 `g1` 作为 Robot Encoder 的 checkpoint
-兼容名称，因此实际部署文件应是 `model_step_XXXXXX_g1.onnx`；这不表示机器人是 G1。
+兼容名称，因此机器人参考模式使用 `model_step_XXXXXX_g1.onnx`；这不表示机器人是 G1。
+人体参考模式通过 `--encoder smpl` 选择，并使用 `model_step_XXXXXX_smpl.onnx`。
 
 ## 1. 使用 `env_isaaclab` Conda 环境
 
@@ -95,9 +96,14 @@ GUI 默认固定第一帧参考并等待按键，未设置 `--duration` 时持�
 
 顺序就是 P 的切换顺序；`name` 必须唯一，路径相对清单所在目录解析。`robot` 可指向
 既有加载器支持的 PKL/NPZ/CSV 动作，`smpl` 可省略，声明时必须存在。MuJoCo
-Robot Encoder 只消费 robot，SMPL 留给 Lab 的 SMPL Encoder。单项可额外指定
+默认 Robot Encoder 只消费 robot；`--encoder smpl` 读取 smpl，robot 用于初始化和
+红色影子。SMPL 模式要求 smpl 存在，允许省略 robot；省略时从默认站姿初始化。
+配对文件必须同帧数、同为 50 FPS，不会静默裁剪或补帧。单项可额外指定
 `joint_order`、`quaternion_order`；数据集模式不接受命令行的 `--motion-key` 或顺序
 覆盖，避免把同一覆盖误用到全部轨迹。
+`--motion-name NAME` 指定从清单中的哪条开始，随后 P 仍按清单顺序循环；
+它与选择 PKL 容器内部条目的 `--motion-key` 不同。SMPL 容器使用不同内部键时，
+清单可单独写 `smpl_motion_key`，默认沿用 `motion_key`。
 
 2026-09-10 从 `noetix-volc` 正式 BUMI 训练数据回传的五对文件位于：
 
@@ -242,7 +248,7 @@ Isaac Lab URDF 或其他仓库规则再次覆盖这些定义；启动验证会�
 这是数据地面基准差异，应在数据转换或专用资产中显式处理，不应通过 sim2sim 自动修改
 ``root z`` 或让参考影子跟随 policy 根高度来掩盖。
 
-ONNX 只保存网络权重与 1170→21 的张量接口，不包含参考轨迹、锚点 body 名称或 FK
+ONNX 只保存网络权重与张量接口（Robot 为 1170→21，SMPL 为 1470→21），不包含参考轨迹、锚点 body 名称或 FK
 结果；这些观测语义由 sim2sim 运行器负责重建。因此换动作文件或部署实现时仍必须使用
 本配置和运行器，不能只凭 ONNX 文件名推断观测正确。
 
@@ -277,6 +283,96 @@ Lab GUI 会直接运行动作，T/P 与首帧等待属于本次修改的 BUMI Mu
 需要有限步无窗口验证时，把 `++headless=false` 换成 `++headless=true` 并加
 `++max_render_steps=20`。该上限包含结束前的一次推理检查，实际为 19 次环境 step，
 只能验证初始化和短时运行，不代表完整动作稳定性。
+
+### 3.4 SMPL 人体参考入口与新下载的十对大集数据
+
+2026-09-10 新增的 `--encoder smpl` 真正使用 SMPL 联合模型。与 Robot 入口的区别：
+
+| 项目 | `--encoder robot`（默认） | `--encoder smpl` |
+|---|---|---|
+| 联合模型 | `model_step_030000_g1.onnx` | `model_step_030000_smpl.onnx` |
+| 参考来源 | 机器人关节位置、速度、根朝向 | SMPL 局部人体关键点、根朝向 |
+| 未来窗口 | 当前起 10 帧，间隔 0.1 秒 | 当前起连续 10 帧，间隔 0.02 秒 |
+| 参考输入维度 | 480 | 780（720 关键点 + 60 朝向） |
+| 加上本体历史后的输入 | 1170 | 1470 |
+| 输出和执行 | 21 维动作、原 Python PD | 同左 |
+
+`pose_aa[T,72]` 的根旋转先从 Y-up 转到 Z-up，再消除 SMPL 基准旋转；
+`smpl_joints[T,24,3]` 已经是离线生成的训练坐标，部署不再转轴，也不额外减去
+pelvis 或叠加 transl。这里只支持已经具备上述字段的 50 FPS 训练 PKL/NPZ，
+不支持仅有 pose/betas 的原始 SMPL 文件，不需要安装 SMPL 身体模型或许可证资产。
+
+新下载数据来自 noetix-volc 的
+`/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2/train`，
+实际源文件均属于 `bumi3_smpl_97660_v1` 大训练集，没有重复原五对。
+本地目录 `data/noetix_bumi3_bigset_10pairs_20260910/` 包含 `dataset.json`、
+`transfer_manifest.json`、`robot/` 和 `smpl/`；20 个 PKL 均为实文件，逐项大小和
+SHA-256 与服务器一致。共 9067 帧、181.34 秒，按动作类型挑选，未按策略表现筛选。
+
+| 轨迹名称 | 类型 | 帧数 | 时长（秒） |
+|---|---|---:|---:|
+| `Idle_Right_001__A018` | 站立 | 2984 | 59.68 |
+| `walk_forward_amateur_003__A001` | 向前走 | 1509 | 30.18 |
+| `walk_backward_loop_001__A021` | 后退 | 789 | 15.78 |
+| `wave_R_001__A431` | 右手挥手 | 297 | 5.94 |
+| `squat_003__A361` | 深蹲 | 424 | 8.48 |
+| `Jump_002__A018` | 跳跃 | 1965 | 39.30 |
+| `dance_basic_chaines_180_R_fast_001__A309` | 舞蹈 | 384 | 7.68 |
+| `Neutral_kick_trash_004__A057` | 踢物 | 399 | 7.98 |
+| `pels_air_punch_001__A493` | 出拳 | 179 | 3.58 |
+| `run_start_180_R_001__A327` | 跑步 | 137 | 2.74 |
+
+用新清单启动 SMPL 模式，从挥手开始，进入窗口后 T 播放、P 切下一条：
+
+```bash
+cd /home/weili/GR00T-WholeBodyControl
+conda activate env_isaaclab
+BUMI_RUN="$PWD/models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204"
+BUMI_DATA="$PWD/data/noetix_bumi3_bigset_10pairs_20260910"
+
+python gear_sonic/scripts/run_bumi3_sim2sim.py \
+  --encoder smpl \
+  --policy "$BUMI_RUN/exported/model_step_030000_smpl.onnx" \
+  --dataset "$BUMI_DATA/dataset.json" \
+  --motion-name wave_R_001__A431
+```
+
+不指定 `--motion-name` 就从第一条站立开始。这里人体数据进入 SMPL 编码器，配对
+Robot 只负责初始机器人状态和红色参考影子，不作为 SMPL tokenizer 的关节输入。
+画面中的红色仍是配对机器人参考，未新增人体 mesh 或人体骨架渲染。
+
+指定单条人体文件，并用配对机器人初始化：
+
+```bash
+python gear_sonic/scripts/run_bumi3_sim2sim.py \
+  --encoder smpl \
+  --policy "$BUMI_RUN/exported/model_step_030000_smpl.onnx" \
+  --motion "$BUMI_DATA/smpl/wave_R_001__A431.pkl" \
+  --robot-motion "$BUMI_DATA/robot/wave_R_001__A431.pkl"
+```
+
+省略 `--robot-motion` 也可独立读取 SMPL：此时机器人以默认关节姿态和 0.4744m
+根高初始化，yaw 取人体当前参考帧；不把人体 transl 的身高直接用作机器人根高。
+由于没有配对机器人参考，此模式只显示策略控制的机器人，不显示虚构的红色影子。
+默认站姿可能不适合一开始就在下蹲、腾空或快速运动的参考；对比 Lab 时使用同名
+配对初始化可以排除这项初始状态差异。
+
+两种模式都保留首帧等待、T/P 和末帧保持。SMPL 等待时十个未来目标全固定为当前帧，
+实际物理继续运行。`--validate-only` 检查全部轨迹与模型；实际无窗口回放使用
+`--headless --no-real-time --duration 10`，该模式默认自动播放，且一次只播放所选轨迹。
+错误地把 `*_g1.onnx` 用于 SMPL 会在仿真前明确报维度不匹配，不自动补齐输入。
+
+本轮用 30000 步 SMPL ONNX 对十条动作做了实际 MuJoCo 回放。九条完成
+“首帧等待 5 秒→T 播完整段→末帧保持 2 秒”，未见明显摔倒或数值异常。
+`walk_forward_amateur_003__A001` 是例外：Robot 和 SMPL 模式冻结首帧都约在
+1 秒后摔倒；改为直接播放，两种模式均完整运行 30.18 秒并继续保持 2 秒，
+最大根倾角分别为 18.76° 和 19.92°，无摔倒。查看这条行走动作请额外加
+`--autoplay`，这是首帧保持能力的已知限制，不要把十条数据解读为都能无限等待。
+未更换或删除该样本，未为此修改 PD、armature 或动力学参数。
+
+旧 `wave_R_001__A428` 另做了两种编码器的 30 秒等待→完整播放→10 秒保持，
+均未摔倒；仅 SMPL、无配对 Robot 的默认站姿初始化也完成了该挥手动作。
+上述为无窗口动力学回放和观测验证，不等同于全训练集质量评估或人工 GUI 验收。
 
 ## 4. 验证
 

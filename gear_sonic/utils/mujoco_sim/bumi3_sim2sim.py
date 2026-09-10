@@ -30,6 +30,9 @@ Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加�
 运行器还支持有序轨迹列表和 T/P 按键队列：保持状态固定全部未来参考并清零参考
 速度，策略和物理照常运行；切换轨迹时重置实际状态与历史观测，避免上一条动作污染
 新参考。键盘回调只入队，所有状态变更由控制线程执行。
+SMPL 模式使用独立的 1470 维联合模型，人体参考连续十帧、间隔 0.02 秒；配对 Robot
+仅用于初始化和参考影子，不进入人体 tokenizer。无配对时使用明确的默认站姿初始化，
+不把人体身高或人体关节角直接写入机器人，也不显示虚构的机器人参考影子。
 """
 
 from __future__ import annotations
@@ -47,9 +50,18 @@ import mujoco
 import numpy as np
 import yaml
 
+from gear_sonic.utils.mujoco_sim.bumi3_smpl_reference import (
+    SMPL_FUTURE_FRAMES,
+    SMPL_FUTURE_STRIDE,
+    SMPL_TOKENIZER_DIM,
+    SmplReference,
+    build_smpl_tokenizer,
+)
+
 
 JointOrder = Literal["auto", "policy", "isaaclab", "mujoco"]
 QuaternionOrder = Literal["auto", "wxyz", "xyzw"]
+EncoderMode = Literal["robot", "smpl"]
 
 DEFAULT_BUMI3_SIM2SIM_CONFIG = (
     Path(__file__).resolve().parents[2] / "config" / "sim2sim" / "bumi3_sonic.yaml"
@@ -192,6 +204,14 @@ class Bumi3Contract:
     @property
     def control_dt(self) -> float:
         return self.sim_dt * self.decimation
+
+    def policy_input_dim(self, encoder: EncoderMode) -> int:
+        """按明确选择的编码器检查联合模型维度，保留原 Robot 配置字段的含义。"""
+        if encoder == "robot":
+            return self.combined_policy_input_dim
+        if encoder == "smpl":
+            return SMPL_TOKENIZER_DIM + self.actor_proprioception_dim
+        raise ValueError(f"不支持的 encoder: {encoder!r}")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Bumi3Contract":
@@ -351,6 +371,8 @@ class ReferenceMotion:
     name: str
     root_lin_vel_world: np.ndarray | None = None
     root_ang_vel_world: np.ndarray | None = None
+    smpl_reference: SmplReference | None = None
+    has_robot_reference: bool = True
 
     @property
     def num_frames(self) -> int:
@@ -685,7 +707,7 @@ def load_reference_motion(
 
 
 class Policy(Protocol):
-    """联合 Robot Encoder + dynamic decoder 的最小推理协议。"""
+    """联合 Robot/SMPL 编码器与动态解码器的最小推理协议。"""
 
     input_dim: int
     output_dim: int
@@ -694,9 +716,12 @@ class Policy(Protocol):
 
 
 class OnnxRobotPolicy:
-    """加载 ``*_g1.onnx``，并验证其输入为 1170、输出为 21。"""
+    """加载联合 ONNX；保留原类名兼容调用，按编码器核验 1170/1470 输入与 21 输出。"""
 
-    def __init__(self, path: str | Path, contract: Bumi3Contract, provider: str = "cpu"):
+    def __init__(
+        self, path: str | Path, contract: Bumi3Contract, provider: str = "cpu",
+        *, encoder: EncoderMode = "robot",
+    ):
         try:
             import onnxruntime as ort
         except ImportError as error:
@@ -720,9 +745,11 @@ class OnnxRobotPolicy:
         output_shape = self.session.get_outputs()[0].shape
         self.input_dim = int(input_shape[-1])
         self.output_dim = int(output_shape[-1])
-        if self.input_dim != contract.combined_policy_input_dim:
+        expected_input_dim = contract.policy_input_dim(encoder)
+        if self.input_dim != expected_input_dim:
             raise ValueError(
-                f"ONNX 输入应为 {contract.combined_policy_input_dim}，实际为 {self.input_dim}"
+                f"encoder={encoder} 的 ONNX 输入应为 {expected_input_dim}，实际为 {self.input_dim}；"
+                "robot 使用 *_g1.onnx，smpl 使用 *_smpl.onnx"
             )
         if self.output_dim != contract.action_dim:
             raise ValueError(f"ONNX 输出应为 {contract.action_dim}，实际为 {self.output_dim}")
@@ -736,8 +763,8 @@ class OnnxRobotPolicy:
 class ZeroPolicy:
     """只供静态/动力学 smoke 使用的零动作策略，不用于效果评估。"""
 
-    def __init__(self, contract: Bumi3Contract):
-        self.input_dim = contract.combined_policy_input_dim
+    def __init__(self, contract: Bumi3Contract, *, encoder: EncoderMode = "robot"):
+        self.input_dim = contract.policy_input_dim(encoder)
         self.output_dim = contract.action_dim
 
     def __call__(self, observation: np.ndarray) -> np.ndarray:
@@ -760,12 +787,24 @@ class Bumi3SonicSim2Sim:
         align_reference_heading: bool | None = None,
         motions: list[ReferenceMotion] | None = None,
         start_paused: bool = False,
+        encoder: EncoderMode = "robot",
     ):
         self.contract = contract
+        self.encoder = encoder
+        self.policy_input_dim = contract.policy_input_dim(encoder)
         self.motion = motion
         self.motions = tuple(motions) if motions is not None else (motion,)
         if not self.motions or self.motions[0] is not motion:
             raise ValueError("轨迹列表不能为空，且第一项必须是初始化 motion")
+        for item in self.motions:
+            if encoder == "smpl" and (
+                item.smpl_reference is None
+                or item.smpl_reference.num_frames != item.num_frames
+                or not np.isclose(item.smpl_reference.fps, contract.target_fps)
+            ):
+                raise ValueError(f"SMPL 模式缺少同帧数、50 FPS 的人体参考: {item.name}")
+            if encoder == "robot" and not item.has_robot_reference:
+                raise ValueError(f"Robot 模式不能使用仅含 SMPL 的参考: {item.name}")
         self.motion_index = 0
         self.playing = not start_paused
         # viewer 回调可能在其他线程执行，只入队；主控制线程负责切换模型状态。
@@ -777,7 +816,7 @@ class Bumi3SonicSim2Sim:
             if align_reference_heading is None
             else align_reference_heading
         )
-        if policy.input_dim != contract.combined_policy_input_dim:
+        if policy.input_dim != self.policy_input_dim:
             raise ValueError("policy input_dim 与配置不一致")
         if policy.output_dim != contract.action_dim:
             raise ValueError("policy output_dim 与配置不一致")
@@ -842,7 +881,7 @@ class Bumi3SonicSim2Sim:
             for name, width in shape_by_name.items()
         }
         self.last_action_policy = np.zeros(contract.action_dim, dtype=np.float32)
-        self.last_observation = np.zeros(contract.combined_policy_input_dim, dtype=np.float32)
+        self.last_observation = np.zeros(self.policy_input_dim, dtype=np.float32)
         self.last_torque_mujoco = np.zeros(contract.action_dim, dtype=np.float64)
         self.reference_heading_delta_wxyz = np.asarray(
             [1.0, 0.0, 0.0, 0.0], dtype=np.float64
@@ -1035,6 +1074,8 @@ class Bumi3SonicSim2Sim:
 
         if not 0.0 < alpha <= 1.0:
             raise ValueError(f"reference alpha 必须位于 (0, 1]，实际为 {alpha}")
+        if not self.motion.has_robot_reference:
+            return []
         self._update_reference_visual_data(frame)
         tint = np.asarray([1.0, 0.15, 0.15], dtype=np.float32)
         return self._resolved_visual_marker_specs(
@@ -1245,6 +1286,7 @@ class Bumi3SonicSim2Sim:
     def playback_status(self) -> dict[str, object]:
         """返回当前轨迹与播放状态，供终端提示和自动化交互验收使用。"""
         return {
+            "encoder": self.encoder,
             "motion_index": self.motion_index,
             "motion_count": len(self.motions),
             "motion_name": self.motion.name,
@@ -1402,11 +1444,25 @@ class Bumi3SonicSim2Sim:
         return value
 
     def build_observation(self) -> np.ndarray:
-        """构造联合 ``*_g1.onnx`` 所需的 480+690=1170 维输入。"""
+        """按所选编码器构造联合输入；本体历史和 PD 与原 Robot 入口完全共用。"""
 
         self._append_current_state()
-        value = np.concatenate((self._build_robot_tokenizer(), self._build_proprioception()))
-        if value.size != self.contract.combined_policy_input_dim:
+        if self.encoder == "smpl":
+            indices = (
+                self.motion.future_indices(
+                    self.motion_frame, SMPL_FUTURE_FRAMES, SMPL_FUTURE_STRIDE, self.loop_motion,
+                )
+                if self.playing
+                else np.full(SMPL_FUTURE_FRAMES, self.motion_frame, dtype=np.int64)
+            )
+            tokenizer = build_smpl_tokenizer(
+                self.motion.smpl_reference, indices, self.data.xquat[self.anchor_body_id],
+                self.reference_heading_delta_wxyz,
+            )
+        else:
+            tokenizer = self._build_robot_tokenizer()
+        value = np.concatenate((tokenizer, self._build_proprioception()))
+        if value.size != self.policy_input_dim:
             raise ValueError(f"联合 policy 输入维度错误: {value.size}")
         if not np.isfinite(value).all():
             raise FloatingPointError("policy observation 含 NaN/Inf")

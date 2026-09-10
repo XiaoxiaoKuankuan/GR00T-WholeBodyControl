@@ -3832,3 +3832,93 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   四个相关 Python 文件静态编译通过。原 launcher 与八个 worker 的 PID、启动
   tick、完整命令和 cwd 在拉取前后完全一致，输出 `SERVER_ARM001_SYNC_PASS`。
   后续提交仅补记这条同步证据，不改变已通过测试的参数或实现。
+
+## 2026-09-10：增加 SMPL sim2sim 入口并从大训练集传回十对参考数据
+
+- 用户要求为 BUMI sim2sim 增加 SMPL 输入，并从 noetix-volc 大数据集另外下载
+  十对 Robot/SMPL 参考。起始分支 `feature/bumi-native-sonic-full-training`，HEAD
+  `6ba4ef35d6992777ff0d664f5e63261c0872db56`，与 upstream 领先/落后均为 0；
+  唯一未跟踪文件 `g1.tar.gz` 受保护。本轮不修改训练参数、PD、频率或 XML。
+- 修改范围为 BUMI 专用 SMPL 加载/观测模块、sim2sim 核心、数据集加载器、CLI、
+  专用回归测试、使用说明和本记录；默认 Robot 入口保持兼容，不改 G1/H2 通用逻辑。
+- 依据 30000 步模型的保存配置与实际训练观测函数，实现 SMPL 连续十帧、每帧间隔
+  0.02 秒、720 维局部人体关键点与 60 维相对根朝向，拼接 690 维本体历史为
+  1470 维输入。pose_aa 的根朝向执行 Y-up→Z-up 和 SMPL 基准旋转消除；
+  已离线处理的 smpl_joints 不重复转轴、不额外减根平移。Robot 仍为 1170 维。
+- 新数据仅保存到独立且被 Git 忽略的正式 data 子目录，不覆盖旧五对；服务器源为
+  `bumi3_sonic_three_source_base_anchor_v2/train`，仅选实际解析到
+  `bumi3_smpl_97660_v1` 的大集配对，下载时跟随符号链接并核验 SHA-256。
+- 验证结果、下载清单、同步证据与临时目录清理在完成后追加；未完成前不将接口
+  实现或有限值检查表述为动作质量通过。回滚应使用新的反向提交，仅撤销本节改动。
+- 新增 `gear_sonic/utils/mujoco_sim/bumi3_smpl_reference.py`：读取训练格式的
+  PKL/NPZ 和具名容器，校验 50 FPS、[T,72]/[T,24,3]、有限值；按当前训练
+  `commands.py`、`observations.py` 与 `remove_smpl_base_rot` 实现人体编码输入。
+  新增 `gear_sonic/tests/test_bumi3_smpl_sim2sim.py`，直接抽取训练函数体与部署值
+  比较（容差 2e-6），避免用部署实现自身生成期望值；覆盖格式、配对、纯人体入口、
+  未来步长、末尾/循环、冻结、T/P、模型维度和数据集起始轨迹选择。
+- `bumi3_sim2sim.py` 按 encoder 选择 1170/1470 输入，复用原本体历史和 PD。
+  `bumi3_motion_dataset.py` 在 SMPL 模式读取 smpl，配对 Robot 用于初始化和
+  红色影子；帧数/FPS 不一致直接拒绝。可省略配对 Robot，明确以 BUMI 默认
+  站姿、0.4744m 根高和当前 SMPL yaw 初始化，此时不显示虚构参考机器人。
+- CLI 增加 `--encoder robot|smpl`、`--robot-motion`、`--robot-motion-key` 和
+  `--motion-name`；最后一项指定从清单哪条开始，P 仍按原顺序循环。默认 Robot
+  命令保持可用。SMPL 模式需配套 `model_step_030000_smpl.onnx`，不能混用
+  `*_g1.onnx`；两方向真实模型维度错误均已实测拒绝。配对红影仍是机器人参考，
+  未新增人体 mesh/骨架渲染。详细命令与字段语义已写入 `bumi3_sim2sim.md` 第 3.4 节。
+- 实际下载目录为 `data/noetix_bumi3_bigset_10pairs_20260910/`，共 20 个 PKL、
+  7,566,316 bytes，10 对共 9067 帧/181.34 秒；robot/smpl 每对同名、同帧数、
+  同为 50 FPS。目录内 `dataset.json` 保留播放顺序，`transfer_manifest.json`
+  记录服务器符号链接路径、解析后的真实源路径、大小和每文件 SHA-256。
+  下载通过 `rsync -avL --files-from=<十文件清单>`，SSH 使用固定 noetix-volc
+  别名及 `-o ProxyCommand=none`。所有 20 文件完整性匹配，无本地符号链接，
+  Robot/SMPL 两种加载器均成功读入十条，输出 `TEN_PAIRS_TRANSFER_SHA256_AND_LOAD=PASS`。
+- 按动作类型选择而非策略效果筛选；早期窄名称候选无符合限制的配对，未下载任何
+  不完整候选，最终扩大同类型名称匹配。选取时跳过部分 Robot/SMPL 相差一帧的
+  源文件，不裁剪、不补齐，不覆盖原五对；最终具体名称、帧数和时长见使用文档表格。
+- 资产和配置完全未改：XML SHA-256
+  `1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`，YAML
+  `f52be29ca85a264273dc5ab75055ea52b8c297a362d093fd27f25ca90d9865f8`。
+  Robot ONNX 为 `e884db48c3d5d222821c0816f9c4c81fbcd8e3b9e9129cefcd507ab463466a9a`，
+  SMPL ONNX 为 `6f7e75978cff5e90e117036457d42c50e77061e37c4f6b4c033c92c71da85cf7`；
+  两者继续使用原导出文件，不重新导出模型或修改训练。
+- AST 与起始 HEAD 比较确认 `_apply_pd_control`、`step_control`、`reset`、
+  `_build_robot_tokenizer`、`_build_proprioception`、根角速度、本体状态、参考速度、
+  heading 对齐、armature 应用及模型/执行器核验共 12 个方法未改，输出
+  `ORIGINAL_PD_DYNAMICS_AND_ROBOT_OBSERVATION_UNCHANGED=PASS`。
+- 测试命令：`/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py gear_sonic/tests/test_bumi3_smpl_sim2sim.py -p no:cacheprovider --basetemp=/tmp/bumi-smpl-entry-20260910-uIz0Bc/pytest-final`；
+  **44 passed in 6.57s**，含新增 10 项。唯一 warning 来自读取既有训练源码时
+  历史 docstring 的 `\*` 转义（DeprecationWarning），不涉及动力学数值。
+  `python gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke` 输出
+  `BUMI3_SIM2SIM_VALIDATION=PASS`；CLI help、新清单选 wave 的 10 秒实际回放、
+  单条 SMPL 配对入口 validate-only 均成功。
+- 真实 ONNX 回放使用专用临时 `runtime_check.py`：旧 wave 两种编码器各
+  1500 步等待，再 T 播放 219 帧，末尾额外 500 步保持；新十对每条 250 步等待、
+  T 播放完整帧数、额外 100 步保持。每个物理控制步检查有限值，记录根高和根倾角，
+  全部 MuJoCo warning=0；其中一条的摔倒作为质量失败如实保留，未混称全通过。
+  实际 SMPL ONNX 在 P 后也成功切至下一条、重置到第 0 帧并保持，观测为 1470 维。
+
+| 动作 / 编码器 / 初始化 | 等待最低根高 m | 等待最大倾角 ° | 播放最低根高 m | 播放最大倾角 ° |
+|---|---:|---:|---:|---:|
+| wave_R_001__A428 / robot / 配对 | 0.462505 | 5.236921 | 0.458501 | 9.532584 |
+| wave_R_001__A428 / smpl / 配对 | 0.462505 | 6.034218 | 0.455079 | 11.267049 |
+| Idle_Right_001__A018 / smpl / 配对 | 0.449265 | 8.901551 | 0.459238 | 3.681924 |
+| walk_forward_amateur_003__A001 / smpl / 配对 | 0.045201 | 83.981392 | 0.050779 | 91.972644 |
+| walk_backward_loop_001__A021 / smpl / 配对 | 0.461590 | 5.216294 | 0.433238 | 10.989346 |
+| wave_R_001__A431 / smpl / 配对 | 0.463453 | 6.740301 | 0.459144 | 9.274743 |
+| squat_003__A361 / smpl / 配对 | 0.461762 | 3.961279 | 0.241372 | 32.131026 |
+| Jump_002__A018 / smpl / 配对 | 0.460863 | 4.557819 | 0.411679 | 26.981438 |
+| dance_basic_chaines_180_R_fast_001__A309 / smpl / 配对 | 0.463715 | 6.401687 | 0.418626 | 20.070341 |
+| Neutral_kick_trash_004__A057 / smpl / 配对 | 0.455578 | 6.252736 | 0.402414 | 12.671854 |
+| pels_air_punch_001__A493 / smpl / 配对 | 0.460645 | 2.592767 | 0.429097 | 23.159376 |
+| run_start_180_R_001__A327 / smpl / 配对 | 0.459082 | 5.460049 | 0.369357 | 29.481410 |
+| wave_R_001__A428 / smpl / 默认站姿 | 0.464540 | 5.610916 | 0.455545 | 11.263624 |
+
+- 表中前走动作的“播放”从已经摔倒的等待状态开始，不能据此判断动态跟踪能力。
+  为区分首帧保持与完整播放，另做独立 reset 的 Robot/SMPL 各 10s 冻结和自动播放对照：
+  - robot，首帧等待 10s：最低根高 0.037799m，最大倾角 84.129398°，结束根高 0.052308m，首次根高<0.15m且倾角>60°的时刻 1.24s。
+  - robot，自动播放 30.18s + 末帧保持 2s：最低根高 0.391959m，最大倾角 18.758594°，结束根高 0.467631m，首次根高<0.15m且倾角>60°的时刻 Nones。
+  - smpl，首帧等待 10s：最低根高 0.045201m，最大倾角 83.981392°，结束根高 0.052233m，首次根高<0.15m且倾角>60°的时刻 1.04s。
+  - smpl，自动播放 30.18s + 末帧保持 2s：最低根高 0.396225m，最大倾角 19.917747°，结束根高 0.472964m，首次根高<0.15m且倾角>60°的时刻 Nones。
+- 前走首帧最大参考关节速度约 31.937 rad/s；将整段目标窗口冻结并把初始化速度设为零，不等价于播放此动态动作。两编码器等待都会摔倒而自动播放均不摔，说明此样本不适合当前首帧保持；查看时使用 `--autoplay`。未为规避此限制改动控制器、强写物理状态或删样本。
+- 旧 wave 的纯 SMPL 默认站姿入口另验证等待 10s、完整播放和末尾保持 5s，最大倾角约 11.26°，未摔倒。新十对其余九条等待/播放未见明显摔倒；不将此有限样本结果表述为全数据集动作质量合格。
+- 本轮未启动 Isaac Lab GUI、未重训、未进行人工 GUI 或实机验收；训练函数数值一致性、MuJoCo 动力学及键盘队列路径为已执行检查。原8卡训练在同步前 PID/启动 tick/cwd/命令均与上轮一致，服务器同分支 HEAD 6ba4ef3，工作区干净。
