@@ -8,7 +8,7 @@
 参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
-闭环，以及原生 PD 力矩限制、低惯量关节阻尼稳定性和积分后根观测同步。
+闭环，以及外部 PD 力矩限制、手臂部署惯量/被动阻尼、阻尼衰减和积分后根观测同步。
 测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
 仅用于验证加载器契约。
 """
@@ -299,8 +299,8 @@ def test_reset_fills_history_like_isaaclab_first_append() -> None:
         np.testing.assert_allclose(stacked, np.repeat(stacked[-1:], 10, axis=0))
 
 
-def test_native_pd_matches_force_law_and_effort_limits() -> None:
-    """用独立 PD 公式核对原生执行器，防止位置/力矩单位混淆或限幅失效。"""
+def test_explicit_pd_matches_force_law_and_effort_limits() -> None:
+    """用独立 PD 公式核对 motor 力矩，防止位置/力矩单位混淆或限幅失效。"""
     contract = _contract()
     runner = Bumi3SonicSim2Sim(
         contract, make_static_reference_motion(contract), ZeroPolicy(contract),
@@ -317,19 +317,25 @@ def test_native_pd_matches_force_law_and_effort_limits() -> None:
         )
         runner._apply_pd_control()
         mujoco.mj_forward(runner.model, runner.data)
-        np.testing.assert_allclose(runner.data.ctrl[runner.actuator_ids], target, atol=1e-12)
+        np.testing.assert_allclose(runner.data.ctrl[runner.actuator_ids], expected, atol=1e-12)
         np.testing.assert_allclose(
             runner.data.actuator_force[runner.actuator_ids], expected, atol=1e-10,
         )
     assert np.any(np.isclose(np.abs(expected), contract.effort_mujoco))
+    assert runner.model.opt.integrator == mujoco.mjtIntegrator.mjINT_EULER
+    np.testing.assert_allclose(runner.model.dof_damping[runner.dof_addresses], 0.05)
+    for side in ("l", "r"):
+        for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
+            index = contract.mujoco_joint_names.index(f"{side}_{suffix}_joint")
+            assert np.isclose(runner.model.dof_armature[runner.dof_addresses[index]], 0.03)
 
 
-def test_low_inertia_arm_velocity_decays_without_contact_or_policy() -> None:
+def test_arm_velocity_decays_without_contact_or_policy() -> None:
     """隔离接触和神经网络后，初始手臂角速度应衰减，不能被数值阻尼放大。
 
-    该测试保留 BUMI 原始质量与零手臂 armature，在无重力、离地状态注入 1rad/s
-    的 arm-yaw 速度。旧的 5ms 显式 motor PD 会在 0.5s 内放大到约 54rad/s，
-    因此这个回归能发现仅检查有限值和输入维度时漏掉的首帧摔倒根因。
+    该测试使用用户指定的手臂 armature=0.03 和 XML 阻尼 0.05，在无重力、离地
+    状态注入 1rad/s 的 arm-yaw 速度，验证当前外部 PD 与部署惯量组合可以衰减扰动。
+    测试检查真实物理响应，避免仅检查有限值和输入维度而漏掉动力学异常。
     """
     contract = _contract()
     runner = Bumi3SonicSim2Sim(

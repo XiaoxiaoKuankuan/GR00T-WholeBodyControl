@@ -2,9 +2,11 @@
   <compiler angle="radian" meshdir="../meshes/bumi3/"/>
 
   <default>
-    <joint damping="0.001" armature="0.03" frictionloss="0.1"/>
+    <joint damping="0.05" armature="0.03" frictionloss="0.1"/>
     <!--
-      动力学参数、惯量、关节和执行器保持 legged_lab BUMI3 参考值不变。
+      按用户要求，21 个电机关节的被动阻尼对齐 G1 的 0.05；这不是无电机关节，
+      也不是 PD 的 Kd。手臂沿用 XML 的 armature=0.03，sim2sim 配置须保持相同值；
+      其余质量、连杆惯量、关节和执行器保留 BUMI3 参考值。
       可视网格不参与碰撞；碰撞体单独声明。机器人使用 contype=1/conaffinity=0，
       地面使用 contype=0/conaffinity=1，只保留机器人-地面接触，彻底隔离机器人自碰撞。
     -->

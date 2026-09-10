@@ -18,9 +18,10 @@ position/quaternion 和关节状态进行 reset，
 
 实现刻意不接入 G1 专用的 29 电机、Unitree DDS 或 C++ 硬件映射。仿真端使用
 BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，使用
-MuJoCo 原生位置伺服与 implicitfast 在 ``sim_dt=0.005``、``decimation=4`` 下运行。
-阻尼必须由求解器隐式积分；若在 Python 显式算力矩再写 motor，5ms 步长会让低惯量
-手臂关节数值振荡，与 Lab 的 ImplicitActuator 不一致。所有顺序、维度、ONNX 输入输出和有限值
+与 G1 部署相同的外部显式 PD：网络给出目标角度，Python 计算并限制力矩，再写入
+MuJoCo motor；Euler 积分器在 ``sim_dt=0.005``、``decimation=4`` 下运行。
+按用户要求，手臂部署 armature 保留 XML 的 0.03，XML 关节被动阻尼对齐 G1 的 0.05；
+被动阻尼和 PD 的 Kd 是不同参数。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
 ``MjData``、不参与物理，也不以实际机器人高度覆盖参考根高，便于直接区分“参考数据
@@ -787,9 +788,10 @@ class Bumi3SonicSim2Sim:
         self.model = mujoco.MjModel.from_xml_path(str(contract.model_path))
         self.data = mujoco.MjData(self.model)
         self.model.opt.timestep = contract.sim_dt
+        self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
         self._resolve_model_contract()
         self._apply_armature_contract()
-        self._configure_position_actuators()
+        self._validate_motor_actuators()
         # MuJoCo sim2sim 的白色 policy 机器人直接使用 self.model 中
         # bumi3.xml 定义的 geom 进行碰撞和渲染，不引入任何 URDF 碰撞覆盖。
         # 红色参考只为了持有与 policy 不同的 qpos，才从同一 XML 重新加载
@@ -901,14 +903,12 @@ class Bumi3SonicSim2Sim:
         if not np.allclose(actual, self.contract.armature_mujoco, atol=1e-12):
             raise ValueError("未能应用 BUMI3 armature 配置")
 
-    def _configure_position_actuators(self) -> None:
-        """将运行时 motor 配成原生位置 PD，使阻尼参与 implicitfast 求解。
+    def _validate_motor_actuators(self) -> None:
+        """确认 XML 执行器接收单位传动比下的关节力矩，不改为位置伺服。
 
-        目标仍是 default + scale * action，增益、力矩限制及关节惯量保持训练契约。
-        单位传动比下，gain=Kp、bias=-Kp*q-Kd*dq 等价于原 PD 公式，但求解器
-        能看到速度导数并隐式处理阻尼。ctrl 改为位置目标，力矩上限必须移到
-        forcerange，不能继续把角度按 motor 的力矩 ctrlrange 限制。
-        本操作只修改当前 MjModel 的执行器参数，不改写 XML 或碰撞几何。
+        外部 PD 与 G1 的 compute_body_torques 使用同一公式，ctrl 单位必须为 Nm。
+        因此要求固定单位增益、无内置偏置/激活动态，并与同名关节一一对应。
+        本检查保留 XML 自带的 motor 参数和限幅，不重写执行器或碰撞几何。
         """
         ids = self.actuator_ids
         expected_gear = np.zeros((self.contract.action_dim, 6))
@@ -917,21 +917,12 @@ class Bumi3SonicSim2Sim:
             not np.all(self.model.actuator_trntype[ids] == mujoco.mjtTrn.mjTRN_JOINT)
             or not np.array_equal(self.model.actuator_trnid[ids, 0], self.joint_ids)
             or not np.allclose(self.model.actuator_gear[ids], expected_gear, atol=1e-12)
+            or not np.all(self.model.actuator_gaintype[ids] == mujoco.mjtGain.mjGAIN_FIXED)
+            or not np.allclose(self.model.actuator_gainprm[ids, 0], 1.0, atol=1e-12)
+            or not np.all(self.model.actuator_biastype[ids] == mujoco.mjtBias.mjBIAS_NONE)
+            or not np.all(self.model.actuator_dyntype[ids] == mujoco.mjtDyn.mjDYN_NONE)
         ):
-            raise ValueError("BUMI3 原生位置 PD 要求执行器与同名关节一一对应且 gear=1")
-        self.model.actuator_gaintype[ids] = mujoco.mjtGain.mjGAIN_FIXED
-        self.model.actuator_gainprm[ids] = 0.0
-        self.model.actuator_gainprm[ids, 0] = self.contract.stiffness_mujoco
-        self.model.actuator_biastype[ids] = mujoco.mjtBias.mjBIAS_AFFINE
-        self.model.actuator_biasprm[ids] = 0.0
-        self.model.actuator_biasprm[ids, 1] = -self.contract.stiffness_mujoco
-        self.model.actuator_biasprm[ids, 2] = -self.contract.damping_mujoco
-        self.model.actuator_ctrllimited[ids] = False
-        self.model.actuator_forcelimited[ids] = True
-        self.model.actuator_forcerange[ids] = np.stack(
-            (-self.contract.effort_mujoco, self.contract.effort_mujoco), axis=-1
-        )
-        self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
+            raise ValueError("BUMI3 显式 PD 要求同名关节对应 gear=1、单位增益且无内置反馈的 motor")
 
     def _body_geom_ids(self, body_name: str) -> np.ndarray:
         """按 body 名称返回全部直接所属 geom，禁止依赖 XML 中的隐式编号。
@@ -1236,8 +1227,6 @@ class Bumi3SonicSim2Sim:
         self.data.qpos[:] = self._reference_qpos(start_frame)
         self.data.qvel[:] = self._reference_qvel(start_frame) if self.playing else 0.0
         self.data.ctrl[:] = 0.0
-        # 原生伺服 ctrl 的单位为弧度；首次推理前先以当前关节位置作为目标。
-        self.data.ctrl[self.actuator_ids] = self.data.qpos[self.qpos_addresses]
         mujoco.mj_forward(self.model, self.data)
         self._update_reference_heading_alignment(start_frame)
         self.last_action_policy.fill(0.0)
@@ -1436,14 +1425,25 @@ class Bumi3SonicSim2Sim:
         return self.last_action_policy
 
     def _apply_pd_control(self) -> None:
-        """写入目标角度，由 MuJoCo 执行具有力矩限制的原生 PD。"""
+        """按 G1 外部 PD 公式计算力矩；策略目标速度和前馈力矩均为零。
+
+        网络动作先转换为目标角度，再用 BUMI 的 Kp/Kd 跟踪当前关节状态。
+        XML 的被动阻尼由物理引擎独立处理，此处不能将它合并或重复加入 Kd。
+        """
         target_policy = (
             self.contract.default_policy
             + self.contract.action_scale_policy * self.last_action_policy
         )
-        if not np.isfinite(target_policy).all():
-            raise FloatingPointError("PD 目标角度含 NaN/Inf")
-        self.data.ctrl[self.actuator_ids] = target_policy[self.contract.policy_to_mujoco]
+        target_mujoco = target_policy[self.contract.policy_to_mujoco]
+        q_mujoco = self.data.qpos[self.qpos_addresses]
+        dq_mujoco = self.data.qvel[self.dof_addresses]
+        torque = self.contract.stiffness_mujoco * (target_mujoco - q_mujoco)
+        torque -= self.contract.damping_mujoco * dq_mujoco
+        torque = np.clip(torque, -self.contract.effort_mujoco, self.contract.effort_mujoco)
+        if not np.isfinite(torque).all():
+            raise FloatingPointError("PD 力矩含 NaN/Inf")
+        self.data.ctrl[self.actuator_ids] = torque
+        self.last_torque_mujoco = torque.copy()
 
     def step_control(self) -> np.ndarray:
         """处理按键后执行策略与物理步；暂停只固定参考，动力学仍持续运行。"""

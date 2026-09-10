@@ -5,6 +5,8 @@
 # 初始姿态、PD 增益、力矩/速度上限、armature 和动作缩放规则集中在一个可审计文件中。
 # Python 运行器会按关节名称解析 MuJoCo 地址，绝不假设 qpos[7:] 与策略顺序相同；
 # 启动时还会逐项验证配置、MJCF 和 ONNX 的维度，防止资产或 checkpoint 静默错配。
+# 按用户指定的部署设置，手臂 armature=0.03，保留 XML 原值；该项有别于训练端的 0。
+# XML 被动关节阻尼统一为 G1 的 0.05；下方 damping 字段仍只表示 BUMI 原有 PD 的 Kd。
 
 robot_type: bumi3
 model_path: ../../data/assets/robot_description/mjcf/bumi3.xml
@@ -172,4 +174,4 @@ actuator_groups:
     velocity_limit: 12.0
     stiffness: 8.0
     damping: 0.4
-    armature: 0.0
+    armature: 0.03

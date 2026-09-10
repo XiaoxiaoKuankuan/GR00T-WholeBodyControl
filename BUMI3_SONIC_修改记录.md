@@ -3641,3 +3641,76 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   工作区仍干净。launcher 和 8 个 worker 的 PID、启动 tick、命令和 cwd 在拉取
   前后均通过核对，输出 `SERVER_SYNC_PASS`。此后的提交仅补记这条同步证据，
   不更改已验收实现，也不重复启动服务器仿真或训练。
+
+## 2026-09-10：按用户要求恢复 G1 式显式 PD 与 BUMI 手臂部署惯量
+
+- 用户要求解释 XML 的被动关节阻尼，控制方式与 G1 保持一致，恢复外部 PD，手臂
+  armature 使用 0.03；若仍摔倒继续查观测、初始化和碰撞等原因。起始分支为
+  `feature/bumi-native-sonic-full-training`，HEAD `393ae3e3eb031fe4f263e539861330d4b0c96750`，
+  本地与 upstream 0/0，仅用户原有 `g1.tar.gz` 未跟踪，保留不动。
+- 实际 G1 路径为 `run_sim_loop.py`→`BaseSimulator.compute_body_torques/sim_step`，
+  使用 Python 显式 PD、200Hz 物理、Euler 积分器；C++ 策略为 50Hz，DDS writer
+  500Hz 不代表物理频率。默认场景加载 `gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml`，
+  其 G1 XML 对腰、腿、踝、臂、腕等电机关节的被动阻尼均为 0.05。
+- `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：撤下运行时原生位置伺服，恢复
+  default+scale*action 目标角度→外部 Kp/Kd 力矩→限幅→motor；积分器明确为 Euler。
+  保留 motor 单位/传动验证、实际力矩记录、有限值检查，以及上一轮参考速度和
+  积分后根状态刷新修复。等待 T、播放和 P 切换契约不变。
+- `gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`：按用户要求将 21 个电机
+  hinge 关节的被动 damping 从 0.001 改为 G1 的 0.05；freejoint 不属于这些电机
+  关节。XML 默认 armature 原本就是 0.03，不修改该值、几何、质量、连杆惯量或地面。
+  `gear_sonic/config/sim2sim/bumi3_sonic.yaml` 中八个肩/肘关节的运行时 armature
+  从 0 改为 0.03，避免初始化又把 XML 手臂惯量清零。其它关节 armature 和 BUMI
+  Kp/Kd、力矩上限均保持原值。部署参数按用户要求有别于现有 Lab 训练参数。
+- `gear_sonic/scripts/run_bumi3_sim2sim.py`：启动输出改为 `python_explicit_pd_motor`
+  与 `Euler`，同时打印真实运行时的 joint_passive_damping 和 joint_armature，
+  方便确认 XML/配置最终生效值。
+- `gear_sonic/tests/test_bumi3_sim2sim.py`：将位置伺服测试改成显式 motor 力矩/限幅
+  验证，检查手臂 0.03 与 21 关节被动阻尼 0.05；隔离扰动衰减测试使用本次部署
+  参数。`validate_bumi3_sim2sim.py` 同步四踝加八臂惯量和阻尼/积分器检查。
+- 本轮不修改训练器、奖励或 Isaac Lab 执行器配置，不重新导出或修改模型/动作。
+  实际仿真、资产指纹、文档、清理和提交同步结果接续如下；历史对照实验按其当时
+  的零手臂 armature 参数保留，不把“外部 PD 公式本身错误”作为已证明结论。
+- 被动阻尼调整后，两个资产验证器的 MJCF 指纹同步更新为
+  `f7a7c25565f410a54b01f5a9ba94c0dc7535eb26a75a94a427504251c9eac546`；sim2sim YAML 指纹为
+  `7cf5b6fb31855540bca50fb048fe64cf61f3b2c2a12c200422a0468552604863`。
+  G1 阻尼来源 XML 的 SHA-256 为
+  `58c82f77753db54f8a6ca0a8e020e142b015d8587db6cfc442f9a75f2bc444c6`。
+  原 BUMI XML 指纹为 `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`。
+- 更新使用文档 `docs/source/getting_started/bumi3_sim2sim.md`：解释电机关节被动
+  阻尼与 PD Kd 的区别，标明显式 PD/Euler、手臂部署惯量与训练的差异及新启动标记。
+  `bumi3_wave_sim2sim_audit_20260910.md` 顶部标注历史版本边界，新增当前配置与
+  实测章节，不覆盖上一轮真实对照结果，也不再把原生位置伺服描述为当前运行方式。
+- 使用 `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py -p no:cacheprovider --basetemp=/tmp/bumi-g1-pd-20260910-w4j5x099/pytest`，
+  **34 passed in 8.18s**。包含用户指定惯量/阻尼下的无网络无接触扰动衰减、显式
+  motor 力矩/限幅、Euler 积分器、速度契约以及 T/P 交互测试。
+- 真实 `model_step_030000_g1.onnx` 与 `wave_R_001__A428.pkl` 三组验收均未倒：
+  30s 首帧保持（1500 步）：末根高 0.4721292987m、最大倾角 5.305660°；
+  完整播放后保持至 30s（1500 步）：末根高 0.4683850164m、最大倾角 9.587809°；
+  10s 等待→T→完整播放→10s 保持（1219 步/24.38s）：末根高 0.4690687550m、
+  最大倾角 9.188391°。输出 `EXPLICIT_PD_WAVE=PASS`，全部保留原始根高、碰撞
+  和持续物理积分，未用 qpos 强制固定机器人。后两组停在第 218 帧。
+- 三组测试通过，因此本轮没有继续调整观测、碰撞或初始化参数。该结果覆盖当前
+  checkpoint 的 wave；没有重跑 Lab 或重新导出模型，未执行全动作集/实机验收。
+- `python gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke` 输出
+  `BUMI3_SIM2SIM_VALIDATION=PASS`，确认 21 DoF/22 刚体、22 mesh、14 碰撞体及
+  原有零地面基准；其静态默认姿态接触检查不等于 wave 首帧无穿地。
+  调用集成验证器的 `_validate_repository_assets`、`_validate_xml_and_meshes`、
+  `_validate_resolved_configs` 输出 `BUMI_ASSET_AND_CONFIG_GATE=PASS`；没有启动
+  Isaac App 或宣称完整 Lab 集成/仿真通过。
+- 真实入口使用本轮同一 ONNX 和 wave 加 `--validate-only` 输出
+  `BUMI3_SIM2SIM_VALIDATE_ONLY=PASS`，实际解析的 PD 为 `python_explicit_pd_motor`、
+  积分器为 `Euler`、21 个关节被动阻尼全部 0.05、八个手臂惯量全部 0.03。
+  五个改动 Python 文件内存 compile 与 `git diff --check` 通过。XML 与起始版本
+  做去注释语义比较，唯一参数变化是默认 damping 0.001→0.05；PT、g1 ONNX、wave
+  的 SHA-256 与上一轮记录全部一致。
+- 同步前服务器同分支、HEAD `393ae3e`、工作区干净；原 launcher `3269510`
+  （start_ticks=964046165）和八个 worker `3269523～3269530`
+  （start_ticks=964046505）均保持同一 BUMI 命令和仓库 cwd。仅同步部署代码与
+  MuJoCo XML，不重启训练、不改变已创建的 Isaac Lab 训练环境参数。
+- 回滚方法：在当前开发分支创建新的反向提交，只撤销本轮显式 PD/部署参数及相应
+  文档和检查项，不回退 PKL 速度和根状态刷新，不改写历史或删除正式模型/数据。
+- 测试进程已退出；检查 /proc 命令行、cwd 和文件描述符后，无任务引用本轮专用
+  目录。关键命令、数据和结果归档后，已仅清理
+  `/tmp/bumi-g1-pd-20260910-w4j5x099`（50 文件、36170 bytes），输出
+  `TASK_TEMP_CLEANUP_PASS`。正式模型、五对数据、用户 `g1.tar.gz` 保留。

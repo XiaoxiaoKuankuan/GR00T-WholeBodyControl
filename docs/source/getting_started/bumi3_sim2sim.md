@@ -205,16 +205,25 @@ Robot PKL 缺少关节速度字段时，按当前训练 MotionLib 的前向差�
 训练端的中心差分与 `sigma=2` 高斯滤波，reset 时再把世界角速度转为浮动根局部
 角速度。已有显式关节速度保持原值，NPZ/CSV 继续使用各自原有加载约定。
 
-控制使用 MuJoCo 原生位置伺服与 `implicitfast`：Python 写入目标关节角度，
-MuJoCo 使用原有 Kp/Kd 计算并限制力矩，阻尼反馈参与隐式求解。不能把它改成
-每 5ms 在 Python 显式算 PD 力矩后写入 motor；实测会使低惯量手臂产生数值振荡，
-导致 wave 在等待 T 时也摔倒。每个控制周期结束后还会刷新 MuJoCo 派生状态，
-保证下次策略读取的根姿态与最新关节状态同步。启动日志应包含
-`pd_implementation=mujoco_native_position_servo`、`integrator=implicitfast`。
+控制按用户要求与 G1 部署保持相同方式：网络动作转换成目标角度，Python 使用 BUMI
+原有 Kp/Kd 计算并限制 PD 力矩，写入 XML 的 motor，由 Euler 积分器推进物理。
+`data.ctrl` 的单位是力矩，目标速度和前馈力矩均为零。启动日志应包含
+`pd_implementation=python_explicit_pd_motor`、`integrator=Euler`。
+
+XML 的“被动关节阻尼”是各电机关节本身的速度阻力，不是某些无电机关节。BUMI
+全部 21 个电机 hinge 的 XML `damping` 已由 0.001 对齐为 G1 的 0.05；这项与
+PD 的 `Kd` 分开，手臂 PD 的 `Kd=0.4` 等原有增益保持不变。八个肩/肘关节的
+运行时 `armature` 使用用户指定的 0.03，与 XML 原值一致，不再被 YAML 覆盖为零。
+其它关节 armature 保留原配置。这些是用户指定的部署参数，与当前 Lab 的手臂
+armature=0 不完全相同；无需改动已有 checkpoint 或重导出 ONNX。
+
+每个控制周期结束后仍刷新 MuJoCo 派生状态，保证下次策略读取的根姿态与最新
+关节状态同步；PKL 速度与训练算法对齐的修复同样保留。
 
 2026-09-10 已用同一 30000 轮模型验证 wave 首帧保持 30s、完整播放后保持至 30s，
-以及等待 10s→完整播放→再保持 10s 均未摔倒。具体原因、单变量对照和 Lab/ONNX
-验证见 [wave 首帧摔倒诊断记录](bumi3_wave_sim2sim_audit_20260910.md)。本次修复只需
+以及等待 10s→完整播放→再保持 10s 均未摔倒，本组结果使用恢复后的显式 PD、
+手臂 armature=0.03、XML 阻尼 0.05。历史定位与当前验收见
+[wave 首帧摔倒诊断记录](bumi3_wave_sim2sim_audit_20260910.md)。本次修改只需
 退出旧 sim2sim 进程并重新运行原命令，无需重新导出 ONNX 或重新训练。
 
 sim2sim 是 MuJoCo 闭环，所有碰撞完全以 `bumi3.xml` 为准。XML 里保留 22 个原始
@@ -295,8 +304,8 @@ python gear_sonic/tools/validate_bumi3_sim2sim.py \
 
 - 实际参数固定为 `sim_dt=0.005`、`decimation=4`、控制频率 50 Hz、参考 FPS 50。
 - 动作经过 `default + action_scale * policy_action`，其中 action scale 始终由
-  `0.25 * effort_limit / stiffness` 计算；原生位置伺服的 `ctrl` 单位是弧度，
-  `forcerange` 按 BUMI3 effort limit 限制输出力矩，阻尼由 `implicitfast` 处理。
+  `0.25 * effort_limit / stiffness` 计算；外部 PD 输出的 `ctrl` 单位是 Nm，
+  力矩按 BUMI3 effort limit 截断后写入 motor，积分器为 Euler。
 - Python 入口只用于 MuJoCo sim2sim，不连接 BUMI3 实机总线。
 - 零策略 smoke 只证明接口、顺序、维度和有限值，不证明训练 checkpoint 的动作质量；
   真实效果仍需使用对应训练数据、真实 ONNX 和指定动作回放确认。
