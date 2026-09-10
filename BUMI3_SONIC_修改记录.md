@@ -3635,3 +3635,9 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `3269510`（start_ticks=964046165）和 8 个 worker `3269523～3269530`
   （start_ticks=964046505）仍在该仓库运行同一 BUMI 100k 正式训练命令。本次仅做
   部署修复同步和静态编译，不发送训练控制信号、不重启训练。
+- 修复提交 `9ff1e1a2937a4a9d04ff5c261d4a49705a0cf13b` 已推送到 GitHub 当前分支。
+  2026-09-10 17:25:34 CST，服务器核对原 HEAD、同分支及干净工作区后，通过
+  `git pull --ff-only` 从 `21a3b5f` 快进到该提交，四个 Python 文件静态编译通过，
+  工作区仍干净。launcher 和 8 个 worker 的 PID、启动 tick、命令和 cwd 在拉取
+  前后均通过核对，输出 `SERVER_SYNC_PASS`。此后的提交仅补记这条同步证据，
+  不更改已验收实现，也不重复启动服务器仿真或训练。
