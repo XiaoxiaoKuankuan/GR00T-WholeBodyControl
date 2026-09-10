@@ -3720,3 +3720,109 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   新 XML/YAML 的 SHA-256 与本地一致，服务器工作区干净。原 launcher 与八个
   worker 的 PID、启动 tick、训练命令及 cwd 在拉取前后均通过核对，输出
   `SERVER_SYNC_PASS`。后续仅补记同步证据，不改变已验证实现。
+
+## 2026-09-10：实测当前 BUMI sim2sim 清零 armature 是否摔倒
+
+- 用户询问清零 armature 的实际影响。本轮在 HEAD `056c46293bf8d326ba34f82196c11e49c268abbe`
+  上进行局部诊断，使用同一 30000 轮 g1 ONNX 与 `wave_R_001__A428.pkl`，复用正式
+  `Bumi3SonicSim2Sim.step_control()`，只通过内存中的 `dataclasses.replace` 修改
+  armature 数组。没有更改任何正式 Python、YAML、XML、模型、动作或训练参数。
+- 固定显式 PD、Euler、5ms/50Hz、被动阻尼 0.05、原 Kp/Kd、力矩上限、初始姿态
+  和碰撞。测试当前八臂 0.03、仅八臂清零、全 21 关节清零三种配置，分别执行
+  30s 首帧等待、播放后保持至 30s，以及等待 10s→T→完整播放→再保持约 10s。
+- 当前 0.03 三场景均未倒，复现上轮数值；仅手臂清零时等待 3.82s、播放 2.60s
+  摔倒；全关节清零时等待 1.60s、播放 0.98s 摔倒。两种清零配置都在等待 10s
+  的 T 事件前倒下。既有摔倒阈值为根高度 <0.22m 或根倾角 >60°，采样间隔 20ms。
+- 额外四组继续运行到 10s，确认不是短时蹲低：仅手臂清零的等待/播放分别在
+  3.94s / 2.70s 倾角超过 60°，10s 根高度 0.050560 / 0.076259m；全清零两组
+  分别在 1.70s / 1.02s 超过 60°，10s 根高度 0.052768 / 0.052671m。
+- 九组主实验无 MuJoCo 数值警告或 NaN/Inf。正式 YAML、XML、运行器、ONNX、
+  wave 运行前后 SHA-256 一致，输出 `FORMAL_FILES_UNCHANGED=PASS`。正式手臂
+  armature 仍为 0.03；本轮没有改 PD 实现，没有连接或更改 noetix-volc 训练。
+- 本轮仅追加此记录和 `docs/source/getting_started/bumi3_wave_sim2sim_audit_20260910.md`
+  第 11 节，说明对照方法、结果、采样范围和结论边界；不把该实验单独解释为
+  PD 公式错误或训练失败。原始诊断结果位于本轮临时目录
+  `/tmp/bumi-armature-zero-20260910-jklbuznk`，关键方法与数值已归档。
+
+## 2026-09-10：对照指定 Mimic 部署并隔离零 armature 失稳机理
+
+- 用户指定 `/home/weili/legged_lab/scripts/sim2sim_mimic_vision_4340.py`，要求解释
+  为什么 Mimic 曾能使用零 armature。本轮只核对当前该入口默认路径，不将其等同
+  于用户历史通过 `--model` 指定的其他文件；两仓库实现及模型均未修改。
+- 确认 Mimic 父类 `sim2sim_mimic.py:269` 直接加载 4340 XML，两个脚本均没有
+  覆盖 `model.dof_armature`。实际 MuJoCo 编译后 21 个 hinge 全部为 0.03，
+  被动 damping 全部为 0.001，Euler / 5ms / 50Hz。当前 XML SHA-256 为
+  `94ac99adf5f4512ac11903f521d5ec2f2fddb0413cfccec3e31a73d852a37719`。
+- 实际读取默认 `bumi3_0806_lalacao_dance_jingjian_6.onnx` metadata，肩肘 Kp=8、
+  Kd=0.4、action_scale=0.125，与 SONIC 相同；元数据不含 armature，训练端未
+  设置 armature 不代表部署端清零。Mimic 保留其余关节的 XML 0.03，SONIC 则
+  明确覆盖为训练分组值，这也是两条加载链的实际区别。
+- 计算同一默认姿态下的左肩 yaw 关节空间惯量矩阵对角项：SONIC 清零时为
+  0.0003508188858kg·m²，加 0.03 后为 0.0303508188858，约 86.5 倍。Mimic
+  该轴原有惯量为 0.0003508187656，几乎相同，不能用同名资产或总质量替代该轴分析。
+- 临时内存模型关闭重力和约束，固定目标、注入左肩 yaw 初速度 1rad/s；先用各组
+  原 PD 做六组资产/惯量/步长对照，再只启用八个肩肘 PD 做三组复核，排除悬空
+  腿部驱动。后者 0.03/5ms 的 yaw 前三步为 0.9264→0.8522→0.7778rad/s，
+  0/5ms 为 -3.1053→10.8259→-30.7411，0/1ms 为 -0.2950→0.0991→-0.0221。
+  0.5s 末八臂最大速度分别为 0.005393 / 24.775654 / 0.000125rad/s。
+- Mimic 实际资产与默认 ONNX 增益的隔离对照也在清零肩肘、5ms 时振荡，无需
+  网络和碰撞。该结果说明小惯量与离散 PD 更新周期的组合敏感，不表明 PD 公式
+  本身错误；查阅 MuJoCo 3.3.2 官方文档确认 Euler 的 XML 阻尼隐式处理机制。
+- 真实 SONIC 30000 轮 wave 在零手臂惯量、仅临时改为 sim_dt=0.001 /
+  decimation=20、保持策略 50Hz 后：等待 30s 未倒，根高 0.4728370615m、最大
+  倾角 5.242422°；完整播放并保持到 30s 未倒，根高 0.4697831458m、最大倾角
+  10.053520°。正式 PD、训练和默认 5ms / 手臂 0.03 配置保持原值。
+- 本轮只追加 `bumi3_wave_sim2sim_audit_20260910.md` 第 12 节及此日志，记录路径、
+  方法、实测和适用范围。原始结果在 `/tmp/bumi-mimic-armature-mechanism-20260910-ob9psbrj`；
+  没有重跑 Mimic 完整网络动作、修改服务器或将一次 wave 验证推广为全数据集结果。
+
+## 2026-09-10：按用户要求将 BUMI sim2sim 八个肩肘 armature 降为 0.01
+
+- 起始分支 `feature/bumi-native-sonic-full-training`，HEAD
+  `056c46293bf8d326ba34f82196c11e49c268abbe`，与本地跟踪的 origin 分支 0/0。
+  保留前几轮同主题未提交诊断记录，以及用户原有未跟踪 `g1.tar.gz`。
+- 用户认为 0.03 偏大，要求尝试 0.01。`gear_sonic/config/sim2sim/bumi3_sonic.yaml`
+  将 arms 组从 0.03 改为 0.01；`gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`
+  仅为左右 arm_pitch、arm_roll、arm_yaw、elbow_pitch 八个 joint 显式增加
+  armature=0.01。其余关节保留原 XML 默认值和原运行时覆盖，避免改动踝部或腿腰参数。
+- 保留显式 Python PD、Euler、sim_dt=0.005、decimation=4、原 Kp/Kd、力矩上限、
+  XML 被动阻尼 0.05、质量/连杆惯量/碰撞、训练执行器、checkpoint 和动作。
+  该值来自本次用户指令，不视为按机器人尺寸推算出的真实电机折算惯量。
+- 同步更新 `bumi3_sim2sim.py` 的参数说明、`test_bumi3_sim2sim.py` 的已有惯量
+  验证及扰动衰减说明、`validate_bumi3_sim2sim.py` 的期望值、两个资产验证器的
+  XML 指纹；更新使用文档及诊断报告当前版本指向，保留历史实验原值。
+- 本轮资产指纹、测试命令、真实 wave 三场景结果、临时目录清理与 Git/服务器同步
+  结果接续记录。仅该参数修改无需重导出 ONNX；回滚使用新的反向提交恢复本轮参数、
+  说明和校验，不改写历史或回退先前速度/观测修复。
+- 新 XML SHA-256：`1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`；
+  新 YAML SHA-256：`f52be29ca85a264273dc5ab75055ea52b8c297a362d093fd27f25ca90d9865f8`。
+  原值分别为 `f7a7c25565f410a54b01f5a9ba94c0dc7535eb26a75a94a427504251c9eac546`、
+  `7cf5b6fb31855540bca50fb048fe64cf61f3b2c2a12c200422a0468552604863`。
+- 使用 `/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py -p no:cacheprovider --basetemp=/tmp/bumi-arm001-20260910-CvEL4G/pytest`，
+  **34 passed in 5.66s**。没有增加与参数赋值重复的测试，复用已有控制、交互、
+  资产和扰动衰减检查。
+- 真实三场景输出 `ARM001_WAVE_THREE_SCENARIOS=PASS`：等待 30s 根高
+  0.4720431696m、最大倾角 5.236921°；播放后保持至 30s 根高 0.4706900855m、
+  最大倾角 9.835809°；等待 10s→T→完整播放→保持约 10s，共 24.38s，根高
+  0.4695242554m、最大倾角 9.554793°。均无摔倒、MuJoCo 警告或 NaN/Inf。
+- `/home/weili/miniconda3/envs/env_isaaclab/bin/python gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke`
+  以及集成检查器的 `_validate_repository_assets`、`_validate_xml_and_meshes`、
+  `_validate_resolved_configs` 用于静态资产/配置验证；实际动力学验收为上述 wave
+  及已有单元测试，不重新启动 Lab 训练或宣称全动作集通过。
+- AST 对照确认 `bumi3_sim2sim.py` 仅改文档说明，PD/观测/播放实现未变；XML
+  去注释后的差异严格为八个肩肘 joint 的 armature 属性，YAML 仅 arms 组改值，
+  输出 `ONLY_EIGHT_ARMATURE_VALUES_CHANGED=PASS`、`PD_AND_RUNNER_LOGIC_UNCHANGED=PASS`。
+- 默认 SSH 的 `sss_ssh_knownhostsproxy` 首次出现 banner 超时；同一 `noetix-volc`
+  别名使用 `-o ProxyCommand=none` 后连接成功，未替换服务器、用户、端口或密钥。
+  同步前服务器为同分支、HEAD `056c462`、工作区干净；GitHub 当前分支也为该 HEAD。
+- 静态资产/配置检查全部通过，sim2sim 检查器输出 `BUMI3_SIM2SIM_VALIDATION=PASS`，
+  `git diff --check` 通过。服务器原 launcher 3269510（start_ticks=964046165）
+  和八个 worker 3269523～3269530（start_ticks=964046505）仍对应原 BUMI 训练目录。
+- 关键方法及结果已归档后，确认本线程测试进程结束、可读进程无路径引用，仅清理
+  三个精确专用目录：`/tmp/bumi-armature-zero-20260910-jklbuznk`（14 文件，233388 bytes）、
+  `/tmp/bumi-mimic-armature-mechanism-20260910-ob9psbrj`（12 文件，141308 bytes）、
+  `/tmp/bumi-arm001-20260910-CvEL4G`（53 文件，153451 bytes），均输出
+  `TASK_TEMP_CLEANUP_PASS`。前两项为本线程前几轮已完成诊断，报告中的临时路径
+  自此仅作历史来源记录；正式模型、五对数据、测试源码和用户 `g1.tar.gz` 保留。
+- 本次提交一并归档本线程前几轮同主题的 0/0.03/1ms 诊断记录，保留其原始结果，
+  并以报告第 13 节标明最新 0.01 正式值；不混入无关工作区内容。

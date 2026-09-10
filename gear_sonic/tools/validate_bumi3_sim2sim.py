@@ -36,7 +36,7 @@ from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
 
 
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "f7a7c25565f410a54b01f5a9ba94c0dc7535eb26a75a94a427504251c9eac546"
+    "1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3"
 )
 
 EXPECTED_COLLISION_BODIES = {
@@ -235,12 +235,12 @@ def _validate_contract_values(contract: Bumi3Contract) -> None:
         for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
             assert np.isclose(scale_by_name[f"{side}_{suffix}_joint"], 0.125)
     assert np.isclose(scale_by_name["waist_yaw_joint"], 0.25 * 27.0 / 53.0)
-    # 四个踝关节保留原惯量，八个手臂关节按用户要求恢复 XML 的 0.03。
+    # 四个踝关节保留原惯量，八个肩肘关节按用户要求使用与 XML 一致的 0.01。
     assert np.count_nonzero(contract.armature_mujoco) == 12
     for side in ("l", "r"):
         for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
             index = contract.mujoco_joint_names.index(f"{side}_{suffix}_joint")
-            assert np.isclose(contract.armature_mujoco[index], 0.03)
+            assert np.isclose(contract.armature_mujoco[index], 0.01)
     assert set(contract.velocity_mujoco.tolist()) == {9.0, 12.0}
 
 

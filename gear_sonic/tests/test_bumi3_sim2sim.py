@@ -327,13 +327,13 @@ def test_explicit_pd_matches_force_law_and_effort_limits() -> None:
     for side in ("l", "r"):
         for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
             index = contract.mujoco_joint_names.index(f"{side}_{suffix}_joint")
-            assert np.isclose(runner.model.dof_armature[runner.dof_addresses[index]], 0.03)
+            assert np.isclose(runner.model.dof_armature[runner.dof_addresses[index]], 0.01)
 
 
 def test_arm_velocity_decays_without_contact_or_policy() -> None:
     """隔离接触和神经网络后，初始手臂角速度应衰减，不能被数值阻尼放大。
 
-    该测试使用用户指定的手臂 armature=0.03 和 XML 阻尼 0.05，在无重力、离地
+    该测试使用用户指定的手臂 armature=0.01 和 XML 阻尼 0.05，在无重力、离地
     状态注入 1rad/s 的 arm-yaw 速度，验证当前外部 PD 与部署惯量组合可以衰减扰动。
     测试检查真实物理响应，避免仅检查有限值和输入维度而漏掉动力学异常。
     """

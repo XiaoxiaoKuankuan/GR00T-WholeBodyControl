@@ -5,8 +5,8 @@
     <joint damping="0.05" armature="0.03" frictionloss="0.1"/>
     <!--
       按用户要求，21 个电机关节的被动阻尼对齐 G1 的 0.05；这不是无电机关节，
-      也不是 PD 的 Kd。手臂沿用 XML 的 armature=0.03，sim2sim 配置须保持相同值；
-      其余质量、连杆惯量、关节和执行器保留 BUMI3 参考值。
+      也不是 PD 的 Kd。八个肩肘关节单独指定 armature=0.01，sim2sim 配置保持相同值；
+      其余关节保留原 XML 默认惯量，由运行器按原分组配置覆盖；质量、连杆惯量和执行器不变。
       可视网格不参与碰撞；碰撞体单独声明。机器人使用 contype=1/conaffinity=0，
       地面使用 contype=0/conaffinity=1，只保留机器人-地面接触，彻底隔离机器人自碰撞。
     -->
@@ -66,20 +66,20 @@
         <geom name="waist_yaw_link_collision" class="collision" type="mesh" mesh="waist_yaw_link"/>
         <body name="l_arm_pitch_link" pos="0.0010007 0.083723 0.17204" quat="0.9914448214 0.1305264957 0 0">
           <inertial pos="1.956958e-03 4.005473e-02 1.480389e-05" mass="3.228282e-01" fullinertia="1.602346e-04 1.550148e-04 1.688444e-04 -2.179800e-06 -4.922125e-07 1.210814e-06"/>
-          <joint name="l_arm_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-3.14 1.57"/>
+          <joint name="l_arm_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-3.14 1.57" armature="0.01"/>
           <geom name="l_arm_pitch_link_visual" class="visual" rgba="0.498039 0.498039 0.498039 1" mesh="l_arm_pitch_link"/>
           <body name="l_arm_roll_link" pos="-0.0010007 0.044 0" quat="0.9914448214 -0.1305264957 0 0">
             <inertial pos="3.495797e-04 1.900254e-02 -5.207819e-02" mass="3.834243e-01" fullinertia="4.321869e-04 4.873103e-04 2.473135e-04 -1.276022e-06 5.376326e-06 3.726497e-05"/>
-            <joint name="l_arm_roll_joint" type="hinge" axis="1 0 0" limited="true" range="-0.14 1.94"/>
+            <joint name="l_arm_roll_joint" type="hinge" axis="1 0 0" limited="true" range="-0.14 1.94" armature="0.01"/>
             <geom name="l_arm_roll_link_visual" class="visual" rgba="0.498039 0.498039 0.498039 1" mesh="l_arm_roll_link"/>
             <geom name="l_arm_roll_link_collision" class="collision" type="mesh" mesh="l_arm_roll_link"/>
             <body name="l_arm_yaw_link" pos="0.0010007 0.023135 -0.092344" quat="0.9990482317 0.04361915629 0 0">
               <inertial pos="7.083462e-03 -9.665339e-04 -5.421378e-02" mass="3.366217e-01" fullinertia="2.023561e-04 1.986222e-04 1.466206e-04 1.216495e-06 2.517202e-05 -2.404022e-06"/>
-              <joint name="l_arm_yaw_joint" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57"/>
+              <joint name="l_arm_yaw_joint" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57" armature="0.01"/>
               <geom name="l_arm_yaw_link_visual" class="visual" rgba="0.498039 0.498039 0.498039 1" mesh="l_arm_yaw_link"/>
               <body name="l_elbow_pitch_link" pos="0.010308 0 -0.061252">
                 <inertial pos="-6.099702e-05 1.264798e-03 -8.935936e-02" mass="3.291803e-01" fullinertia="1.099657e-03 1.077996e-03 1.519028e-04 2.269078e-06 2.111167e-05 -1.111900e-05"/>
-                <joint name="l_elbow_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-2.26 0"/>
+                <joint name="l_elbow_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-2.26 0" armature="0.01"/>
                 <geom name="l_elbow_pitch_link_visual" class="visual" rgba="0.498039 0.498039 0.498039 1" mesh="l_elbow_pitch_link"/>
                 <geom name="l_elbow_pitch_link_collision" class="collision" type="mesh" mesh="l_elbow_pitch_link"/>
               </body>
@@ -88,20 +88,20 @@
         </body>
         <body name="r_arm_pitch_link" pos="0.0010007 -0.083723 0.17204" quat="0.9914448214 -0.1305264957 0 0">
           <inertial pos="1.956958e-03 -4.005473e-02 1.480389e-05" mass="3.228282e-01" fullinertia="1.602346e-04 1.550148e-04 1.688444e-04 2.179800e-06 -4.922125e-07 -1.210814e-06"/>
-          <joint name="r_arm_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-3.14 1.57"/>
+          <joint name="r_arm_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-3.14 1.57" armature="0.01"/>
           <geom name="r_arm_pitch_link_visual" class="visual" rgba="1 1 1 1" mesh="r_arm_pitch_link"/>
           <body name="r_arm_roll_link" pos="-0.0010007 -0.044 0" quat="0.9914448214 0.1305264957 0 0">
             <inertial pos="3.495797e-04 -1.900254e-02 -5.207819e-02" mass="3.834243e-01" fullinertia="4.321869e-04 4.873103e-04 2.473135e-04 1.276022e-06 5.376326e-06 -3.726497e-05"/>
-            <joint name="r_arm_roll_joint" type="hinge" axis="1 0 0" limited="true" range="-1.94 0.14"/>
+            <joint name="r_arm_roll_joint" type="hinge" axis="1 0 0" limited="true" range="-1.94 0.14" armature="0.01"/>
             <geom name="r_arm_roll_link_visual" class="visual" rgba="1 1 1 1" mesh="r_arm_roll_link"/>
             <geom name="r_arm_roll_link_collision" class="collision" type="mesh" mesh="r_arm_roll_link"/>
             <body name="r_arm_yaw_link" pos="0.0010007 -0.023135 -0.092344" quat="0.9990482317 -0.04361915629 0 0">
               <inertial pos="7.083462e-03 9.665339e-04 -5.421378e-02" mass="3.366217e-01" fullinertia="2.023561e-04 1.986222e-04 1.466206e-04 -1.216495e-06 2.517202e-05 2.404022e-06"/>
-              <joint name="r_arm_yaw_joint" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57"/>
+              <joint name="r_arm_yaw_joint" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57" armature="0.01"/>
               <geom name="r_arm_yaw_link_visual" class="visual" rgba="1 1 1 1" mesh="r_arm_yaw_link"/>
               <body name="r_elbow_pitch_link" pos="0.010308 0 -0.061252">
                 <inertial pos="-6.099702e-05 -1.264798e-03 -8.935936e-02" mass="3.291803e-01" fullinertia="1.099657e-03 1.077996e-03 1.519028e-04 -2.269078e-06 2.111167e-05 1.111900e-05"/>
-                <joint name="r_elbow_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-2.26 0"/>
+                <joint name="r_elbow_pitch_joint" type="hinge" axis="0 1 0" limited="true" range="-2.26 0" armature="0.01"/>
                 <geom name="r_elbow_pitch_link_visual" class="visual" rgba="1 1 1 1" mesh="r_elbow_pitch_link"/>
                 <geom name="r_elbow_pitch_link_collision" class="collision" type="mesh" mesh="r_elbow_pitch_link"/>
               </body>

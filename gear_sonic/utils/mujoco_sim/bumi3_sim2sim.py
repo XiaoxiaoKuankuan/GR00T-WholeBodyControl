@@ -20,7 +20,7 @@ position/quaternion 和关节状态进行 reset，
 BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，使用
 与 G1 部署相同的外部显式 PD：网络给出目标角度，Python 计算并限制力矩，再写入
 MuJoCo motor；Euler 积分器在 ``sim_dt=0.005``、``decimation=4`` 下运行。
-按用户要求，手臂部署 armature 保留 XML 的 0.03，XML 关节被动阻尼对齐 G1 的 0.05；
+按用户要求，八个肩肘部署 armature 在 XML 和配置中均设为 0.01，被动阻尼保留 0.05；
 被动阻尼和 PD 的 Kd 是不同参数。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
