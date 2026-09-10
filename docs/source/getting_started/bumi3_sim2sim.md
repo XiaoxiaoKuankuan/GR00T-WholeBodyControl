@@ -200,6 +200,23 @@ reset 后的 10 帧 proprioception history 会按 Isaac Lab `CircularBuffer` 的
 用当前状态复制填满，而不是以 9 帧零值开头。
 GUI 首帧等待时初始化 qvel 为零；自动播放时保留参考初速度。
 
+Robot PKL 缺少关节速度字段时，按当前训练 MotionLib 的前向差分计算，并在末帧
+复用倒数第二段速度；两帧短动作复用唯一速度段。PKL 的根线速度和世界角速度采用
+训练端的中心差分与 `sigma=2` 高斯滤波，reset 时再把世界角速度转为浮动根局部
+角速度。已有显式关节速度保持原值，NPZ/CSV 继续使用各自原有加载约定。
+
+控制使用 MuJoCo 原生位置伺服与 `implicitfast`：Python 写入目标关节角度，
+MuJoCo 使用原有 Kp/Kd 计算并限制力矩，阻尼反馈参与隐式求解。不能把它改成
+每 5ms 在 Python 显式算 PD 力矩后写入 motor；实测会使低惯量手臂产生数值振荡，
+导致 wave 在等待 T 时也摔倒。每个控制周期结束后还会刷新 MuJoCo 派生状态，
+保证下次策略读取的根姿态与最新关节状态同步。启动日志应包含
+`pd_implementation=mujoco_native_position_servo`、`integrator=implicitfast`。
+
+2026-09-10 已用同一 30000 轮模型验证 wave 首帧保持 30s、完整播放后保持至 30s，
+以及等待 10s→完整播放→再保持 10s 均未摔倒。具体原因、单变量对照和 Lab/ONNX
+验证见 [wave 首帧摔倒诊断记录](bumi3_wave_sim2sim_audit_20260910.md)。本次修复只需
+退出旧 sim2sim 进程并重新运行原命令，无需重新导出 ONNX 或重新训练。
+
 sim2sim 是 MuJoCo 闭环，所有碰撞完全以 `bumi3.xml` 为准。XML 里保留 22 个原始
 link mesh 作为 `group=1` 的可视 geom，并把 14 个审核后的接触几何单独设为
 `group=3`：base、双侧 leg-roll 和双侧 knee 使用简化 capsule，其余 9 个需要接触的
@@ -278,7 +295,8 @@ python gear_sonic/tools/validate_bumi3_sim2sim.py \
 
 - 实际参数固定为 `sim_dt=0.005`、`decimation=4`、控制频率 50 Hz、参考 FPS 50。
 - 动作经过 `default + action_scale * policy_action`，其中 action scale 始终由
-  `0.25 * effort_limit / stiffness` 计算；PD torque 按 BUMI3 effort limit 截断。
+  `0.25 * effort_limit / stiffness` 计算；原生位置伺服的 `ctrl` 单位是弧度，
+  `forcerange` 按 BUMI3 effort limit 限制输出力矩，阻尼由 `implicitfast` 处理。
 - Python 入口只用于 MuJoCo sim2sim，不连接 BUMI3 实机总线。
 - 零策略 smoke 只证明接口、顺序、维度和有限值，不证明训练 checkpoint 的动作质量；
   真实效果仍需使用对应训练数据、真实 ONNX 和指定动作回放确认。

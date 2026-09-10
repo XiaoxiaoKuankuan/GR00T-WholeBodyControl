@@ -17,8 +17,10 @@ position/quaternion 和关节状态进行 reset，
 只是 SONIC 为 checkpoint 兼容保留的 Robot Encoder 内部键名，并不使用 G1 资产。
 
 实现刻意不接入 G1 专用的 29 电机、Unitree DDS 或 C++ 硬件映射。仿真端使用
-BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，在
-``sim_dt=0.005``、``decimation=4`` 下运行。所有顺序、维度、ONNX 输入输出和有限值
+BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，使用
+MuJoCo 原生位置伺服与 implicitfast 在 ``sim_dt=0.005``、``decimation=4`` 下运行。
+阻尼必须由求解器隐式积分；若在 Python 显式算力矩再写 motor，5ms 步长会让低惯量
+手臂关节数值振荡，与 Lab 的 ImplicitActuator 不一致。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
 ``MjData``、不参与物理，也不以实际机器人高度覆盖参考根高，便于直接区分“参考数据
@@ -346,6 +348,8 @@ class ReferenceMotion:
     root_quat_wxyz: np.ndarray
     fps: float
     name: str
+    root_lin_vel_world: np.ndarray | None = None
+    root_ang_vel_world: np.ndarray | None = None
 
     @property
     def num_frames(self) -> int:
@@ -443,6 +447,32 @@ def _extract_named_body_series(
             f"{field_name} 必须为 [T,{len(body_names)},{value_width}]，实际为 {values.shape}"
         )
     return values[:, body_indices[0], :]
+
+
+def _training_root_velocities(root_position, root_quat_wxyz, fps):
+    """复现训练 PKL 的根速度：中心差分与 sigma=2 的时间高斯滤波。
+
+    线速度使用位置梯度；角速度用世界系相对旋转的最短旋转向量，首尾为单边差分。
+    本函数只用于 PKL 自动播放/reset 的初速度，不修改姿态轨迹。暂停时仍置零速度。
+    SciPy 已是项目基础依赖，无需为轻量 MuJoCo 入口引入 Torch 或 Isaac Lab。
+    """
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.spatial.transform import Rotation
+
+    count = len(root_quat_wxyz)
+    linear = (
+        np.zeros((count, 3)) if root_position is None
+        else np.gradient(root_position, 1.0 / fps, axis=0, edge_order=1)
+    )
+    rotations = Rotation.from_quat(root_quat_wxyz[:, [1, 2, 3, 0]])
+    before = np.maximum(np.arange(count) - 1, 0)
+    after = np.minimum(np.arange(count) + 1, count - 1)
+    angular = (rotations[after] * rotations[before].inv()).as_rotvec()
+    angular /= ((after - before) / fps)[:, None]
+    return (
+        gaussian_filter1d(linear, 2, axis=0, mode="nearest"),
+        gaussian_filter1d(angular, 2, axis=0, mode="nearest"),
+    )
 
 
 def load_reference_motion(
@@ -604,7 +634,15 @@ def load_reference_motion(
         raise ValueError(f"不支持 joint_order={resolved_joint_order!r}")
 
     if joint_vel is None:
-        joint_vel = np.gradient(joint_pos, 1.0 / fps, axis=0, edge_order=1)
+        if source_kind == "pkl":
+            # 该 checkpoint 的 MotionLib 使用前向差分，并在末帧复用倒数第二段速度。
+            # 部署端必须匹配已训练的输入，不能自行改用中心差分；两帧短动作则复用
+            # 唯一速度段，保证输出长度仍与位置一致。显式携带速度的文件保持原值。
+            forward_velocity = np.diff(joint_pos, axis=0) * fps
+            tail = forward_velocity[-2:-1] if len(forward_velocity) > 1 else forward_velocity[-1:]
+            joint_vel = np.concatenate((forward_velocity, tail), axis=0)
+        else:
+            joint_vel = np.gradient(joint_pos, 1.0 / fps, axis=0, edge_order=1)
     joint_vel = np.asarray(joint_vel, dtype=np.float64)
     if joint_vel.shape != joint_pos.shape:
         raise ValueError(f"joint velocity shape 错误: {joint_vel.shape} != {joint_pos.shape}")
@@ -628,6 +666,9 @@ def load_reference_motion(
         # 速度和转向路径；Z 轴必须保持数据原值，避免把地面接触问题隐藏成高度修正。
         root_position = root_position.copy()
         root_position[:, :2] -= root_position[0, :2]
+    root_linear = root_angular = None
+    if source_kind == "pkl":
+        root_linear, root_angular = _training_root_velocities(root_position, root_quat_wxyz, fps)
     return ReferenceMotion(
         joint_pos_policy=joint_pos.astype(np.float32),
         joint_vel_policy=joint_vel.astype(np.float32),
@@ -637,6 +678,8 @@ def load_reference_motion(
         root_quat_wxyz=root_quat_wxyz.astype(np.float64),
         fps=fps,
         name=name,
+        root_lin_vel_world=root_linear,
+        root_ang_vel_world=root_angular,
     )
 
 
@@ -746,6 +789,7 @@ class Bumi3SonicSim2Sim:
         self.model.opt.timestep = contract.sim_dt
         self._resolve_model_contract()
         self._apply_armature_contract()
+        self._configure_position_actuators()
         # MuJoCo sim2sim 的白色 policy 机器人直接使用 self.model 中
         # bumi3.xml 定义的 geom 进行碰撞和渲染，不引入任何 URDF 碰撞覆盖。
         # 红色参考只为了持有与 policy 不同的 qpos，才从同一 XML 重新加载
@@ -856,6 +900,38 @@ class Bumi3SonicSim2Sim:
         actual = self.model.dof_armature[self.dof_addresses]
         if not np.allclose(actual, self.contract.armature_mujoco, atol=1e-12):
             raise ValueError("未能应用 BUMI3 armature 配置")
+
+    def _configure_position_actuators(self) -> None:
+        """将运行时 motor 配成原生位置 PD，使阻尼参与 implicitfast 求解。
+
+        目标仍是 default + scale * action，增益、力矩限制及关节惯量保持训练契约。
+        单位传动比下，gain=Kp、bias=-Kp*q-Kd*dq 等价于原 PD 公式，但求解器
+        能看到速度导数并隐式处理阻尼。ctrl 改为位置目标，力矩上限必须移到
+        forcerange，不能继续把角度按 motor 的力矩 ctrlrange 限制。
+        本操作只修改当前 MjModel 的执行器参数，不改写 XML 或碰撞几何。
+        """
+        ids = self.actuator_ids
+        expected_gear = np.zeros((self.contract.action_dim, 6))
+        expected_gear[:, 0] = 1.0
+        if (
+            not np.all(self.model.actuator_trntype[ids] == mujoco.mjtTrn.mjTRN_JOINT)
+            or not np.array_equal(self.model.actuator_trnid[ids, 0], self.joint_ids)
+            or not np.allclose(self.model.actuator_gear[ids], expected_gear, atol=1e-12)
+        ):
+            raise ValueError("BUMI3 原生位置 PD 要求执行器与同名关节一一对应且 gear=1")
+        self.model.actuator_gaintype[ids] = mujoco.mjtGain.mjGAIN_FIXED
+        self.model.actuator_gainprm[ids] = 0.0
+        self.model.actuator_gainprm[ids, 0] = self.contract.stiffness_mujoco
+        self.model.actuator_biastype[ids] = mujoco.mjtBias.mjBIAS_AFFINE
+        self.model.actuator_biasprm[ids] = 0.0
+        self.model.actuator_biasprm[ids, 1] = -self.contract.stiffness_mujoco
+        self.model.actuator_biasprm[ids, 2] = -self.contract.damping_mujoco
+        self.model.actuator_ctrllimited[ids] = False
+        self.model.actuator_forcelimited[ids] = True
+        self.model.actuator_forcerange[ids] = np.stack(
+            (-self.contract.effort_mujoco, self.contract.effort_mujoco), axis=-1
+        )
+        self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
 
     def _body_geom_ids(self, body_name: str) -> np.ndarray:
         """按 body 名称返回全部直接所属 geom，禁止依赖 XML 中的隐式编号。
@@ -1124,7 +1200,7 @@ class Bumi3SonicSim2Sim:
         return _normalize_quaternion(result)
 
     def _reference_qvel(self, frame: int) -> np.ndarray:
-        """从相邻参考 qpos 求浮动根速度，并保留动作文件给出的关节速度。"""
+        """优先使用 PKL 的训练兼容根速度，旧格式回退到相邻姿态差分。"""
 
         next_frame = frame + 1
         if next_frame >= self.motion.num_frames:
@@ -1137,6 +1213,13 @@ class Bumi3SonicSim2Sim:
                 1.0 / self.motion.fps,
                 self._reference_qpos(frame),
                 self._reference_qpos(next_frame),
+            )
+        if self.motion.root_lin_vel_world is not None:
+            qvel[:3] = self.motion.root_lin_vel_world[frame]
+        if self.motion.root_ang_vel_world is not None:
+            qvel[3:6] = (
+                quaternion_to_matrix(self.motion.root_quat_wxyz[frame]).T
+                @ self.motion.root_ang_vel_world[frame]
             )
         qvel[self.dof_addresses] = self.motion.joint_vel_policy[frame][
             self.contract.policy_to_mujoco
@@ -1153,6 +1236,8 @@ class Bumi3SonicSim2Sim:
         self.data.qpos[:] = self._reference_qpos(start_frame)
         self.data.qvel[:] = self._reference_qvel(start_frame) if self.playing else 0.0
         self.data.ctrl[:] = 0.0
+        # 原生伺服 ctrl 的单位为弧度；首次推理前先以当前关节位置作为目标。
+        self.data.ctrl[self.actuator_ids] = self.data.qpos[self.qpos_addresses]
         mujoco.mj_forward(self.model, self.data)
         self._update_reference_heading_alignment(start_frame)
         self.last_action_policy.fill(0.0)
@@ -1351,22 +1436,14 @@ class Bumi3SonicSim2Sim:
         return self.last_action_policy
 
     def _apply_pd_control(self) -> None:
+        """写入目标角度，由 MuJoCo 执行具有力矩限制的原生 PD。"""
         target_policy = (
             self.contract.default_policy
             + self.contract.action_scale_policy * self.last_action_policy
         )
-        target_mujoco = target_policy[self.contract.policy_to_mujoco]
-        q_mujoco = self.data.qpos[self.qpos_addresses]
-        dq_mujoco = self.data.qvel[self.dof_addresses]
-        torque = self.contract.stiffness_mujoco * (target_mujoco - q_mujoco)
-        torque -= self.contract.damping_mujoco * dq_mujoco
-        torque = np.clip(
-            torque, -self.contract.effort_mujoco, self.contract.effort_mujoco
-        )
-        if not np.isfinite(torque).all():
-            raise FloatingPointError("PD torque 含 NaN/Inf")
-        self.data.ctrl[self.actuator_ids] = torque
-        self.last_torque_mujoco = torque
+        if not np.isfinite(target_policy).all():
+            raise FloatingPointError("PD 目标角度含 NaN/Inf")
+        self.data.ctrl[self.actuator_ids] = target_policy[self.contract.policy_to_mujoco]
 
     def step_control(self) -> np.ndarray:
         """处理按键后执行策略与物理步；暂停只固定参考，动力学仍持续运行。"""
@@ -1376,13 +1453,18 @@ class Bumi3SonicSim2Sim:
         for _ in range(self.contract.decimation):
             self._apply_pd_control()
             mujoco.mj_step(self.model, self.data)
+            self.last_torque_mujoco = self.data.actuator_force[self.actuator_ids].copy()
             for label, value in (
                 ("qpos", self.data.qpos),
                 ("qvel", self.data.qvel),
                 ("ctrl", self.data.ctrl),
+                ("actuator_force", self.last_torque_mujoco),
             ):
                 if not np.isfinite(value).all():
                     raise FloatingPointError(f"MuJoCo {label} 含 NaN/Inf")
+        # mj_step 积分后 qpos/qvel 已更新，但 xquat/xmat/cvel 仍可能停在积分前。
+        # 刷新派生状态，避免下一次策略把新关节状态与滞后 5ms 的根观测混在一起。
+        mujoco.mj_forward(self.model, self.data)
         if self.playing:
             self.motion_frame += 1
             if self.loop_motion:

@@ -8,7 +8,8 @@
 参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
-闭环。测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
+闭环，以及原生 PD 力矩限制、低惯量关节阻尼稳定性和积分后根观测同步。
+测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
 仅用于验证加载器契约。
 """
 
@@ -124,6 +125,65 @@ def test_load_g1_style_csv_uses_policy_order_and_wxyz(tmp_path: Path) -> None:
     assert motion.root_position_world is None
 
 
+@pytest.mark.parametrize("positions, expected", [
+    ([0.0, 0.01, 0.04, 0.09], [0.5, 1.5, 2.5, 1.5]),
+    ([0.0, 0.01], [0.5, 0.5]),
+])
+def test_training_pkl_velocity_matches_motionlib_forward_difference(tmp_path, positions, expected):
+    """使用非匀速轨迹区分前向/中心差分，并锁定训练时的末帧约定和短轨迹边界。"""
+    count = len(positions)
+    path = tmp_path / "training.pkl"
+    joblib.dump({"clip": {
+        "dof": np.repeat(np.asarray(positions)[:, None], 21, axis=1),
+        "root_rot": np.repeat([[0.0, 0.0, 0.0, 1.0]], count, axis=0),
+        "root_trans_offset": np.repeat([[0.0, 0.0, 0.5]], count, axis=0),
+        "fps": 50,
+    }}, path)
+    motion = load_reference_motion(path, _contract())
+    np.testing.assert_allclose(motion.joint_vel_policy[:, 0], expected, atol=1e-6)
+
+
+def test_training_root_velocity_filter_and_reset_coordinates(tmp_path):
+    """用非匀速平移与恒定转速检查训练滤波、四元数双覆盖及 reset 世界/局部转换。"""
+    from scipy.spatial.transform import Rotation
+
+    contract = _contract()
+    count = 5
+    position = np.zeros((count, 3))
+    position[:, 0] = [0.0, 0.001, 0.004, 0.009, 0.016]
+    position[:, 2] = 0.5
+    rotation = Rotation.from_rotvec(np.arange(count)[:, None] * np.asarray([[0.006, 0.0, 0.0]]))
+    xyzw = rotation.as_quat()
+    xyzw[1::2] *= -1.0
+    path = tmp_path / "root.pkl"
+    joblib.dump({"clip": {
+        "dof": np.repeat(contract.default_mujoco[None], count, axis=0),
+        "root_rot": xyzw, "root_trans_offset": position, "fps": 50,
+    }}, path)
+    motion = load_reference_motion(path, contract)
+    # 依据 sigma=2、截断到四倍标准差的高斯权重直接求和，独立验证非匀速滤波。
+    offsets = np.arange(-8, 9)
+    weights = np.exp(-0.5 * (offsets / 2.0) ** 2)
+    weights /= weights.sum()
+    unfiltered = np.asarray([0.05, 0.1, 0.2, 0.3, 0.35])
+    expected = np.asarray([
+        np.sum(weights * unfiltered[np.clip(index + offsets, 0, count - 1)])
+        for index in range(count)
+    ])
+    np.testing.assert_allclose(motion.root_lin_vel_world[:, 0], expected, atol=1e-12)
+    np.testing.assert_allclose(
+        motion.root_ang_vel_world, np.repeat([[0.3, 0.0, 0.0]], count, axis=0), atol=1e-12,
+    )
+    runner = Bumi3SonicSim2Sim(contract, motion, ZeroPolicy(contract), start_frame=2)
+    np.testing.assert_allclose(runner.data.qvel[:3], motion.root_lin_vel_world[2], atol=1e-12)
+    np.testing.assert_allclose(
+        rotation.as_matrix()[2] @ runner.data.qvel[3:6], motion.root_ang_vel_world[2], atol=1e-12,
+    )
+    runner.playing = False
+    runner.reset()
+    np.testing.assert_array_equal(runner.data.qvel, 0.0)
+
+
 def test_load_bumi3_mimic_npz_extracts_named_root_body(tmp_path: Path) -> None:
     """Mimic NPZ 必须按 body_names 找 base_link，不能把数组第 0 个腰部误作浮动根。"""
 
@@ -237,6 +297,72 @@ def test_reset_fills_history_like_isaaclab_first_append() -> None:
     for history in runner.histories.values():
         stacked = np.stack(history, axis=0)
         np.testing.assert_allclose(stacked, np.repeat(stacked[-1:], 10, axis=0))
+
+
+def test_native_pd_matches_force_law_and_effort_limits() -> None:
+    """用独立 PD 公式核对原生执行器，防止位置/力矩单位混淆或限幅失效。"""
+    contract = _contract()
+    runner = Bumi3SonicSim2Sim(
+        contract, make_static_reference_motion(contract), ZeroPolicy(contract),
+    )
+    for magnitude in (0.1, 20.0):
+        runner.last_action_policy[:] = np.linspace(-magnitude, magnitude, contract.action_dim)
+        runner.data.qvel[runner.dof_addresses] = np.linspace(-0.5, 0.5, contract.action_dim)
+        target_policy = contract.default_policy + contract.action_scale_policy * runner.last_action_policy
+        target = target_policy[contract.policy_to_mujoco]
+        expected = np.clip(
+            contract.stiffness_mujoco * (target - runner.data.qpos[runner.qpos_addresses])
+            - contract.damping_mujoco * runner.data.qvel[runner.dof_addresses],
+            -contract.effort_mujoco, contract.effort_mujoco,
+        )
+        runner._apply_pd_control()
+        mujoco.mj_forward(runner.model, runner.data)
+        np.testing.assert_allclose(runner.data.ctrl[runner.actuator_ids], target, atol=1e-12)
+        np.testing.assert_allclose(
+            runner.data.actuator_force[runner.actuator_ids], expected, atol=1e-10,
+        )
+    assert np.any(np.isclose(np.abs(expected), contract.effort_mujoco))
+
+
+def test_low_inertia_arm_velocity_decays_without_contact_or_policy() -> None:
+    """隔离接触和神经网络后，初始手臂角速度应衰减，不能被数值阻尼放大。
+
+    该测试保留 BUMI 原始质量与零手臂 armature，在无重力、离地状态注入 1rad/s
+    的 arm-yaw 速度。旧的 5ms 显式 motor PD 会在 0.5s 内放大到约 54rad/s，
+    因此这个回归能发现仅检查有限值和输入维度时漏掉的首帧摔倒根因。
+    """
+    contract = _contract()
+    runner = Bumi3SonicSim2Sim(
+        contract, make_static_reference_motion(contract), ZeroPolicy(contract), start_paused=True,
+    )
+    runner.model.opt.gravity[:] = 0.0
+    runner.data.qpos[2] = 10.0
+    index = contract.mujoco_joint_names.index("l_arm_yaw_joint")
+    runner.data.qvel[runner.dof_addresses[index]] = 1.0
+    mujoco.mj_forward(runner.model, runner.data)
+    peak_velocity = 0.0
+    for _ in range(25):
+        runner.step_control()
+        assert runner.data.ncon == 0
+        peak_velocity = max(peak_velocity, np.abs(runner.data.qvel[runner.dof_addresses]).max())
+        assert np.all(np.abs(runner.last_torque_mujoco) <= contract.effort_mujoco + 1e-10)
+    assert peak_velocity < 1.0
+    assert np.abs(runner.data.qvel[runner.dof_addresses]).max() < 0.02
+    assert runner.motion_frame == 0
+
+
+def test_control_step_refreshes_root_pose_before_next_observation() -> None:
+    """积分后的派生根姿态必须与 qpos 同步，不能把前一物理步的姿态送入策略。"""
+    contract = _contract()
+    runner = Bumi3SonicSim2Sim(
+        contract, make_static_reference_motion(contract), ZeroPolicy(contract),
+    )
+    runner.data.qpos[2] = 10.0
+    runner.data.qvel[:6] = [0.2, -0.1, 0.3, 0.4, 0.5, 0.6]
+    mujoco.mj_forward(runner.model, runner.data)
+    runner.step_control()
+    np.testing.assert_allclose(runner.data.xpos[runner.base_body_id], runner.data.qpos[:3], atol=1e-12)
+    np.testing.assert_allclose(runner.data.xquat[runner.base_body_id], runner.data.qpos[3:7], atol=1e-12)
 
 
 def test_runtime_visual_and_collision_geoms_match_original_xml() -> None:

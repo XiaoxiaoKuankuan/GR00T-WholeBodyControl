@@ -134,6 +134,8 @@ def main(args: Args) -> None:
         "motion_names": [item.name for item in motions],
         "sim_dt": contract.sim_dt,
         "decimation": contract.decimation,
+        "pd_implementation": "mujoco_native_position_servo",
+        "integrator": "implicitfast",
         "control_frequency_hz": 1.0 / contract.control_dt,
         "target_fps": contract.target_fps,
         "history_length": contract.history_length,
