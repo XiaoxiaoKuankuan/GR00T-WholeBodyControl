@@ -3,13 +3,15 @@
 
 """运行 BUMI3 原生 SONIC Robot Encoder 的 MuJoCo sim2sim。
 
-入口读取训练数据 PKL/NPZ 或 G1 ``MotionDataReader`` 风格 CSV 目录，构造与
+入口读取单条 PKL/NPZ/CSV 或包含多条动作的 JSON/YAML 数据集清单，构造与
 ``sonic_bumi3.yaml`` 一致的 1170 维联合 ONNX 输入，以 50 Hz 推理 21 维动作，
 再用 BUMI3 的 PD 参数在 200 Hz MuJoCo 中执行。实际模型应使用
 ``eval_agent_trl.py`` 导出的 ``model_step_XXXXXX_g1.onnx``；文件名中的 ``g1``
 代表为 checkpoint 兼容保留的 Robot Encoder 内部键名，不代表 G1 机器人。
 
-默认打开 MuJoCo viewer、按实时速度播放，并叠加红色半透明参考影子：不透明机器人
+默认打开 MuJoCo viewer 并保持第一帧参考，按 T 开始、按 P 切下一条并重新等待；
+保持阶段策略与物理继续运行，GUI 不指定时长则一直运行到关闭窗口。窗口内叠加
+红色半透明参考影子：不透明机器人
 是 ONNX policy 实际控制结果，红色影子是训练 Robot PKL 的 root+21 关节经同一个
 BUMI3 MJCF FK 得到的参考姿态。影子不参与碰撞或动力学，也不会跟随真实机器人降低
 高度，因此可直接判断参考本身是直立还是横躺。服务器无显示时使用 ``--headless``；
@@ -25,6 +27,7 @@ from typing import Literal
 
 import tyro
 
+from gear_sonic.utils.mujoco_sim.bumi3_motion_dataset import load_motion_dataset
 from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
     Bumi3Contract,
     Bumi3SonicSim2Sim,
@@ -41,8 +44,11 @@ class Args:
     policy: Path
     """``eval_agent_trl.py`` 导出的 ``*_g1.onnx`` 路径。"""
 
-    motion: Path
-    """50 FPS BUMI3 动作 PKL/NPZ、单个 CSV clip 目录或 CSV 根目录。"""
+    motion: Path | None = None
+    """单条 50 FPS BUMI3 动作 PKL/NPZ/CSV；与 dataset 二选一。"""
+
+    dataset: Path | None = None
+    """包含有序 motions 列表的 JSON/YAML 清单；相对路径按清单目录解析。"""
 
     config: Path = DEFAULT_BUMI3_SIM2SIM_CONFIG
     """BUMI3 sim2sim YAML；通常不需要覆盖。"""
@@ -63,7 +69,10 @@ class Args:
     """从参考动作的哪一帧开始。"""
 
     duration: float | None = None
-    """运行秒数；不指定时播放到动作末帧。"""
+    """运行秒数；GUI 不指定则常驻等待按键，无窗口默认运行一条动作的时长。"""
+
+    autoplay: bool = False
+    """GUI 启动后自动播放；默认保持第一帧，T 开始、P 切下一条后重新等待。"""
 
     loop_motion: bool = False
     """到动作末尾后循环播放。"""
@@ -88,14 +97,21 @@ class Args:
 
 
 def main(args: Args) -> None:
+    if (args.motion is None) == (args.dataset is None):
+        raise ValueError("必须且只能指定 --motion 或 --dataset 其中一个")
+    if args.dataset is not None and (
+        args.motion_key is not None or args.joint_order != "auto" or args.quaternion_order != "auto"
+    ):
+        raise ValueError("数据集模式请在清单每项中指定 motion_key/关节顺序/四元数顺序")
     contract = Bumi3Contract.from_yaml(args.config)
-    motion = load_reference_motion(
-        args.motion,
-        contract,
-        motion_key=args.motion_key,
-        joint_order=args.joint_order,
-        quaternion_order=args.quaternion_order,
-    )
+    if args.dataset is not None:
+        motions = load_motion_dataset(args.dataset, contract)
+    else:
+        motions = [load_reference_motion(
+            args.motion, contract, motion_key=args.motion_key,
+            joint_order=args.joint_order, quaternion_order=args.quaternion_order,
+        )]
+    motion = motions[0]
     policy = OnnxRobotPolicy(args.policy, contract, provider=args.provider)
     runner = Bumi3SonicSim2Sim(
         contract,
@@ -104,6 +120,8 @@ def main(args: Args) -> None:
         loop_motion=args.loop_motion,
         start_frame=args.start_frame,
         align_reference_heading=args.align_reference_heading,
+        motions=motions,
+        start_paused=not (args.headless or args.autoplay),
     )
 
     resolved = {
@@ -112,6 +130,8 @@ def main(args: Args) -> None:
         "policy_path": str(args.policy.expanduser().resolve()),
         "motion_name": motion.name,
         "motion_frames": motion.num_frames,
+        "motion_count": len(motions),
+        "motion_names": [item.name for item in motions],
         "sim_dt": contract.sim_dt,
         "decimation": contract.decimation,
         "control_frequency_hz": 1.0 / contract.control_dt,
@@ -137,11 +157,14 @@ def main(args: Args) -> None:
 
     if args.duration is None:
         remaining_frames = motion.num_frames if args.loop_motion else motion.num_frames - args.start_frame
-        control_steps = max(1, remaining_frames)
+        control_steps = max(1, remaining_frames) if args.headless else None
     else:
         if args.duration <= 0.0:
             raise ValueError("duration 必须大于 0")
         control_steps = max(1, round(args.duration / contract.control_dt))
+    print("BUMI3_PLAYBACK=" + json.dumps(runner.playback_status(), ensure_ascii=False), flush=True)
+    if not args.headless:
+        print("请在 MuJoCo 窗口按 T 开始播放，按 P 切换下一条并保持第一帧；关闭窗口退出。", flush=True)
     stats = runner.run(
         control_steps,
         headless=args.headless,

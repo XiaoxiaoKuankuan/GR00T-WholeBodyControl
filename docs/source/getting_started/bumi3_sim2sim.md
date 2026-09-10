@@ -30,12 +30,12 @@ BUMI3 配置位于
 ```bash
 conda activate env_isaaclab
 python gear_sonic/eval_agent_trl.py \
-  +checkpoint=/absolute/path/to/model_step_016000.pt \
-  +num_envs=1 \
-  +headless=true \
-  +export_onnx_only=true \
-  +manager_env.commands.motion.motion_lib_cfg.motion_file=/absolute/path/to/bumi3_robot_motion \
-  +manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=/absolute/path/to/paired_smpl_motion
+  checkpoint=/absolute/path/to/model_step_016000.pt \
+  ++num_envs=1 \
+  ++headless=true \
+  ++export_onnx_only=true \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file=/absolute/path/to/bumi3_robot_motion \
+  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=/absolute/path/to/paired_smpl_motion
 ```
 
 导出目录中的 `model_step_016000_g1.onnx` 是本入口需要的联合模型，输入为 Robot
@@ -44,7 +44,7 @@ IsaacLab 顺序的 `21` 维动作。
 
 ## 3. 运行 sim2sim
 
-GUI 实时播放：
+GUI 单条动作查看，启动后按 T 实时播放：
 
 ```bash
 conda activate env_isaaclab
@@ -52,6 +52,86 @@ python gear_sonic/scripts/run_bumi3_sim2sim.py \
   --policy /absolute/path/to/model_step_016000_g1.onnx \
   --motion /absolute/path/to/bumi3_motion.pkl
 ```
+
+GUI 默认固定第一帧参考并等待按键，未设置 `--duration` 时持续运行到关闭窗口。
+请先单击 MuJoCo 窗口，使键盘焦点位于该窗口：
+
+- `T`：开始播放当前轨迹；播放中重复按 T 不会重置。
+- `P`：切换到清单下一条，并重新保持其第一帧；最后一条之后回到第一条。
+- 播完后保持末帧；此时再按 T 从第一帧重新开始。
+- 单条动作模式按 P 会重置当前动作，等待 T。`--autoplay` 可让 GUI 启动即播放；
+  `--loop-motion` 可连续循环当前轨迹。无窗口运行默认自动播放，避免无法按 T。
+
+这里的“保持”是固定整段未来参考窗口，并把参考关节速度置零，实际机器人仍由
+策略控制、MuJoCo 物理仍运行。机器人能否站稳取决于该姿态与策略能力，不会通过
+每步强写 qpos 把机器人冻住。P 切换时会一次性将实际机器人重置到新动作首帧，
+并重建姿态对齐、清空旧动作和观测历史；它用于独立观察不同轨迹，不表示轨迹间
+已经实现平滑过渡。终端 `BUMI3_PLAYBACK` 输出当前轨迹名称、索引、帧和播放状态。
+
+### 3.1 用单个数据集文件加载多条轨迹
+
+`--dataset` 接收 JSON 或 YAML 清单，与 `--motion` 二选一。例如：
+
+```json
+{
+  "version": 1,
+  "robot_type": "bumi3",
+  "motions": [
+    {
+      "name": "Idle_Left_001__A017",
+      "robot": "robot/Idle_Left_001__A017.pkl",
+      "smpl": "smpl/Idle_Left_001__A017.pkl",
+      "motion_key": "Idle_Left_001__A017"
+    },
+    {
+      "name": "wave_R_001__A428",
+      "robot": "robot/wave_R_001__A428.pkl",
+      "smpl": "smpl/wave_R_001__A428.pkl",
+      "motion_key": "wave_R_001__A428"
+    }
+  ]
+}
+```
+
+顺序就是 P 的切换顺序；`name` 必须唯一，路径相对清单所在目录解析。`robot` 可指向
+既有加载器支持的 PKL/NPZ/CSV 动作，`smpl` 可省略，声明时必须存在。MuJoCo
+Robot Encoder 只消费 robot，SMPL 留给 Lab 的 SMPL Encoder。单项可额外指定
+`joint_order`、`quaternion_order`；数据集模式不接受命令行的 `--motion-key` 或顺序
+覆盖，避免把同一覆盖误用到全部轨迹。
+
+2026-09-10 从 `noetix-volc` 正式 BUMI 训练数据回传的五对文件位于：
+
+```text
+/home/weili/GR00T-WholeBodyControl/data/noetix_bumi3_5pairs_20260910/
+├── dataset.json
+├── transfer_manifest.json
+├── robot/  （5 个 Robot PKL）
+└── smpl/   （5 个同名 SMPL PKL）
+```
+
+清单依次包含 `Idle_Left_001__A017`、`walk_forward_amateur_001__A002`、
+`wave_R_001__A428`、`finedance__001`、
+`aioz_gdance__-FXdDRM4lC0_03_0_1650_dancer_00`。每对帧数严格一致且为 50 Hz，
+10 个文件均核对源文件大小与 SHA-256；此目录是本地数据产物，不随 Git 分发。
+
+使用本地已有 30000 轮联合模型：
+
+```bash
+cd /home/weili/GR00T-WholeBodyControl
+conda activate env_isaaclab
+BUMI_RUN="$PWD/models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204"
+BUMI_DATA="$PWD/data/noetix_bumi3_5pairs_20260910"
+
+python gear_sonic/scripts/run_bumi3_sim2sim.py \
+  --policy "$BUMI_RUN/exported/model_step_030000_g1.onnx" \
+  --dataset "$BUMI_DATA/dataset.json"
+```
+
+加 `--validate-only` 可只检查全部动作与 ONNX 接口；加
+`--headless --no-real-time --duration 10` 可在无窗口下运行清单第一条动作 10 秒。
+无窗口模式不会自动遍历全部清单。
+
+### 3.2 画面和观测约定
 
 GUI 默认同时显示两套完整原始 XML mesh 机器人：
 
@@ -118,6 +198,7 @@ clip 子目录的 CSV 根目录使用 `--motion-key NAME`。顺序默认值：
 ``base_link`` 的世界姿态和速度。训练端、数据配对审计和 sim2sim 因而使用同一语义。
 reset 后的 10 帧 proprioception history 会按 Isaac Lab `CircularBuffer` 的首次写入规则，
 用当前状态复制填满，而不是以 9 帧零值开头。
+GUI 首帧等待时初始化 qvel 为零；自动播放时保留参考初速度。
 
 sim2sim 是 MuJoCo 闭环，所有碰撞完全以 `bumi3.xml` 为准。XML 里保留 22 个原始
 link mesh 作为 `group=1` 的可视 geom，并把 14 个审核后的接触几何单独设为
@@ -137,6 +218,38 @@ Isaac Lab URDF 或其他仓库规则再次覆盖这些定义；启动验证会�
 ONNX 只保存网络权重与 1170→21 的张量接口，不包含参考轨迹、锚点 body 名称或 FK
 结果；这些观测语义由 sim2sim 运行器负责重建。因此换动作文件或部署实现时仍必须使用
 本配置和运行器，不能只凭 ONNX 文件名推断观测正确。
+
+### 3.3 在 Isaac Lab 中运行同一 `.pt` 模型
+
+现有 `eval_agent_trl.py` 加载 `.pt` 和它旁边的 `config.yaml`，然后允许通过命令行
+覆盖动作路径。本地必须使用刚回传的 Robot/SMPL 目录，不能继续使用配置中服务器的
+`/data/sonic_bumi3/...` 路径。使用上面的 `BUMI_RUN`、`BUMI_DATA` 变量运行：
+
+```bash
+python gear_sonic/eval_agent_trl.py \
+  checkpoint="$BUMI_RUN/model_step_030000.pt" \
+  ++headless=false \
+  ++num_envs=1 \
+  ++use_encoder=g1 \
+  ++eval_callbacks=[] \
+  ++algo.trl.output_dir="$BUMI_RUN/lab_eval" \
+  ++manager_env.commands.motion.start_from_first_frame=true \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file="$BUMI_DATA/robot" \
+  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file="$BUMI_DATA/smpl" \
+  '++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys=[wave_R_001__A428]'
+```
+
+`use_encoder=g1` 表示 BUMI 的 Robot Encoder，机器人仍由 checkpoint 配置指定为
+BUMI3；改成 `++use_encoder=smpl` 可以比较同一动作的 SMPL Encoder 控制效果。
+`algo.trl.output_dir` 同样覆盖成本地目录，避免继承训练配置里的服务器输出路径。
+最后一项用于固定挥手动作，换成清单中其他名称可查看对应动作。这个过滤项不会按
+MuJoCo 清单顺序加载，也不提供本次新加的 T/P 控制。
+
+Lab 入口目前不支持直接将 ONNX 作为 checkpoint；ONNX 使用上面的 MuJoCo 入口。
+Lab GUI 会直接运行动作，T/P 与首帧等待属于本次修改的 BUMI MuJoCo 入口。
+需要有限步无窗口验证时，把 `++headless=false` 换成 `++headless=true` 并加
+`++max_render_steps=20`。该上限包含结束前的一次推理检查，实际为 19 次环境 step，
+只能验证初始化和短时运行，不代表完整动作稳定性。
 
 ## 4. 验证
 

@@ -23,13 +23,19 @@ BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩�
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
 ``MjData``、不参与物理，也不以实际机器人高度覆盖参考根高，便于直接区分“参考数据
 横躺”和“策略/部署跟踪失败”。
+
+运行器还支持有序轨迹列表和 T/P 按键队列：保持状态固定全部未来参考并清零参考
+速度，策略和物理照常运行；切换轨迹时重置实际状态与历史观测，避免上一条动作污染
+新参考。键盘回调只入队，所有状态变更由控制线程执行。
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import json
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import time
 from typing import Any, Literal, Protocol
 
@@ -708,9 +714,18 @@ class Bumi3SonicSim2Sim:
         loop_motion: bool = False,
         start_frame: int = 0,
         align_reference_heading: bool | None = None,
+        motions: list[ReferenceMotion] | None = None,
+        start_paused: bool = False,
     ):
         self.contract = contract
         self.motion = motion
+        self.motions = tuple(motions) if motions is not None else (motion,)
+        if not self.motions or self.motions[0] is not motion:
+            raise ValueError("轨迹列表不能为空，且第一项必须是初始化 motion")
+        self.motion_index = 0
+        self.playing = not start_paused
+        # viewer 回调可能在其他线程执行，只入队；主控制线程负责切换模型状态。
+        self._key_events: SimpleQueue[int] = SimpleQueue()
         self.policy = policy
         self.loop_motion = loop_motion
         self.align_reference_heading = (
@@ -1136,7 +1151,7 @@ class Bumi3SonicSim2Sim:
 
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[:] = self._reference_qpos(start_frame)
-        self.data.qvel[:] = self._reference_qvel(start_frame)
+        self.data.qvel[:] = self._reference_qvel(start_frame) if self.playing else 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
         self._update_reference_heading_alignment(start_frame)
@@ -1152,6 +1167,41 @@ class Bumi3SonicSim2Sim:
                 initial_state[name].copy() for _ in range(self.contract.history_length)
             )
         self.motion_frame = start_frame
+
+    def playback_status(self) -> dict[str, object]:
+        """返回当前轨迹与播放状态，供终端提示和自动化交互验收使用。"""
+        return {
+            "motion_index": self.motion_index,
+            "motion_count": len(self.motions),
+            "motion_name": self.motion.name,
+            "frame": self.motion_frame,
+            "playing": self.playing,
+        }
+
+    def enqueue_key(self, keycode: int) -> None:
+        """接收窗口 T/P 键；回调只传递按键，不直接写 MuJoCo 或历史缓冲。"""
+        if keycode in (ord("T"), ord("t"), ord("P"), ord("p")):
+            self._key_events.put(keycode)
+
+    def _process_key_events(self) -> None:
+        """在控制步开始处理按键，切换后重置到下一条第一帧并等待 T。"""
+        while True:
+            try:
+                keycode = self._key_events.get_nowait()
+            except Empty:
+                break
+            if chr(keycode).upper() == "P":
+                self.motion_index = (self.motion_index + 1) % len(self.motions)
+                self.motion = self.motions[self.motion_index]
+                self.reference_anchor_quat_wxyz = self._compute_reference_anchor_quaternions()
+                self.playing = False
+                self.reset(start_frame=0)
+            elif not self.playing:
+                # 播完后再次按 T，从首帧重新初始化；初次播放则从当前等待帧启动。
+                if self.motion_frame == self.motion.num_frames - 1:
+                    self.reset(start_frame=0)
+                self.playing = True
+            print("BUMI3_PLAYBACK=" + json.dumps(self.playback_status(), ensure_ascii=False), flush=True)
 
     def _update_reference_heading_alignment(self, start_frame: int) -> None:
         """把参考 ``base_link`` 起始 yaw 对齐到当前根锚点 yaw。"""
@@ -1240,14 +1290,20 @@ class Bumi3SonicSim2Sim:
         return value
 
     def _build_robot_tokenizer(self) -> np.ndarray:
-        indices = self.motion.future_indices(
-            self.motion_frame,
-            self.contract.num_future_frames,
-            self.contract.future_frame_stride,
-            self.loop_motion,
+        # 等待 T 时所有未来参考均固定到当前帧，速度目标置零；否则即使帧计数不动，
+        # 网络仍会读到后续动态轨迹，不能构成真正的首帧保持。
+        indices = (
+            self.motion.future_indices(
+                self.motion_frame, self.contract.num_future_frames,
+                self.contract.future_frame_stride, self.loop_motion,
+            )
+            if self.playing
+            else np.full(self.contract.num_future_frames, self.motion_frame, dtype=np.int64)
         )
         joint_pos = self.motion.joint_pos_policy[indices]
-        joint_vel = self.motion.joint_vel_policy[indices]
+        joint_vel = (
+            self.motion.joint_vel_policy[indices] if self.playing else np.zeros_like(joint_pos)
+        )
         anchor_quat = self.data.xquat[self.anchor_body_id]
         anchor_inverse = quaternion_conjugate(anchor_quat)
         reference_quat = quaternion_multiply(
@@ -1313,8 +1369,9 @@ class Bumi3SonicSim2Sim:
         self.last_torque_mujoco = torque
 
     def step_control(self) -> np.ndarray:
-        """执行一次 50 Hz policy inference 和 4 次 200 Hz MuJoCo step。"""
+        """处理按键后执行策略与物理步；暂停只固定参考，动力学仍持续运行。"""
 
+        self._process_key_events()
         action = self.infer_action()
         for _ in range(self.contract.decimation):
             self._apply_pd_control()
@@ -1326,16 +1383,18 @@ class Bumi3SonicSim2Sim:
             ):
                 if not np.isfinite(value).all():
                     raise FloatingPointError(f"MuJoCo {label} 含 NaN/Inf")
-        self.motion_frame += 1
-        if self.loop_motion:
-            self.motion_frame %= self.motion.num_frames
-        else:
-            self.motion_frame = min(self.motion_frame, self.motion.num_frames - 1)
+        if self.playing:
+            self.motion_frame += 1
+            if self.loop_motion:
+                self.motion_frame %= self.motion.num_frames
+            elif self.motion_frame >= self.motion.num_frames - 1:
+                self.motion_frame = self.motion.num_frames - 1
+                self.playing = False
         return action
 
     def run(
         self,
-        control_steps: int,
+        control_steps: int | None,
         *,
         headless: bool = True,
         real_time: bool = False,
@@ -1344,15 +1403,19 @@ class Bumi3SonicSim2Sim:
     ) -> dict[str, float]:
         """运行控制闭环，policy 由 XML 动力学模型直接渲染。"""
 
-        if control_steps <= 0:
+        if control_steps is not None and control_steps <= 0:
             raise ValueError("control_steps 必须大于零")
+        if headless and control_steps is None:
+            raise ValueError("无窗口运行必须指定有限 control_steps")
         if not 0.0 < reference_alpha <= 1.0:
             raise ValueError("reference_alpha 必须位于 (0, 1]")
         viewer = None
         if not headless:
             from mujoco import viewer as mujoco_viewer
 
-            viewer = mujoco_viewer.launch_passive(self.model, self.data)
+            viewer = mujoco_viewer.launch_passive(
+                self.model, self.data, key_callback=self.enqueue_key
+            )
             if show_reference:
                 if not hasattr(viewer, "user_scn"):
                     raise RuntimeError(
@@ -1367,10 +1430,14 @@ class Bumi3SonicSim2Sim:
                 viewer.sync()
         start_reference_diagnostics = self.reference_pose_diagnostics(self.motion_frame)
         started = time.monotonic()
+        completed_steps = 0
         try:
-            for _ in range(control_steps):
+            while control_steps is None or completed_steps < control_steps:
+                if viewer is not None and not viewer.is_running():
+                    break
                 tick = time.monotonic()
                 self.step_control()
+                completed_steps += 1
                 if viewer is not None:
                     if not viewer.is_running():
                         break
@@ -1392,9 +1459,10 @@ class Bumi3SonicSim2Sim:
         elapsed = time.monotonic() - started
         final_reference_diagnostics = self.reference_pose_diagnostics(self.motion_frame)
         return {
-            "requested_control_steps": float(control_steps),
+            "requested_control_steps": float(control_steps) if control_steps is not None else -1.0,
+            "completed_control_steps": float(completed_steps),
             "elapsed_seconds": elapsed,
-            "control_steps_per_second": control_steps / max(elapsed, 1e-12),
+            "control_steps_per_second": completed_steps / max(elapsed, 1e-12),
             "simulation_time": float(self.data.time),
             "root_height": float(self.data.qpos[self.root_qpos_address + 2]),
             "max_abs_torque": float(np.max(np.abs(self.last_torque_mujoco))),

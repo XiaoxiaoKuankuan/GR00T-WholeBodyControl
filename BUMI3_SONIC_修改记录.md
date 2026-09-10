@@ -3445,3 +3445,94 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   文件完整、可以加载不代表模型已经收敛或通过仿真/真机验证。
 - 如需撤销本地副本，应先确认无调用方引用，再仅处理上述独立交付目录；远端正式
   模型与训练目录保持原样，不以回滚传输为由删除服务器产物或改写 Git 历史。
+
+## 2026-09-10：五对 BUMI/SMPL 数据回传及 sim2sim 多轨迹 T/P 交互
+
+- 用户要求回传当前服务器训练的五对机器人/SMPL 数据，说明 Isaac Lab 中查看模型
+  效果的方法，并使 BUMI sim2sim 支持单个数据集文件、首帧保持、T 播放、P 下一条。
+- 起始分支为 `feature/bumi-native-sonic-full-training`、HEAD 为 `29556e4`，本地与
+  origin/服务器一致，只有用户原有 `g1.tar.gz` 未跟踪，保持不变。
+- 新增 `bumi3_motion_dataset.py`：解析含有序 robot/可选 smpl 路径的 JSON/YAML
+  清单，检查版本、机器人身份、重复名称和缺失文件，相对路径以清单目录解析；
+  数值、50 FPS、关节和四元数契约继续使用既有 BUMI 加载器。
+- 修改核心 `bumi3_sim2sim.py`：新增轨迹列表和播放状态，窗口按键只入线程安全队列，
+  控制线程消费 T/P；等待时固定所有未来参考帧并清零参考速度，物理仿真和策略继续
+  运行。P 切下一条、循环回列表开头，重置实际机器人、历史观测和 heading 到新首帧。
+  播完保持末帧；此时再按 T 从首帧重新开始。保留无窗口自动运行的兼容入口。
+- 修改 `run_bumi3_sim2sim.py`：增加与 --motion 互斥的 --dataset，GUI 默认常驻且
+  保持首帧，提供 --autoplay；窗口关闭退出，--duration 仍可限制运行时长。
+- 不修改 G1 C++ 部署器、训练器、机器人 XML 或原始动作数据。本轮 P 按用户要求表示
+  下一条，不能照搬 G1 当前 P=上一条、N=下一条的键位。
+- 新增 `test_bumi3_motion_playlist.py`，覆盖清单路径和错误、首帧物理继续运行、
+  全部未来参考保持、T/P 重置与循环、末帧停止和重播，以及模拟窗口回调接线与关闭。
+  同步修改两个入口模块的中文介绍，明确 GUI 默认等待与数据集模式。
+- 更新 `docs/source/getting_started/bumi3_sim2sim.md`：补齐清单格式、五对数据位置、
+  30000 轮模型运行命令、T/P 和末帧行为、参考保持与真实物理的关系，以及 Lab
+  `.pt` 的 Robot/SMPL Encoder 命令；修正导出示例中已有 checkpoint 键的 Hydra
+  覆盖语法。明确当前 Lab 无直接 ONNX 入口，未把 MuJoCo T/P 描述为 Lab 功能。
+- 数据来源为 `noetix-volc:/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2/train/`
+  下的 `robot_all/`、`smpl_all/`，使用 `rsync -rtL` 解引用服务器符号链接，仅回传
+  已选文件；于 16:17:13 CST 完成，10 个文件的字节数和 SHA-256 全部双端一致。
+  本地目录为 `/home/weili/GR00T-WholeBodyControl/data/noetix_bumi3_5pairs_20260910/`，
+  `robot/` 与 `smpl/` 各 5 个文件，没有修改或裁剪原始数据：
+
+  | 同名 Robot/SMPL 文件（省略 .pkl） | 两侧帧数 | FPS |
+  | --- | ---: | ---: |
+  | Idle_Left_001__A017 | 3827 | 50 |
+  | walk_forward_amateur_001__A002 | 1964 | 50 |
+  | wave_R_001__A428 | 219 | 50 |
+  | finedance__001 | 4879 | 50 |
+  | aioz_gdance__-FXdDRM4lC0_03_0_1650_dancer_00 | 2749 | 50 |
+
+- 源 robot 容器为 `{motion_key: motion}`，SMPL 为平铺字典。最初只读检查误将
+  SMPL 首个字段视为子字典，发生 AttributeError，按实际结构修正后检查通过。
+  行走候选 A001 的两侧帧数 2003/2002 不一致，故选 A002，未偷偷对源数据截帧。
+  正式验证确认 Robot `[T,21]`、SMPL pose `[T,72]`、joints `[T,24,3]`、相同 T/FPS
+  以及读取的关节/根姿态/平移/SMPL 数值全部有限。
+- `dataset.json` SHA-256 为
+  `e25ae5d8dcbc13a8a8f2ccf5d823c616f519bd318c8914dc27c4e83f7cc39be9`；
+  逐文件源路径、bytes 和完整指纹保存在同目录 `transfer_manifest.json`，其 SHA-256 为
+  `fc87015230deb409f4e47cc0dfcfd3699208e58c30b8dbd1ac5c39c96a96ec49`。
+  两个清单和 10 个 PKL 是本地正式交付数据，受 data/ 忽略规则保护，不提交到 Git。
+- 复用用户已有 30000 轮 ONNX，未重新导出或覆盖；文件为
+  `models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204/exported/model_step_030000_g1.onnx`，
+  SHA-256 为 `e884db48c3d5d222821c0816f9c4c81fbcd8e3b9e9129cefcd507ab463466a9a`。
+  sim2sim 配置 `gear_sonic/config/sim2sim/bumi3_sonic.yaml` SHA-256 为
+  `843756aef9332faa81f0f5ea71e95869e1c0d4604b0f4a11c64974773ead0d17`，仓库内
+  BUMI XML SHA-256 为 `28d55b3b460c2731ba478c083c780948b5175132cd3b7b1a73e8d6cbe6fd6547`，
+  均沿用既有参数与资产，本轮没有资产改动。
+- 所有本地运行使用 `/home/weili/miniconda3/envs/env_isaaclab/bin/python`。
+  `python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py -p no:cacheprovider`
+  输出 **28 passed in 4.43s**；原有 15 项接口/资产测试保留通过。四个改动 Python
+  文件的内存 compile 与 `git diff --check` 均通过。环境没有 Ruff，未安装工具或
+  把未执行的 Ruff 检查记为通过。
+- 使用正式 `--policy .../model_step_030000_g1.onnx --dataset .../dataset.json --validate-only`
+  输出 `BUMI3_SIM2SIM_VALIDATE_ONLY=PASS`，确认五条动作、1170→21 接口及 50 Hz。
+  另通过真实 ONNX 和 MuJoCo 控制器逐条执行 10 步首帧保持、T 后 25 步播放、P
+  切换，总计 **175 个控制周期、5 次 P**；全部状态/观察/动作有限且末次回到第 1 条
+  首帧等待，输出 `REAL_ONNX_FIVE_MOTION_PLAYLIST=PASS`。这些是交互与短时
+  数值验证，不代表完整轨迹跟踪或训练质量通过。
+- 在本地 `DISPLAY=:1` 实际打开 MuJoCo GUI，使用上述数据集命令加 `--duration 1`，
+  默认带红色参考影子，运行 50 个控制周期正常退出，仿真时间 1.0s、根高度
+  0.460556m；首/末参考倾角均为 0.241933°，保持首帧期间物理仍运行。
+  真实桌面窗口启动已经验证；T/P 键盘回调接线与窗口关闭使用模拟窗口自动测试，
+  未执行人工逐条键盘验收或长时视觉质量评估。
+- Lab `.pt` 使用同目录 `model_step_030000.pt`，按文档命令分别设置 `use_encoder=g1`
+  与 `use_encoder=smpl`，加 `++headless=true ++max_render_steps=20`，固定
+  `filter_motion_keys=[wave_R_001__A428]` 并从首帧开始。两次均打印
+  `Successfully loaded policy state dict`、加载 219 帧动作、到达
+  `Reached max_render_steps=20. Exiting.` 且退出码 0（分别 16:21:47、16:24:28 CST）。
+  每次实际 19 次环境 step；没有启动优化器更新、全量评估 callback 或训练。
+  Lab 图形界面与完整动作质量没有在本轮验收；不声称 ONNX 已在 Lab 运行。
+- Lab 验证临时目录分别为 `/tmp/bumi-lab-eval-20260910-fdw0yfve` 和
+  `/tmp/bumi-lab-smpl-eval-20260910-g0mxpvph`；测试时将 eval_base_dir、output_dir、
+  algo.trl.output_dir、save_rendering_dir 指向各自临时目录。命令与证据已归档于本条；
+  两次测试进程已退出，检查 /proc 的命令行、cwd 和文件描述符无其它进程引用后，
+  已仅清理这两个精确目录（各 7 个临时文件）。正式数据和模型保留，最终再次校验
+  10 个 PKL 指纹全部一致，`.pt` 指纹仍为
+  `281dac49d29a2f816ecb71538bbc1ecf15190399d4dd8992c97ec8c28a59e495`。
+- 16:26:47 CST 服务器复核分支/HEAD 仍为本任务起始值，工作区干净，launcher
+  `3269510` 和 8 个 worker `3269523～3269530` 均仍在正式 BUMI 训练目录运行。
+  本轮仅同步 sim2sim、测试和说明，不改变或重启正式训练。
+- 回滚采用新的反向提交，只撤销这次清单/交互/说明修改，不改写历史、不删除正式模型
+  或五对数据。Git 提交、推送及服务器快进结果在执行后另补审计记录。
