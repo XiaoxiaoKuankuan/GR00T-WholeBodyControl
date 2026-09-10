@@ -3826,3 +3826,9 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   自此仅作历史来源记录；正式模型、五对数据、测试源码和用户 `g1.tar.gz` 保留。
 - 本次提交一并归档本线程前几轮同主题的 0/0.03/1ms 诊断记录，保留其原始结果，
   并以报告第 13 节标明最新 0.01 正式值；不混入无关工作区内容。
+- 功能提交 `48a53838fea83585657285110c5c9e40d30f3206` 已推送至 GitHub 当前分支。
+  服务器经同一 `noetix-volc` 别名执行 `git pull --ff-only`，从 `056c462` 快进
+  至该提交；工作区干净，XML/YAML 指纹与本地一致，八个 XML 肩肘均显式为 0.01，
+  四个相关 Python 文件静态编译通过。原 launcher 与八个 worker 的 PID、启动
+  tick、完整命令和 cwd 在拉取前后完全一致，输出 `SERVER_ARM001_SYNC_PASS`。
+  后续提交仅补记这条同步证据，不改变已通过测试的参数或实现。
