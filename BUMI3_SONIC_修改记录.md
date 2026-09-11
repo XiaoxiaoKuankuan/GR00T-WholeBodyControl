@@ -4015,3 +4015,122 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `/tmp/bumi-reset-ground-20260911-6XGCPx`，共 151 个普通文件、605337 bytes，
   输出 `TASK_TEMP_CLEANUP_PASS`。该路径此后仅作历史复现来源；正式 checkpoint、
   ONNX、两批参考数据、测试源码和用户 `g1.tar.gz` 均保留。
+
+
+## 2026-09-11：Lab 与 MuJoCo 脚抖、滑步的只读诊断
+
+- 用户要求分析 Lab 看似正常但 MuJoCo 脚抖、走路脚滑是否为模型原因。本次只追加
+  此诊断记录；正式 Python、YAML、XML、训练参数、checkpoint、ONNX、参考 PKL
+  全部保持原值，进程内参数对照不构成正式修复或推荐配置。
+- 分支 `feature/bumi-native-sonic-full-training`，起始 HEAD
+  `77a9623bf798d744ce9c2592caa9ca7d5b1cdc7b`，起始本地/上游 0/0；唯一用户未跟踪
+  文件为 `g1.tar.gz`，原样保留。服务器起始同分支/同 HEAD，工作区干净。
+- 使用本地 `model_step_056000_g1.onnx`；目录仍为
+  `models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204/exported/`。
+  轨迹来自 `data/noetix_bumi3_bigset_10pairs_20260910/robot/`：
+  `wave_R_001__A431.pkl` 首帧保持 1000 控制步（20 s），
+  `walk_forward_amateur_003__A001.pkl` 直接自动播放最多 1508 步（30.16 s）。
+  模型轮数/编码器明确固定，不能推广为用户任意模型或 SMPL 分支的量化结果。
+- 解释器 `/home/weili/miniconda3/envs/env_isaaclab/bin/python`，MuJoCo 3.3.2，
+  ONNX Runtime CPU 单线程确定性推理；原显式 Python PD、Euler、200 Hz 物理、
+  50 Hz 策略、肩肘 armature=0.01、初始化防穿地均保留。
+- 当前运行时：Newton、pyramidal、impratio=1、iterations=100、tolerance=1e-8、
+  noslip_iterations=0，脚/地面 condim=3，friction=[1,0.005,0.0001]，
+  solref=[0.02,1]、solimp=[0.9,0.95,0.001,0.5,2]，总质量 20.24093728 kg。
+  XML 的 0.05 被动阻尼和 0.1 关节 frictionloss 独立于 PD 的 Kd。
+- 当前源码与保存配置：两边脚踝 Kp=8、Kd=0.5、力矩上限 9 Nm；踝 pitch/roll
+  armature 分别 0.012574/0.009608。Lab 使用 ImplicitActuator，MuJoCo 使用
+  原外部 PD；Lab 速度上限以 velocity_limit_sim 写入求解器，MuJoCo 仅加载
+  velocity_mujoco 数组，正式 PD 未实现等价速度上限。这是差异，尚非单独定因。
+- 两边 ankle_roll 脚碰撞都引用本仓库同一 STL。Lab URDF 默认导入 convex_hull，
+  MuJoCo mesh 也作凸包碰撞，因此不能声称 MuJoCo 使用了错误脚模型或 Lab 使用 box。
+  MuJoCo 原 mesh 整体约 194.6 x 82.6 mm；最低点上方 0.5 mm 的顶点覆盖范围约
+  144.1 x 50.2 mm，不能把视觉轮廓宽度当成实际平整支撑宽度。未测量 PhysX 烹制后
+  凸包顶点/接触面，不主张两引擎生成的接触流形完全一样。
+- 采集方法：每个 5 ms 子步先执行原 PD，再复制 MjData，在副本上 mj_forward；
+  对脚/地面法向力 >1 N 的接触，用 mj_jac(contact.pos) @ qvel 求世界接触点速度，
+  投影到地面切平面。剔除前 2 s，以法向力加权统计滑速和穿透深度；逐脚分别记录。
+  脚踝原点位移另记，不能把行走期间脚踝的正常前移当成滑步。
+- 摔倒测试停止条件是根高 <0.22 m 或根倾角 >60°。该阈值仅供本轮对照，
+  不等于 Lab 当前训练 termination。未摔倒和 warning=0 均不代表接触质量合格。
+- 对照模式：baseline 为正式值；mu2 仅把脚/地面滑动摩擦置 2；elliptic10 为
+  cone=elliptic、impratio=10、tolerance=1e-10；noslip3 仅增加 noslip_iterations=3；
+  joint_friction0 仅将 dof_frictionloss 清零；passive_damping0 仅将 dof_damping 清零。
+  后两项不更改网络目标角度、PD Kp/Kd、力矩裁剪或 armature。
+- 最终命令：`/home/weili/miniconda3/envs/env_isaaclab/bin/python -u
+  /tmp/bumi-contact-audit-20260911-360ibiqu/audit.py`。12 组最终结果如下；两脚滑速
+  分别统计，单位 cm/s；异常提前结束的组不得与完整轨迹平均值直接排序。
+
+| 轨迹/模式 | 完成控制步 | 时长 s | 左/右滑速 cm/s | 最低根高 m | 最大根倾角 ° | 明显摔倒 |
+|---|---:|---:|---|---:|---:|---|
+| wave 首帧保持 / baseline | 1000 | 20.00 | 0.8447 / 0.7819 | 0.468182 | 4.922884 | 否 |
+| wave 首帧保持 / mu2 | 1000 | 20.00 | 1.7306 / 1.6435 | 0.458417 | 4.918588 | 否 |
+| wave 首帧保持 / elliptic10 | 1000 | 20.00 | 0.6515 / 0.5548 | 0.468967 | 4.869009 | 否 |
+| wave 首帧保持 / noslip3 | 1000 | 20.00 | 0.5920 / 0.5220 | 0.468015 | 4.975952 | 否 |
+| wave 首帧保持 / joint_friction0 | 1000 | 20.00 | 1.3757 / 1.3828 | 0.467413 | 4.945447 | 否 |
+| wave 首帧保持 / passive_damping0 | 1000 | 20.00 | 0.8983 / 0.8837 | 0.467365 | 5.226280 | 否 |
+| walk 自动播放 / baseline | 1508 | 30.16 | 6.8605 / 7.1072 | 0.396798 | 22.980844 | 否 |
+| walk 自动播放 / mu2 | 1508 | 30.16 | 16.7566 / 15.5345 | 0.353687 | 36.335735 | 否 |
+| walk 自动播放 / elliptic10 | 934 | 18.68 | 10.5890 / 18.5327 | 0.213231 | 54.326202 | 是 |
+| walk 自动播放 / noslip3 | 1508 | 30.16 | 7.2306 / 7.4987 | 0.397513 | 24.014516 | 否 |
+| walk 自动播放 / joint_friction0 | 117 | 2.34 | 119.4224 / 125.5682 | 0.208023 | 34.079224 | 是 |
+| walk 自动播放 / passive_damping0 | 1508 | 30.16 | 7.8459 / 8.6546 | 0.388627 | 22.088040 | 否 |
+
+- 12 组均 warning=0，但 walk 的 elliptic10 于 18.68 s、joint_friction0 于
+  2.34 s 触发根高停止条件。因此不能将站立滑速改善推广为步行修复；本次没有
+  将任何试验参数写入正式配置。mu2 站立和步行均更差，反对直接靠增大摩擦解决。
+- 正式值 wave 在 2～20 s 的左/右脚踝水平净位移为 107.7584/101.4105 mm，
+  脚踝高度变幅 5.5195/4.6972 mm，平均承重接触点数 2.1642/2.3145，
+  法向力加权平均穿透 1.8904/1.5247 mm；接触点切向速度 P95 为 2.4449/2.7210 cm/s。
+  此时参考冻结且速度为零，真实滑动不能仅解释为正常迈步。
+- 正式值 walk 的接触点切向速度 P95 为 24.0608/28.4459 cm/s，平均承重接触点数
+  1.6525/1.5749，法向力加权平均穿透 3.9059/4.4292 mm，仍能完成 30.16 s；
+  这支持“未摔倒但踩不实”的现象，不是所有帧都在滑、不是 GUI 视觉定量验收。
+- 同一模型/动作只改接触和阻力会显著影响结果，说明当前策略对 MuJoCo 接触动力学
+  敏感。现有证据支持接触迁移差异与策略鲁棒性不足叠加，不足以断言仅碰撞几何错误、
+  ONNX 导出错误、PD 公式错误，或仅增加训练轮数就能修复。
+- 当前 Robot encoder 参考为未来关节位置/速度和根朝向，本体观测为角速度、关节
+  位置/速度、上一动作及重力方向；没有实际基座平移速度、世界脚位置误差或接触力。
+  策略可通过历史间接推断状态，但没有直接脚滑反馈。保存配置没有承重脚切向速度
+  惩罚或接触时序奖励；feet_acc 实为踝关节加速度惩罚（-2.5e-6），action_rate_l2
+  为 -0.1，不能等同脚地零滑速约束；foot_pos_xyz 终止阈值为 0.2 m。
+- 原始数据逐帧用同一 MuJoCo 资产作 FK，仅测几何，未推进参考动力学。结果如下：
+
+| 轨迹 | 帧 0→1 最大关节跳变 rad | 最大参考关节速度 rad/s | 第 1 s 后最大速度 rad/s | 左/右踝 roll 接近 ±0.17 的帧比例 | 左/右足底低于 -5 mm 的帧比例 |
+|---|---:|---:|---:|---|---|
+| wave_R_001__A431 | 0.426288 | 21.314405 | 6.766945 | 17.17% / 19.87% | 100.00% / 79.12% |
+| walk_forward_amateur_003__A001 | 0.638747 | 31.937353 | 11.794114 | 38.30% / 18.75% | 70.71% / 70.71% |
+
+- 参考速度尖峰来自原始首段关节跳变（不是本轮新增随机噪声）；walk 原始第一段
+  最大约 31.94 rad/s，高于名义 12 rad/s。后续速度峰值回落到约 11.79 rad/s，
+  因此首帧冲击仅为启动问题证据，不能替代持续脚滑的解释。
+- 原始参考根 Z/脚 FK 穿地说明数据并非严格物理可行的接触轨迹；初始化修复只上移
+  真实机器人，未修整段参考。Robot encoder 不直接读取参考根绝对 Z，故不能推断
+  它会因为红色参考在地下而持续命令机器人向下压。
+- 最初 8 组试采样曾在正式 MjData 上额外 mj_forward；为排除测量干扰，最终弃用
+  该批动态比较，改在状态副本上采样。中间 mj_copyData 在当前 Python 绑定不存在，
+  报 AttributeError、未完成任何组；随后使用受支持的 copy.copy(MjData)。
+  最终再独立运行两组未挂接采样的正式 step_control，基线的最低根高/最大根倾角
+  与最终采样版逐项差为 0，输出 PURE_CONTROL_LOOP_MATCH_PASS。
+- 本轮未重新运行 Isaac Lab、未比较 56000 PT/ONNX 同输入误差、未测 SMPL 分支、
+  未做新碰撞形状试验、未作 GUI/实机测试。用户的 Lab 正常反馈仍是视觉观察，
+  不应声称 Lab 的接触滑速已实测为零。此前 30000 的观测/导出对齐记录仅作背景。
+- 后续处理顺序：先用统一滑速/承重/轨迹完整率指标补 Lab/MuJoCo 同动作对照；
+  检查真实支撑面和接触参数的成套一致性，避免直接加摩擦或取消既有阻力；
+  修整首帧跳变/踝限位/接触参考后，再决定是否增加承重脚滑速约束与训练覆盖。
+  没有证据要求再次改变用户指定的外部 PD 或增大肩肘 armature。
+- 官方接触语义参考：MuJoCo 3.3.2 modeling#solver-parameters 的软约束滑移、
+  cone/impratio/noslip 说明，以及 XMLreference#body-geom 的 condim/mesh 说明。
+- 本轮关键文件 SHA-256（正式实现、资产、模型均未修改）：
+  - `gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`：`1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`。
+  - `gear_sonic/config/sim2sim/bumi3_sonic.yaml`：`f52be29ca85a264273dc5ab75055ea52b8c297a362d093fd27f25ca90d9865f8`。
+  - `gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf`：`0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955`。
+  - `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：`faaadb30038f85984eae762b0d3e4a83d9fdb861942e4e925626395775fe1c16`。
+  - `models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204/exported/model_step_056000_g1.onnx`：`9625dcc55c93f12b77d1bc76f8d6f61e34c4004bf88dcc659d5db3c87fc77c32`。
+- 临时脚本、两批对照 JSON、参考 FK JSON、纯控制核对和远端只读快照位于唯一目录
+  `/tmp/bumi-contact-audit-20260911-360ibiqu`；以上已记录复现输入、各变体、测量
+  算法、异常及全部最终指标。核对全部任务进程退出且无外部引用后精确清理该目录。
+  本节为只读诊断归档，回滚只需用新提交撤销本节，无运行参数需要回退。
+- 清理验证：全部诊断进程已结束，可读 /proc 中无其他进程 cmdline/cwd/fd 引用；
+  精确删除上述唯一专用目录的 6 个普通文件（75847 bytes）并删除空目录，
+  输出 CONTACT_AUDIT_TEMP_CLEANUP_PASS。正式模型、数据和用户文件均保留。
