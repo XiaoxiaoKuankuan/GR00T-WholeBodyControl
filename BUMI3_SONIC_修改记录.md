@@ -4003,3 +4003,15 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `6971f20`、工作区干净。同步前只读记录 launcher PID 3269510/start_ticks 964046165
   与八个 worker 3269523～3269530/start_ticks 964046505，以及完整命令、cwd，
   供同步后核对。禁止为本次部署代码更新停止或重启原八卡训练。
+- 功能提交 `6bf6deae29ebf4d2b2e0f2e2304b264270f013ac` 已推送 GitHub 当前分支；
+  noetix-volc 同分支已通过 `git pull --ff-only origin feature/bumi-native-sonic-full-training`
+  从 `6971f20` 快进到该提交，工作区干净。五个修改的 Python 文件在服务器静态编译
+  通过，七个提交文件和 XML/YAML 共九项 SHA-256 与本地完全一致。
+- 首次同步检查的进程集合断言未通过，当时尚未执行 pull；随即只读复核九个原训练
+  进程均存在且身份相同，改为直接核验此前记录的精确 PID、启动 tick、cwd 和 run
+  完整命令后完成同步。同步前后身份与本轮最初快照逐项完全一致，未发送停止或重启信号。
+- 真实回放、CLI、pytest、静态校验进程均已结束，关键结果已归档于本节；检查可读
+  `/proc` 的 cmdline/cwd/fd 无引用后，精确清理专用目录
+  `/tmp/bumi-reset-ground-20260911-6XGCPx`，共 151 个普通文件、605337 bytes，
+  输出 `TASK_TEMP_CLEANUP_PASS`。该路径此后仅作历史复现来源；正式 checkpoint、
+  ONNX、两批参考数据、测试源码和用户 `g1.tar.gz` 均保留。
