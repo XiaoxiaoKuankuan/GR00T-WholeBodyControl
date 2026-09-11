@@ -9,10 +9,13 @@
 不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
 可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
 闭环，以及外部 PD 力矩限制、手臂部署惯量/被动阻尼、阻尼衰减和积分后根观测同步。
+初始化防穿地测试直接调用接触求解核验最小间隙，覆盖倾斜脚掌、不同地面高度、
+离地动作、非零起始帧和初速度保留，避免用实现自身的顶点算法生成期望值。
 测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
 仅用于验证加载器契约。
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import joblib
@@ -297,6 +300,94 @@ def test_reset_fills_history_like_isaaclab_first_append() -> None:
     for history in runner.histories.values():
         stacked = np.stack(history, axis=0)
         np.testing.assert_allclose(stacked, np.repeat(stacked[-1:], 10, axis=0))
+
+
+def _foot_plane_contact_distances(runner, qpos):
+    """由 MuJoCo 接触求解独立核验脚底距离，不复用初始化校正的网格顶点计算。"""
+    scratch = mujoco.MjData(runner.model)
+    scratch.qpos[:] = qpos
+    mujoco.mj_forward(runner.model, scratch)
+    ground = mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
+    feet = {
+        mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_ankle_roll_link_collision")
+        for side in ("l", "r")
+    }
+    return [
+        contact.dist for contact in scratch.contact
+        if (contact.geom1 == ground and contact.geom2 in feet)
+        or (contact.geom2 == ground and contact.geom1 in feet)
+    ]
+
+
+@pytest.mark.parametrize("paused", [False, True])
+@pytest.mark.parametrize("tilt", [0.0, 0.15])
+def test_reset_removes_foot_penetration_and_preserves_reference_state(paused, tilt, capsys):
+    """倾斜脚掌也应最小上移；非零起始帧、原参考和播放初速度不能被校正改变。"""
+    contract = _contract()
+    original = make_static_reference_motion(contract, num_frames=5)
+    roots = original.root_position_world.copy()
+    roots[:, 2] = [0.7, 0.65, 0.44, 0.43, 0.42]
+    quats = original.root_quat_wxyz.copy()
+    quats[:, [0, 1]] = [np.cos(tilt / 2), np.sin(tilt / 2)]
+    motion = replace(
+        original, root_position_world=roots, root_quat_wxyz=quats,
+        joint_vel_policy=np.full_like(original.joint_vel_policy, 0.12),
+        root_lin_vel_world=np.tile([0.2, -0.1, 0.05], (5, 1)),
+        root_ang_vel_world=np.tile([0.1, 0.2, -0.3], (5, 1)),
+    )
+    runner = Bumi3SonicSim2Sim(
+        contract, motion, ZeroPolicy(contract), start_paused=paused, start_frame=2,
+    )
+    reference_qpos = runner._reference_qpos(2)
+    before = _foot_plane_contact_distances(runner, reference_qpos)
+    assert before and min(before) < -0.02
+    expected_qpos = reference_qpos.copy()
+    expected_qpos[2] += -min(before) + 0.0001
+    np.testing.assert_allclose(runner.data.qpos, expected_qpos, atol=2e-8, rtol=0)
+    expected_qvel = np.zeros(runner.model.nv) if paused else runner._reference_qvel(2)
+    np.testing.assert_allclose(runner.data.qvel, expected_qvel, atol=1e-12)
+    assert _foot_plane_contact_distances(runner, runner.data.qpos) == []
+    probe = runner.data.qpos.copy()
+    probe[2] -= 0.0002
+    distances = _foot_plane_contact_distances(runner, probe)
+    assert distances and min(distances) == pytest.approx(-0.0001, abs=2e-8)
+    np.testing.assert_array_equal(motion.root_position_world, roots)
+    np.testing.assert_array_equal(motion.root_quat_wxyz, quats)
+    np.testing.assert_array_equal(runner._reference_qpos(2), reference_qpos)
+    assert runner.motion_frame == 2 and runner.playing == (not paused)
+    for name, history in runner.histories.items():
+        np.testing.assert_array_equal(np.stack(history), np.tile(runner._current_state()[name], (10, 1)))
+    initial = runner.data.qpos.copy()
+    runner.reset(start_frame=2)
+    np.testing.assert_array_equal(runner.data.qpos, initial)
+    assert "BUMI3_RESET_GROUND_ALIGNMENT=" in capsys.readouterr().out
+
+
+def test_reset_ground_height_and_airborne_motion_are_respected(monkeypatch):
+    """校正读取地面实际高度；离地参考不能被拉下，正常物理步不能再次强制校正。"""
+    contract = _contract()
+    motion = make_static_reference_motion(contract, num_frames=3)
+    roots = motion.root_position_world.copy()
+    roots[:, 2] = [0.44, 0.8, 0.8]
+    motion = replace(motion, root_position_world=roots)
+    runner = Bumi3SonicSim2Sim(contract, motion, ZeroPolicy(contract), start_paused=True)
+    root_z = runner.data.qpos[2]
+    ground = mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
+    runner.model.geom_pos[ground, 2] = 0.03
+    runner.reset()
+    assert runner.data.qpos[2] == pytest.approx(root_z + 0.03, abs=1e-12)
+    runner.reset(start_frame=1)
+    np.testing.assert_array_equal(runner.data.qpos, runner._reference_qpos(1))
+    assert not runner.reset_ground_alignment["applied"]
+    assert runner.reset_ground_alignment["root_z_offset_m"] == 0
+
+    def unexpected_correction(*args):
+        """正常物理步调用校正意味着在掩盖接触动力学，必须使回归失败。"""
+        pytest.fail("step_control 不应执行初始化高度校正")
+
+    monkeypatch.setattr(runner, "_correct_initial_foot_penetration", unexpected_correction)
+    runner.step_control()
+    assert runner.data.time == pytest.approx(0.02)
 
 
 def test_explicit_pd_matches_force_law_and_effort_limits() -> None:

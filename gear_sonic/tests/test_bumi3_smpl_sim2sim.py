@@ -160,7 +160,10 @@ def test_single_smpl_npz_container_and_default_initialization(tmp_path, contract
     runner = Bumi3SonicSim2Sim(
         contract, motion, ZeroPolicy(contract, encoder="smpl"), encoder="smpl", start_paused=True,
     )
-    np.testing.assert_allclose(runner.data.qpos[:3], contract.initial_root_position)
+    # 无配对人体参考仍以默认机器人姿态初始化，只有根高允许增加一次防穿地余量。
+    expected_position = contract.initial_root_position.copy()
+    expected_position[2] += runner.reset_ground_alignment["root_z_offset_m"]
+    np.testing.assert_allclose(runner.data.qpos[:3], expected_position)
     np.testing.assert_allclose(runner.data.qpos[runner.qpos_addresses], contract.default_mujoco)
     assert runner.reference_marker_specs(0) == []
     assert runner.build_observation().shape == (1470,)

@@ -30,6 +30,9 @@ Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加�
 运行器还支持有序轨迹列表和 T/P 按键队列：保持状态固定全部未来参考并清零参考
 速度，策略和物理照常运行；切换轨迹时重置实际状态与历史观测，避免上一条动作污染
 新参考。键盘回调只入队，所有状态变更由控制线程执行。
+每次 reset 按左右脚实际碰撞网格的最低点检查地面高度，只向上校正真实机器人的
+初始根位置至至少留有 0.1 mm 余量；之后刷新物理派生状态并填充观测历史。
+校正不改参考数据、红色影子、初速度或关节姿态，也不在正常物理步中重复执行。
 SMPL 模式使用独立的 1470 维联合模型，人体参考连续十帧、间隔 0.02 秒；配对 Robot
 仅用于初始化和参考影子，不进入人体 tokenizer。无配对时使用明确的默认站姿初始化，
 不把人体身高或人体关节角直接写入机器人，也不显示虚构的机器人参考影子。
@@ -66,6 +69,8 @@ EncoderMode = Literal["robot", "smpl"]
 DEFAULT_BUMI3_SIM2SIM_CONFIG = (
     Path(__file__).resolve().parents[2] / "config" / "sim2sim" / "bumi3_sonic.yaml"
 )
+# 仅用于初始化的几何余量，不是物理接触 margin，也不要求运行时保持此离地距离。
+RESET_FOOT_CLEARANCE_M = 0.0001
 
 def _target_order_indices(source_names: list[str], target_names: list[str]) -> np.ndarray:
     """按名称生成把 source 数组重排成 target 数组的索引。"""
@@ -1258,8 +1263,81 @@ class Bumi3SonicSim2Sim:
         ]
         return qvel
 
+    def _correct_initial_foot_penetration(self, start_frame: int) -> None:
+        """按当前水平地面与编译后脚部网格，一次性消除初始化穿地。
+
+        必须先执行 mj_forward，使 geom_xpos/geom_xmat 对应当前参考姿态。
+        MuJoCo 编译器会平移、旋转 mesh 顶点，最低点必须由编译顶点和 geom 世界
+        变换共同计算，不能使用踝关节原点、可视包围盒或未变换的 STL 高度。
+        仅移动真实浮动根的 Z，保留 qvel、朝向、关节、参考数据和独立影子模型。
+        本方法只支持当前 BUMI 的水平 plane 与具名脚部 mesh；资产契约不符时明确
+        报错，避免换成其他地形或碰撞形状后仍套用错误的几何校正。
+        """
+        model, data = self.model, self.data
+        ground_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
+        if (
+            ground_id < 0
+            or model.geom_type[ground_id] != mujoco.mjtGeom.mjGEOM_PLANE
+            or not np.allclose(
+                data.geom_xmat[ground_id].reshape(3, 3)[:, 2], [0.0, 0.0, 1.0],
+                rtol=0.0, atol=1e-9,
+            )
+        ):
+            raise ValueError("初始化防穿地要求名为 ground、法向为世界 +Z 的水平 plane")
+        ground_height = float(data.geom_xpos[ground_id, 2])
+        feet = {}
+        for side in ("l", "r"):
+            name = f"{side}_ankle_roll_link_collision"
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if geom_id < 0 or model.geom_type[geom_id] != mujoco.mjtGeom.mjGEOM_MESH:
+                raise ValueError(f"初始化防穿地缺少脚部碰撞 mesh: {name}")
+            if not (
+                (model.geom_contype[geom_id] & model.geom_conaffinity[ground_id])
+                or (model.geom_contype[ground_id] & model.geom_conaffinity[geom_id])
+            ):
+                raise ValueError(f"脚部碰撞体未启用地面接触: {name}")
+            mesh_id = int(model.geom_dataid[geom_id])
+            start = int(model.mesh_vertadr[mesh_id])
+            count = int(model.mesh_vertnum[mesh_id])
+            if count == 0:
+                raise ValueError(f"脚部碰撞 mesh 顶点为空: {name}")
+            feet[name] = (geom_id, model.mesh_vert[start:start + count])
+
+        def minimum_heights() -> dict[str, float]:
+            """将当前脚部编译顶点投影到世界 Z，返回每只脚的最低点高度。"""
+            heights = {
+                name: float(np.min(
+                    vertices @ data.geom_xmat[geom_id].reshape(3, 3)[2, :]
+                    + data.geom_xpos[geom_id, 2]
+                ))
+                for name, (geom_id, vertices) in feet.items()
+            }
+            if not np.isfinite([ground_height, *heights.values()]).all():
+                raise ValueError("初始化地面或脚部碰撞高度含 NaN/Inf")
+            return heights
+
+        before = minimum_heights()
+        offset = max(0.0, ground_height + RESET_FOOT_CLEARANCE_M - min(before.values()))
+        root_z_address = self.root_qpos_address + 2
+        root_z_before = float(data.qpos[root_z_address])
+        if offset > 0.0:
+            data.qpos[root_z_address] += offset
+            mujoco.mj_forward(model, data)
+        self.reset_ground_alignment = {
+            "motion_name": self.motion.name,
+            "frame": start_frame,
+            "applied": offset > 0.0,
+            "ground_height_m": ground_height,
+            "clearance_m": RESET_FOOT_CLEARANCE_M,
+            "root_z_offset_m": offset,
+            "root_z_before_m": root_z_before,
+            "root_z_after_m": float(data.qpos[root_z_address]),
+            "foot_min_z_before_m": before,
+            "foot_min_z_after_m": minimum_heights(),
+        }
+
     def reset(self, *, start_frame: int = 0) -> None:
-        """按参考动作重置浮动根、关节状态、历史缓冲和播放位置。"""
+        """恢复参考姿态和对应初速度，校正初始脚底高度后重建历史与播放状态。"""
 
         if not 0 <= start_frame < self.motion.num_frames:
             raise ValueError(f"start_frame 越界: {start_frame}/{self.motion.num_frames}")
@@ -1269,6 +1347,7 @@ class Bumi3SonicSim2Sim:
         self.data.qvel[:] = self._reference_qvel(start_frame) if self.playing else 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
+        self._correct_initial_foot_penetration(start_frame)
         self._update_reference_heading_alignment(start_frame)
         self.last_action_policy.fill(0.0)
         self.last_observation.fill(0.0)
@@ -1282,6 +1361,11 @@ class Bumi3SonicSim2Sim:
                 initial_state[name].copy() for _ in range(self.contract.history_length)
             )
         self.motion_frame = start_frame
+        print(
+            "BUMI3_RESET_GROUND_ALIGNMENT="
+            + json.dumps(self.reset_ground_alignment, ensure_ascii=False),
+            flush=True,
+        )
 
     def playback_status(self) -> dict[str, object]:
         """返回当前轨迹与播放状态，供终端提示和自动化交互验收使用。"""

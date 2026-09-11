@@ -3924,3 +3924,82 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本轮未启动 Isaac Lab GUI、未重训、未进行人工 GUI 或实机验收；训练函数数值一致性、MuJoCo 动力学及键盘队列路径为已执行检查。原8卡训练在同步前 PID/启动 tick/cwd/命令均与上轮一致，服务器同分支 HEAD 6ba4ef3，工作区干净。
 - 功能提交 `a7592c9ea9b713809de44de5214547ca62d5b4ee` 已推送 GitHub 当前分支；noetix-volc 同分支通过 `git pull --ff-only` 从 6ba4ef3 快进到该提交，工作区干净。5 个相关 Python 文件静态编译通过，相关源码及 XML/YAML 指纹与本地一致。同步前后 launcher 3269510（start_ticks=964046165）和八个 worker 3269523～3269530（start_ticks=964046505）的 PID、启动 tick、cwd 和完整命令逐项完全一致，输出 `SERVER_SMPL_ENTRY_SYNC_PASS`。后续仅追加审计记录，不改变已经验证的实现。
 - 测试与传输关键证据已归档后，确认本线程执行进程结束，并检查可读进程的 cmdline/cwd/fd 无目录引用，仅清理精确专用目录 `/tmp/bumi-smpl-entry-20260910-uIz0Bc`（158 文件，618252 bytes），输出 `TASK_TEMP_CLEANUP_PASS`。正式十对数据、旧五对、模型、测试源码和用户 g1.tar.gz 保留。该临时路径此后仅作历史来源记录。
+
+## 2026-09-11：BUMI sim2sim 初始化脚底防穿地校正
+
+- 用户明确要求实施“按实际碰撞体最小上移、仅 reset 执行一次”的方案；该授权更新了
+  过去真实机器人初始化也完全保留参考根高的行为，源动作和红色影子仍保留原始高度。
+- 分支 `feature/bumi-native-sonic-full-training`，起始 HEAD
+  `6971f20b12e318428681b3da6d5cfcc9bca5f7f3`，起始本地与 upstream 领先/落后为 0/0。
+  唯一未跟踪用户文件 `g1.tar.gz` 保留，不纳入提交或清理。
+- 修改 `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：reset 设置参考姿态并执行
+  正向运动学后，按左右脚具名碰撞 mesh 的编译顶点及 geom 世界变换求最低点；
+  `max(0, ground_z + 0.0001 - min_foot_z)` 仅加到真实浮动根 Z。使用实际水平
+  地面高度，余量 0.1 mm，离地动作不下拉；对非水平 plane、缺失脚部 mesh 或关闭
+  脚地碰撞的资产明确报错。校正后再次刷新物理派生状态，再构造初始历史观测。
+- 每次 reset 输出 `BUMI3_RESET_GROUND_ALIGNMENT`，记录动作、帧号、是否校正、
+  地面/余量、根部上移量、根部和左右脚最低点校正前后高度，供原命令直接查看。
+  普通 T 开始、正常控制步和 loop 边界不执行校正；P 切换与重新 reset 重新计算，
+  不累积上一次偏移。等待零初速度、自动播放参考初速度、关节和朝向语义保持原样。
+- 更新 `gear_sonic/scripts/run_bumi3_sim2sim.py` 中文入口说明，以及
+  `docs/source/getting_started/bumi3_sim2sim.md` 中初始化、日志和数据基准边界。
+  在现有 `test_bumi3_sim2sim.py`、`test_bumi3_motion_playlist.py` 新增回归，
+  通过独立 MuJoCo 接触查询核验间隙，不复用实现的顶点计算生成预期。
+- 资产/配置来源为当前仓库 BUMI3 契约，XML SHA-256
+  `1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`；YAML
+  `f52be29ca85a264273dc5ab75055ea52b8c297a362d093fd27f25ca90d9865f8`，均不修改。
+  继续使用外部 Python PD、Euler、200 Hz 物理/50 Hz 策略、手臂 armature=0.01。
+- 已知边界：仅保证初始化几何间隙，不保证冻结动态首帧可平衡，不解决持续脚底晃动；
+  A428 先前进程内上移对照曾使启动摇摆加大。不能把不穿地或有限值视为动作质量合格。
+  不调整摩擦、碰撞形状、控制器、训练或整段参考高度，不重新导出 ONNX。
+- 验证专用目录 `/tmp/bumi-reset-ground-20260911-6XGCPx`；测试与真实 ONNX
+  回放结果完成后追加于此，归档证据后精确清理。回滚通过新的反向提交撤销本节
+  初始化方法、reset 接入、回归及说明，保留原始模型/数据和此前控制实现。
+- 首轮相关回归为 48 passed / 2 failed：新增六项全部通过，两个既有测试仍要求
+  reset 根高与原参考完全相等，与新授权契约冲突。已在原播放列表及
+  `test_bumi3_smpl_sim2sim.py` 的默认 SMPL 初始化断言中明确允许已记录的 Z
+  校正量，继续验证其余参考状态不变；默认站姿仅增加约 0.099747 mm 的几何余量。
+- 最终回归命令：`/home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py gear_sonic/tests/test_bumi3_smpl_sim2sim.py -p no:cacheprovider --basetemp=/tmp/bumi-reset-ground-20260911-6XGCPx/pytest-final`，
+  **50 passed in 8.02s**，含新增六项；唯一 warning 是抽取既有训练代码时的历史
+  docstring `\*` 转义警告。`validate_bumi3_sim2sim.py --skip-smoke` 输出
+  `BUMI3_SIM2SIM_VALIDATION=PASS`，静态初始脚地接触穿透为零、资产契约一致。
+- 原 CLI 使用 56000 Robot ONNX、新十对 dataset 和 `--motion-name wave_R_001__A431
+  --validate-only` 实际通过，并输出上移 0.014079800348902386m 的诊断信息；
+  原有命令不需要新增参数。`--validate-only` 只构造和核验初始状态，不推进物理。
+- 真实回放命令：`/home/weili/miniconda3/envs/env_isaaclab/bin/python -u /tmp/bumi-reset-ground-20260911-6XGCPx/runtime_check.py`。
+  使用 MuJoCo 3.3.2、正式 56000 轮模型，两条 wave 各 Robot/SMPL，分别执行
+  等待 1000 控制步→T→完整播放→末帧 250 步，以及独立 reset 自动播放→末帧 250 步，
+  共八组。第二条等待测试通过真实 P 队列切换初始化；全部逐步有限值通过，
+  MuJoCo warning=0，未出现明显摔倒。判据同时记录根高和倾角，所有阶段根高均
+  大于 0.45m，最大根倾角不超过 9.22°；不代表脚底无晃动或全数据集稳定。
+- A431 左右脚初始高度为 -13.979800/-13.328641mm，实际上移 **14.079800mm**，
+  校正后为 0.100000/0.751159mm；A428 为 -17.367319/-17.843102mm，上移
+  **17.943102mm**，校正后为 0.575784/0.100000mm。根朝向、关节和参考初速度未改。
+- 模型目录为 `models/sonic_bumi3/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204/exported/`：
+  `model_step_056000_g1.onnx` SHA-256
+  `9625dcc55c93f12b77d1bc76f8d6f61e34c4004bf88dcc659d5db3c87fc77c32`；
+  `model_step_056000_smpl.onnx` SHA-256
+  `2dd151a40f0cb726e8973dcaae9992fad7e46740355159a1671fc5c20c96215c`。
+  参考分别来自 `data/noetix_bumi3_bigset_10pairs_20260910/` 的 A431 和
+  `data/noetix_bumi3_5pairs_20260910/` 的 A428 配对 PKL。
+
+| 模型 / 动作 / 模式 | 等待最大根倾角 ° | 播放最低根高 m | 播放最大根倾角 ° | 末帧保持最大根倾角 ° |
+|---|---:|---:|---:|---:|
+| Robot / A431 / 等待后 T | 4.922884 | 0.454236 | 6.426807 | 5.535367 |
+| Robot / A428 / P 后等待再 T | 6.922336 | 0.458448 | 8.258316 | 6.574836 |
+| Robot / A431 / 自动播放 | — | 0.452468 | 8.475155 | 6.624814 |
+| Robot / A428 / 自动播放 | — | 0.457514 | 8.643018 | 5.550581 |
+| SMPL / A431 / 等待后 T | 6.065639 | 0.452399 | 7.807660 | 5.727629 |
+| SMPL / A428 / P 后等待再 T | 8.812217 | 0.459080 | 8.857103 | 6.136027 |
+| SMPL / A431 / 自动播放 | — | 0.453917 | 8.428188 | 5.893244 |
+| SMPL / A428 / 自动播放 | — | 0.457690 | 9.219947 | 6.419183 |
+
+- AST 对比起始 HEAD，外部 PD、step_control、Robot tokenizer、本体历史拼接、
+  参考 qpos/qvel、根角速度、本体状态、armature 应用、T/P 事件处理十个原方法
+  全部一致，输出 `ORIGINAL_CONTROL_AND_REFERENCE_AST_UNCHANGED=PASS`。
+  XML/YAML SHA-256 与本节起始指纹一致。未修改 G1 或训练公用实现，因此未启动
+  G1 动力学、Isaac Lab、远端训练 smoke 或实机；GUI 队列路径有测试，未作人工窗口验收。
+- 提交前已 fetch 当前 GitHub 分支，起始 HEAD 仍为 0/0；服务器同分支 HEAD
+  `6971f20`、工作区干净。同步前只读记录 launcher PID 3269510/start_ticks 964046165
+  与八个 worker 3269523～3269530/start_ticks 964046505，以及完整命令、cwd，
+  供同步后核对。禁止为本次部署代码更新停止或重启原八卡训练。

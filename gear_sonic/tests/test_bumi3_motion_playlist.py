@@ -136,7 +136,10 @@ def test_start_switch_reset_and_wrap(runner):
     runner._process_key_events()
     assert runner.motion_index == 1 and runner.motion_frame == 0 and not runner.playing
     assert runner.data.time == 0
-    np.testing.assert_allclose(runner.data.qpos, runner._reference_qpos(0))
+    # 换动作后仅允许根 Z 增加已记录的校正量，其余参考姿态必须完整保留。
+    expected_qpos = runner._reference_qpos(0)
+    expected_qpos[2] += runner.reset_ground_alignment["root_z_offset_m"]
+    np.testing.assert_allclose(runner.data.qpos, expected_qpos)
     np.testing.assert_array_equal(runner.data.qvel, 0.0)
     np.testing.assert_array_equal(runner.last_action_policy, 0.0)
     for history in runner.histories.values():
@@ -146,6 +149,35 @@ def test_start_switch_reset_and_wrap(runner):
     runner.enqueue_key(ord("p"))
     runner.step_control()
     assert runner.motion_index == 0 and runner.motion_frame == 0 and not runner.playing
+
+
+def test_switch_corrects_each_motion_once_and_start_preserves_state(contract, capsys):
+    """P 切换按每条原始高度重新校正；等待时按 T 不能再次移动机器人或重置速度。"""
+    motions = []
+    for index, height in enumerate((0.44, 0.42)):
+        motion = make_static_reference_motion(contract, num_frames=4)
+        roots = motion.root_position_world.copy()
+        roots[:, 2] = height
+        motions.append(replace(motion, name=f"penetrating_{index}", root_position_world=roots))
+    runner = Bumi3SonicSim2Sim(
+        contract, motions[0], ZeroPolicy(contract), motions=motions, start_paused=True,
+    )
+    first_z = runner.data.qpos[2]
+    first_offset = runner.reset_ground_alignment["root_z_offset_m"]
+    runner.enqueue_key(ord("P"))
+    runner._process_key_events()
+    assert runner.reset_ground_alignment["motion_name"] == "penetrating_1"
+    assert runner.reset_ground_alignment["root_z_offset_m"] == pytest.approx(first_offset + 0.02)
+    assert runner.data.qpos[2] == pytest.approx(first_z)
+    runner.data.qpos[2] += 0.01
+    runner.data.qvel[0] = 0.05
+    before_qpos, before_qvel = runner.data.qpos.copy(), runner.data.qvel.copy()
+    runner.enqueue_key(ord("T"))
+    runner._process_key_events()
+    np.testing.assert_array_equal(runner.data.qpos, before_qpos)
+    np.testing.assert_array_equal(runner.data.qvel, before_qvel)
+    assert runner.playing
+    assert capsys.readouterr().out.count("BUMI3_RESET_GROUND_ALIGNMENT=") == 2
 
 
 def test_end_hold_restart_and_ignored_key(runner):
