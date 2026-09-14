@@ -4369,3 +4369,34 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 功能提交 `9c45a90bbfc817eddea29e091fca9e1fabbb4643` 已推送并在 noetix-volc 同分支 `git pull --ff-only` 完成；服务器工作区干净，两份 4340 资产哈希与本地一致。同步前后主进程 203594 和八 worker 203604–203611 的完整 argv/cwd/start_ticks 逐项相同，旧 XML/URDF 字节相同。
 - 原有正式模型和数据保留；全部本轮测试/回放进程均已结束，清理前逐进程 cmdline/cwd/fd 检查未引用本轮两个专用目录（清理进程及祖先进程除外）。指标、命令、来源和失败原因已归档，现按精确路径清理 `/tmp/bumi-4340-20260914-9u3liz4x` 及 `/tmp/IsaacLab/usd_20260914_184402_6311`，不触及其他共享缓存或用户产物。
 - 上述两个本轮专用目录已清理完成；交付记录另行提交与快进同步。
+
+
+## 2026-09-14：停止旧资产续训并从 100000 恢复为 4340 正式训练
+
+- 用户明确授权停止 noetix-volc 当前训练，使用正确 bumi3_4340.urdf 和左右肩 roll 新限位，从 model_step_100000.pt 重新 resume。沿用此前追加 100000、累计到 200000 的目标；旧训练产物保留，新任务独立目录。
+- 本地与 noetix-volc 起始 HEAD d4e16f3cd1879b35e184f8e562a7d764977d297d，同分支 feature/bumi-native-sonic-full-training；服务器工作区干净，本地仅原用户 g1.tar.gz。18:54:00 新鲜核对原 master 203594 与八 worker 203604–203611 的完整命令、启动 tick、cwd 及 tmux 会话；尚未停止。
+- 服务器新 URDF SHA256 098f46181b75db4d965cdafc5901f4d78eeedfa4a63a2af2eab2a3ef88dbaf0d，MJCF f4e11d57715fe6dc5ce867130425b823c38ff3940de12fcd60c9fbf118913aec，与上一轮确认资产一致。资产和训练代码无需再次修改；正在核对固定 100000 checkpoint、准备正式启动脚本并对照保存配置。
+- 本轮临时检查目录 /tmp/bumi4340-resume-20260914-0j2vds05；正式训练脚本、配置、日志及健康证据保留服务器 formal_logs。本轮不新增优化算法或改变采样、奖励和学习率；回退需使用保留的旧配置/旧资产明确启动新进程，不重写已有模型。
+- 预检完整 CPU 加载与 global_step=100000 成功；首轮临时检查将 Actor 键误写死为 actor_model_state_dict，实际训练器同时支持 policy_state_dict。按训练器已存在的两种 schema 修正检查，不改 checkpoint 或训练代码；此时尚未停止旧训练或创建新任务。
+- 第二轮预检误遍历 Hydra 自身 sweep 节点，其 hydra.job.num 在非 sweep 运行中为空；改为只解析训练业务配置，保持原启动参数不变。该问题发生在新目录创建前，旧训练尚未停止。
+- 预检进一步保留未使用的 legacy env=??? 配置占位，使用 masked_copy 排除 Hydra 自身节点后解析业务配置；先前逐键访问会错误触发未使用占位的 MissingMandatoryValue。只是预检序列化修正，不改变正式训练配置或启动入口。
+
+- 18:58:06 正式预检通过：原 100000 模型 SHA256 60b499e2173fb0c17f004adac0083887c0dff3d009f8c4f074ddad54d400f6fd，CPU 完整读取 global_step=100000；59 项优化器状态、Adam step=2000000，Actor/Critic 恢复 LR=1e-5/1e-3。policy_state_dict/value_state_dict/env_state_dict 完整存在，源 checkpoint 不变并复制到新正式目录。
+- 新配置与旧续训实际 config.yaml 对照仅 12 个叶子差异，全部为输出路径、实验名称、固定 checkpoint 路径和参考 MJCF 从 bumi3.xml 改为 bumi3_4340.xml。其余训练数据、奖励、终止、PPO、采样和学习率配置一致；每卡4096 × 8卡，累计目标200000。源 URDF 与 MJCF 的两肩限位都为左[-0.14,1.94]、右[-1.94,0.14] rad。
+- 新 tmux `sonic_bumi3_4340_resume100k_to200k_20260914_185804`；正式 run `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_4340_uniform90_lr2e5_critic1e3_ee040_resume100k_to200k-20260914_185804`；终端日志 `/data/sonic_bumi3/formal_logs/sonic_bumi3_4340_resume100k_to200k_20260914_185804.log`；TensorBoard `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_4340_uniform90_lr2e5_critic1e3_ee040_resume100k_to200k-20260914_185804/tensorboard`。同名前缀 .sh/.json/.resolved_config.yaml/.source_config.yaml 保留完整启动命令、配置差异与资产来源，bash -n 通过。
+
+- 18:58:54 已停止旧任务并启动新任务：旧日志最后 iteration=103651，只向精确核对后的 master 203594 发 SIGINT，八 worker 随 launcher 正常退出，无需 SIGKILL；八 GPU 均回落到4MiB，无计算进程残留。旧 tmux 和所有正式产物保留。新 tmux pane=%55、shell PID244405，正式训练已启动，健康验证进行中。
+- 初次健康脚本解析未注册 Hydra now resolver；修正为用实际启动参数建立 Hydra 上下文，并只在内存中将动态 timestamp 固定为预检值，以比较训练内容，未改写实际 config.yaml。此错误属于只读审计脚本，不是训练器失败。
+
+- 19:01:18 健康核验：新 master=244409，八 worker=244428～244435，rank/local_rank=0～7、WORLD_SIZE=8；完整 argv/cwd/start_ticks 保存到正式 .health.json。八次 Loaded checkpoint from step 100000，八次加载 bumi3_4340.xml skeleton，已推进到100007。
+- 新实际 config.yaml SHA256=3b33948f758dc23b78c7c6e1398cbdc9535f3c66ced97bf123b837311136d525，与预检配置逐项一致（动态 timestamp 只在内存固定为预检值）。八个本次 URDF→USD 转换配置均明确引用正确的 bumi3_4340.urdf。Actor/Critic实际LR=1e-5/1e-3，自适应采样继承3917个隔离动作、95358个动作统计和约4440万次累计评估。
+- TensorBoard 145个tag、1015个点、step100001～100007，非有限数=0；新日志 Python traceback、CUDA OOM、分布式错误、Hydra失败及原生fatal均为0。仍有既有24条 ERROR_INCOMPATIBLE_DRIVER 无窗口图形提示，之后PPO正常推进，不能把此称为所有日志零错误。
+- 离线 USD 审计首次子进程缺少 libpython3.11.so.1.0，补充当前 conda 环境 lib 的子进程搜索路径后重试；不修改训练进程环境或启动第二个仿真应用。
+
+- 离线读取八个新训练实际生成的 USD 均通过：左肩 physics:lowerLimit/upperLimit=-8.0214090347°/111.15380859375°，右肩=-111.15380859375°/8.0214090347°，换算为左[-0.1399999983,1.9399999361]、右[-1.9399999361,0.1399999983] rad，误差小于1e-6。不是只检查源 URDF 文本，已验证实际导入产物限位。完整路径和属性记录于 formal_logs 同名前缀 .usd_limits.json。
+- 本次八个 USD 转换目录属于正在运行的正式任务，必须继续保留；临时清理仅针对本机 /tmp/bumi4340-resume-20260914-0j2vds05 检查材料，不触及服务器正式训练缓存、checkpoint、日志或会话。
+
+- 19:04:04 首次新 checkpoint 落盘验收通过：last.pt 完整 CPU 加载，大小393244757 bytes，global_step=100050、max_steps=200000。59项优化器状态全部Adam step=2001000，等于原2000000再执行50×20次更新，证明本次是完整训练状态恢复后继续优化。Actor/Critic LR仍为1e-5/1e-3；固定100000起点模型SHA256仍为原值。服务器manifest已标记resumed_healthy，证据在同名前缀.checkpoint_health.json。
+- 本轮没有修改训练实现或资产源代码；新增服务器正式启动脚本与审计材料，根修改记录归档完整授权、检查、停止、恢复、限位与模型验证。启动脚本bash -n、资产静态契约和真实八卡PPO启动/保存已通过；不为文档记录重复执行既有代码单元测试。
+- 最终健康快照 2026-09-14T19:04:33.719956：iteration=100071，TensorBoard step=100071、10295点、非有限数0；9个预期进程及8个rank完整，实际配置与预检一致，未出现新增训练异常。
+- 正式 .sh/.json/.source_config.yaml/.resolved_config.yaml/.health.json/.usd_limits.json/.checkpoint_health.json/.stopped_previous.json 已保留服务器；本机临时脚本和输出已归档关键命令、失败原因与结果，确认检查进程结束且无其他进程 cmdline/cwd/fd 引用后，精确清理 /tmp/bumi4340-resume-20260914-0j2vds05。服务器长期训练、模型、TensorBoard 和八份实际 USD 均继续保留。
