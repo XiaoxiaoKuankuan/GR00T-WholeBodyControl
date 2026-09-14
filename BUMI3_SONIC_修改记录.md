@@ -4400,3 +4400,44 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本轮没有修改训练实现或资产源代码；新增服务器正式启动脚本与审计材料，根修改记录归档完整授权、检查、停止、恢复、限位与模型验证。启动脚本bash -n、资产静态契约和真实八卡PPO启动/保存已通过；不为文档记录重复执行既有代码单元测试。
 - 最终健康快照 2026-09-14T19:04:33.719956：iteration=100071，TensorBoard step=100071、10295点、非有限数0；9个预期进程及8个rank完整，实际配置与预检一致，未出现新增训练异常。
 - 正式 .sh/.json/.source_config.yaml/.resolved_config.yaml/.health.json/.usd_limits.json/.checkpoint_health.json/.stopped_previous.json 已保留服务器；本机临时脚本和输出已归档关键命令、失败原因与结果，确认检查进程结束且无其他进程 cmdline/cwd/fd 引用后，精确清理 /tmp/bumi4340-resume-20260914-0j2vds05。服务器长期训练、模型、TensorBoard 和八份实际 USD 均继续保留。
+
+## 2026-09-14：从 noetix-volc 补充二十对轨迹，将本地验证集扩充到三十对
+
+- 用户要求在 `data/noetix_bumi3_bigset_10pairs_20260910/` 原十对基础上，再从服务器传回二十对用于验证。起始分支 `feature/bumi-native-sonic-full-training`，HEAD `0d8f551fa0e267978dd04aa02d27a2cfb9de1fa7`，本地与上游领先/落后均为零；唯一未跟踪用户文件 `g1.tar.gz` 保留。
+- 沿用原传输清单的真实来源：`noetix-volc:/data/sonic_bumi3/datasets/bumi3_sonic_three_source_base_anchor_v2/train/{robot_all,smpl_all}`；全部符号链接实际解析到 `bumi3_smpl_97660_v1`。最初检查记忆中的旧 `bumi3_sonic_three_source_v1` 路径已不存在，随后以现存原始清单和服务器实际目录为准，不把旧路径当作当前来源。
+- 按二十类动作、固定哈希顺序 `20260914` 选择，排除已有十条、同一命名动作的其他演员版本及 `_M` 镜像；只接受同名同帧数、50 FPS、21 机器人关节、完整 SMPL 字段及有限数值。候选时长为2～120秒，不运行策略、不按跟踪表现筛选，不裁剪、补齐或重采样。
+- 初次60秒上限排除了76.54秒的左侧站姿，调整为120秒；部分严格类别仅有帧数不一致的配对，扩展同类命名并以起跑等动作替换无合格的单脚静态站姿。最终筛选跳过21个不等帧候选，得到20个完整配对；这些筛选拒绝不是模型或仿真失败。
+- 传输采用 `rsync -aL --partial --stats --files-from=<本轮40文件清单>`，固定 SSH 别名 `noetix-volc`，跟随服务器符号链接；实际新增40个常规PKL、17,871,227 bytes、21,137帧/422.74秒，没有删除服务器文件。
+- 本地总计30对、60个PKL、25,437,543 bytes、30,204帧/604.08秒。目录名称保留10pairs，`dataset.json` 更新为30项，原10项顺序与原20个文件字节保持不变；先完整下载到专用暂存目录并校验，再发布主索引。
+- 保存 `dataset_10pairs.json`、`transfer_manifest_10pairs.json` 的原始字节备份；新增 `dataset_added20_20260914.json`、`transfer_added20_20260914.json`、`validation_30pairs_20260914.json`、`transfer_server_verification_20260914.json` 和中文 `README_30pairs.md`。总清单继续使用 `transfer_manifest.json`，包含逐文件来源、解析路径、大小、SHA256及筛选说明。
+- 实际验证：原20个本地文件与旧清单一致，新增40个文件与服务器一致；再次读取服务器全部60个源文件，哈希及解析路径均未变化。本地无符号链接。正式 `load_motion_dataset(..., encoder="robot")` 和 `encoder="smpl"` 在发布前、发布后的30对清单均加载通过，每种均30,204帧/50 FPS；逐项帧数与选取清单一致。
+- 当前主索引 SHA256=`865b0ed2d96e4bdb851e5c7035ac69ba00a3cc04d212028c01eb024be186644c`；实际加载合同指向4340 XML，SHA256仍为 `f4e11d57715fe6dc5ce867130425b823c38ff3940de12fcd60c9fbf118913aec`，训练URDF仍为 `098f46181b75db4d965cdafc5901f4d78eeedfa4a63a2af2eab2a3ef88dbaf0d`。
+- 20:50:27服务器检查：master 244409、八worker 244428～244435的完整argv/cwd/start_ticks与筛选前逐项相同；两份4340资产哈希不变。本轮只读服务器数据，未启动、停止或重启训练；文档同步前后继续用同一身份与资产检查保护训练。
+- 本轮没有修改训练/部署源码、机器人资产、PD、模型或源轨迹；只更新本地被Git忽略的数据产物及本修改记录。已执行真实文件与Robot/SMPL加载校验；未运行Isaac Lab、物理回放、ONNX推理或完整30轨迹质量评估。来自训练集的固定回放样本不能作为独立测试集泛化成绩。
+- 可继续使用原 `--dataset "$PWD/data/noetix_bumi3_bigset_10pairs_20260910/dataset.json"` 命令访问30对；仅新增20对使用同目录 `dataset_added20_20260914.json`，原固定10对使用 `dataset_10pairs.json`。完整有序名称、类别、帧数、时长见数据目录中文说明及下表。
+
+| 新增顺序 | 动作名称 | 帧数 | 秒数 |
+|---|---|---:|---:|
+| 11 | Idle_Left_001__A020 | 3827 | 76.54 |
+| 12 | walk_sideway_045_loop_003__A026 | 319 | 6.38 |
+| 13 | walk_sideway_090_stop_004__A026 | 477 | 9.54 |
+| 14 | turn_start_walk_0090_005__A024 | 215 | 4.30 |
+| 15 | walk_ff_start_180_R_001__A145 | 229 | 4.58 |
+| 16 | Loop_Forward_Jog_001__A017 | 5897 | 117.94 |
+| 17 | jog_backward_start_002__A040 | 315 | 6.30 |
+| 18 | Sideway_Jog_Left_002__A020 | 2339 | 46.78 |
+| 19 | run_start_180_R_003__A347 | 150 | 3.00 |
+| 20 | one_leg_jumping_R_002__A361 | 215 | 4.30 |
+| 21 | jump_left_001__A023 | 294 | 5.88 |
+| 22 | Jump_Backward_Left_004__A020 | 3369 | 67.38 |
+| 23 | shadow_boxing_R_003__A362 | 465 | 9.30 |
+| 24 | body_stretch_1_003__A051 | 422 | 8.44 |
+| 25 | idle_crouch_loop_102__A126 | 359 | 7.18 |
+| 26 | wave_right_hand_180_R_wave_right_hand_270_R_jog_ff_start_315_R_001__A478 | 490 | 9.80 |
+| 27 | jog_butt_kick_R_start_001__A359 | 237 | 4.74 |
+| 28 | dance_basic_double_slide_270_R_fast_001__A309 | 374 | 7.48 |
+| 29 | walk_forward_loop_004__A043 | 500 | 10.00 |
+| 30 | walk_backward_loop_003__A038 | 644 | 12.88 |
+
+- 回退数据选择时直接使用保留的 `dataset_10pairs.json`；若要撤销本次索引更新，可用原始备份恢复两份主清单，保留新增PKL供复查，不覆盖或删除原始轨迹。Git只提交本修改记录，数据产物继续留在本地正式data目录。
+- 本轮专用暂存目录为 `/tmp/bumi30pairs-20260914-ap8rhksb`，包含筛选/校验脚本、rsync清单及已传回文件的暂存副本。来源、哈希、筛选失败原因和验证结果已归档；交付后仅清理该精确目录，并在正式验证记录补记同步与清理结果。
