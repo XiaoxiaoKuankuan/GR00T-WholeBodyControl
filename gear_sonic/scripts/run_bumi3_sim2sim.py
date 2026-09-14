@@ -5,7 +5,10 @@
 
 入口读取单条 PKL/NPZ/CSV 或包含多条动作的 JSON/YAML 数据集清单，构造与
 ``sonic_bumi3.yaml`` 一致的 1170 维联合 ONNX 输入，以 50 Hz 推理 21 维动作，
-再用 BUMI3 的 PD 参数在 200 Hz MuJoCo 中执行。实际模型应使用
+再用 BUMI3 的 PD 参数在 MuJoCo 中执行。
+默认物理步长为 5 ms；--physics-substeps 5 可将物理与显式 PD 更新细化到 1 ms，
+每次策略动作执行 20 个物理步，策略推理、历史观测与参考播放仍保持 50 Hz。
+实际模型应使用
 ``eval_agent_trl.py`` 导出的 ``model_step_XXXXXX_g1.onnx``；文件名中的 ``g1``
 代表为 checkpoint 兼容保留的 Robot Encoder 内部键名，不代表 G1 机器人。
 指定 --encoder smpl 后，--motion 改读含 pose_aa/smpl_joints 的人体 PKL/NPZ，
@@ -75,6 +78,9 @@ class Args:
     config: Path = DEFAULT_BUMI3_SIM2SIM_CONFIG
     """BUMI3 sim2sim YAML；通常不需要覆盖。"""
 
+    physics_substeps: int = 1
+    """每个 YAML 物理步的细分倍数；5 将默认 5 ms 改为 1 ms，策略仍为 50 Hz。"""
+
     motion_key: str | None = None
     """多动作 PKL/NPZ 或 CSV 根目录中的动作名称。"""
 
@@ -131,7 +137,7 @@ def main(args: Args) -> None:
         args.motion_key is not None or args.joint_order != "auto" or args.quaternion_order != "auto"
     ):
         raise ValueError("数据集模式请在清单每项中指定 motion_key/关节顺序/四元数顺序")
-    contract = Bumi3Contract.from_yaml(args.config)
+    contract = Bumi3Contract.from_yaml(args.config).with_physics_substeps(args.physics_substeps)
     if args.dataset is not None:
         motions = load_motion_dataset(args.dataset, contract, encoder=args.encoder)
         if args.motion_name is not None:
@@ -176,6 +182,8 @@ def main(args: Args) -> None:
         "motion_names": [item.name for item in motions],
         "sim_dt": contract.sim_dt,
         "decimation": contract.decimation,
+        "physics_substeps": args.physics_substeps,
+        "physics_frequency_hz": 1.0 / contract.sim_dt,
         "pd_implementation": "python_explicit_pd_motor",
         "integrator": "Euler",
         "joint_passive_damping": runner.model.dof_damping[runner.dof_addresses].tolist(),

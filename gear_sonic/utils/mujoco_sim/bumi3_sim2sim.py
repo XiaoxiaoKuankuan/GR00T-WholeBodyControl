@@ -19,7 +19,9 @@ position/quaternion 和关节状态进行 reset，
 实现刻意不接入 G1 专用的 29 电机、Unitree DDS 或 C++ 硬件映射。仿真端使用
 BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，使用
 与 G1 部署相同的外部显式 PD：网络给出目标角度，Python 计算并限制力矩，再写入
-MuJoCo motor；Euler 积分器在 ``sim_dt=0.005``、``decimation=4`` 下运行。
+MuJoCo motor；Euler 积分器默认在 ``sim_dt=0.005``、``decimation=4`` 下运行。
+可通过物理细分契约降低积分步长并同比增加每次策略动作的物理步数；例如五倍细分为
+``sim_dt=0.001``、``decimation=20``，策略、本体历史和参考动作仍按 50 Hz 更新。
 按用户要求，八个肩肘部署 armature 在 XML 和配置中均设为 0.01，被动阻尼保留 0.05；
 被动阻尼和 PD 的 Kd 是不同参数。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
@@ -41,7 +43,7 @@ SMPL 模式使用独立的 1470 维联合模型，人体参考连续十帧、间
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from queue import Empty, SimpleQueue
@@ -209,6 +211,21 @@ class Bumi3Contract:
     @property
     def control_dt(self) -> float:
         return self.sim_dt * self.decimation
+
+    def with_physics_substeps(self, substeps: int) -> "Bumi3Contract":
+        """细分每个原物理步，同时保持策略周期和参考采样时间不变。
+
+        五倍细分把默认 5 ms 物理步改为 1 ms，每个 20 ms 策略周期执行 20 次
+        原显式 PD 与积分。此处只生成新契约，不修改 YAML、关节参数、碰撞资产或
+        网络观测。倍率必须是正整数，防止非整数物理步数改变实际策略频率。
+        """
+        if isinstance(substeps, bool) or not isinstance(substeps, int) or substeps < 1:
+            raise ValueError("physics_substeps 必须是正整数")
+        if substeps == 1:
+            return self
+        return replace(
+            self, sim_dt=self.sim_dt / substeps, decimation=self.decimation * substeps,
+        )
 
     def policy_input_dim(self, encoder: EncoderMode) -> int:
         """按明确选择的编码器检查联合模型维度，保留原 Robot 配置字段的含义。"""

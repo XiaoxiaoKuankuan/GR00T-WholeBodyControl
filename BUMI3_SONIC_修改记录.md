@@ -4134,3 +4134,73 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 清理验证：全部诊断进程已结束，可读 /proc 中无其他进程 cmdline/cwd/fd 引用；
   精确删除上述唯一专用目录的 6 个普通文件（75847 bytes）并删除空目录，
   输出 CONTACT_AUDIT_TEMP_CLEANUP_PASS。正式模型、数据和用户文件均保留。
+
+## 2026-09-14：100000 轮 BUMI3 与 Mimic/G1 对照及可选物理细分
+
+- 用户反馈最新模型在全部动作上初始站不稳、走路脚滑，要求对照 legged_lab 的
+  `sim2sim_mimic_vision_4340.py` 及 G1 `run_sim_loop.py` / `g1_deploy_onnx_ref`。
+  起始分支 `feature/bumi-native-sonic-full-training`，本地、origin 实时引用均为
+  `b5af01cc97211583b5c59c3057cdc81ffa57bcc8`；已跟踪文件干净，用户原有
+  `g1.tar.gz` 保留。legged_lab 为干净的 `feature/amp`，只读参考。
+- 固定本地正式 `model_step_100000_g1.onnx` 和十对 50 Hz 数据，先完成十条各
+  10 s 首帧保持与完整自动播放，共 20 组；再在相同控制公式、XML、增益、惯量、
+  力矩限制和 50 Hz 策略下，只改为 1 ms 物理步，完成同样 20 组并延长全部首帧
+  保持至 30 s。原 5 ms 保持有 4 条触发诊断倾覆阈值；1 ms 的上述 30 组均完成，
+  无 MuJoCo 警告。该结论仅覆盖本地十条参考和诊断阈值，不称为全数据集通过。
+- 比较 4340 成套脚接触参数与仅改 implicitfast 的进程内对照。前者改善大部分
+  滑速，但前走、下蹲、空击首帧仍有明显漂移；后者三条动作与原结果完全一致。
+  不把其它机器人 XML 或未全面胜出的接触参数直接替换正式 BUMI3 资产。
+- 修改 `gear_sonic/utils/mujoco_sim/bumi3_sim2sim.py`：新增不可变契约方法
+  `with_physics_substeps()`，将物理步长除以正整数倍、decimation 同比相乘，
+  保证一次策略周期仍为 20 ms。修改 `gear_sonic/scripts/run_bumi3_sim2sim.py`：
+  增加 `--physics-substeps`，默认 1；显式传 5 启用 1 ms / 20 物理步，并输出
+  真实物理频率及细分倍数。现有默认 5 ms / 4 步命令行为保留，XML/YAML、
+  训练参数、模型、动作数据和 G1/Mimic 实现不改。
+- 修改 `gear_sonic/tests/test_bumi3_sim2sim.py`：增加真实 MuJoCo 积分计数测试，
+  分别核对默认和五倍细分在 0.2 s 中都只推理 10 次、参考前进 10 帧；检查
+  无效倍率拒绝。同步更新使用文档与本轮详细诊断报告。
+- 已完成有限 Lab 采集：原带噪观测 450 步与关闭观测噪声的独立 300 步；两次
+  均无 termination 或 timeout。原始 450 步同输入 PT/ONNX 最大动作误差
+  `4.2915344e-6`。只读采集沿用现有 `Bumi3LabAuditCallback`，附加脚力和刚体
+  速度字段，未启动训练。其余观测对齐、正式参数入口验收和回归结果于完成后补记。
+- 临时诊断脚本和输出集中在 `/tmp/bumi100k-sim-audit-20260914-oFicT7`；新脚本
+  均含中文用途、输入输出和边界说明。证据归档并核对无进程引用后按目录精确清理。
+  回滚可直接省略 `--physics-substeps 5` 恢复旧运行方式；源代码回滚通过新的
+  反向提交完成，不覆盖模型、不改写 Git 历史。未做真机验证。
+- 完成观测对齐：关闭 policy/tokenizer 观测噪声的 300 步同输入 PT/ONNX 最大
+  动作误差 `4.7683716e-6`；Robot 未来关节位置/速度/姿态最大误差分别为
+  `2.3841858e-7 / 1.7881393e-5 / 7.9721212e-7`。同状态本体角速度/重力方向
+  最大误差 `2.0489097e-7 / 1.3411045e-7`，关节位置与速度为 0；本体角偏置
+  使用 Lab 实际随机化后的 default angles。带噪观测差异单独解释为噪声，
+  未当作实现错误；本次 Lab 保留启动质量/摩擦等随机化，不能称为动力学等价验证。
+- 1 ms 全十条 30 s 首帧保持最大倾角 `6.14352°`；十条在结束时的根水平净位移
+  最大 `2.20749 cm`，此值不是全程最大偏离。完整前走承重脚滑速由原
+  `7.76 / 7.85 cm/s` 降为 `2.84 / 3.07 cm/s`；快舞仍为 `8.62 / 8.87 cm/s`，
+  急转跑为 `12.44 / 14.36 cm/s`。不把未倾覆解释为滑动完全消除。
+- 使用新增正式契约接口补测十条连续混合流程：首帧等待 500 策略步，按键队列
+  T 播放至末帧，再等待 500 步；十组均完整完成，无诊断倾覆和 MuJoCo warning。
+  所有段连续沿用真实动力学状态，未通过中途 reset 掩盖切换问题。该测试是
+  无窗口按键队列验证，不声称人工观看了 GUI。
+- 正式 Robot CLI 使用 `--physics-substeps 5 --headless --no-real-time --duration 10`
+  完成 500 步，仿真时间 10 s，根高 `0.465304 m`；SMPL 联合模型同参数运行
+  5 s 完成 250 步，根高 `0.464022 m`。启动输出均为 `sim_dt=.001`、
+  `decimation=20`、物理 1000 Hz / 策略 50 Hz；SMPL 未做全十条同规模矩阵。
+- 验证命令为 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/weili/miniconda3/envs/env_isaaclab/bin/python -m pytest -q gear_sonic/tests/test_bumi3_sim2sim.py gear_sonic/tests/test_bumi3_motion_playlist.py gear_sonic/tests/test_bumi3_smpl_sim2sim.py -p no:cacheprovider --basetemp=/tmp/bumi100k-sim-audit-20260914-oFicT7/pytest`，
+  实际 **56 passed，1 warning，7.85 s**；warning 为已有训练源码的非法转义
+  `\*`。同解释器运行 `gear_sonic/tools/validate_bumi3_sim2sim.py --skip-smoke`
+  输出 `BUMI3_SIM2SIM_VALIDATION=PASS`；`git diff --check` 通过。
+- 新增详细报告 `docs/source/getting_started/bumi3_sim2sim_100k_audit_20260914.md`，
+  记录全部十条 5 ms/1 ms 的首帧与完整播放表、30 s 保持、混合流程、4340 接触
+  对照、Lab/PT/ONNX 排除方法、临时/正式命令、资产差异及固定输入 SHA256。
+  正式 PT 指纹 `60b499e2173fb0c17f004adac0083887c0dff3d009f8c4f074ddad54d400f6fd`，
+  Robot ONNX `03da87b9c8d8fcf0a231a43affcbf7feb64fa230e150f46d459b1038cd00dc01`，
+  MJCF `1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`。
+- 服务器同步前通过 `noetix-volc` 核对 `/home/liwei/GR00T-WholeBodyControl`：
+  同名 feature 分支、HEAD 为起始 `b5af01c`、工作区干净；当时未发现
+  train_agent_trl/eval_agent_trl/run_bumi3_sim2sim 进程。一次 SSH banner 超时后
+  重试成功，未为同步启动或停止任何训练。提交推送和快进结果完成后补记。
+- 临时产物清理完成：逐项解析上述唯一诊断目录，确认 116 个普通文件、14 个
+  仅指向目录内部的 pytest 链接，总普通文件大小 4088753 bytes；可读 /proc
+  中无其它进程 cmdline/cwd/fd 引用。精确删除专用目录，输出
+  `BUMI100K_AUDIT_TEMP_CLEANUP_PASS`；保留测试源码、正式模型/数据、共享缓存
+  及用户 `g1.tar.gz`。报告已保存关键指标、命令、方法和固定输入指纹。

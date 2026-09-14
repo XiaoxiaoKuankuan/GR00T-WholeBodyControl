@@ -11,6 +11,8 @@
 闭环，以及外部 PD 力矩限制、手臂部署惯量/被动阻尼、阻尼衰减和积分后根观测同步。
 初始化防穿地测试直接调用接触求解核验最小间隙，覆盖倾斜脚掌、不同地面高度、
 离地动作、非零起始帧和初速度保留，避免用实现自身的顶点算法生成期望值。
+物理细分测试在实际 MuJoCo 步进中同时记录策略调用、物理调用和参考帧推进，
+验证增加物理子步不会增加推理频率、重复写入历史或改变动作播放速度。
 测试不依赖 Isaac Lab、GPU 或训练数据，也不会生成持久数据；临时动作
 仅用于验证加载器契约。
 """
@@ -58,6 +60,52 @@ def test_contract_mapping_dimensions_and_action_scale() -> None:
         contract.action_scale_mujoco,
         0.25 * contract.effort_mujoco / contract.stiffness_mujoco,
     )
+
+
+@pytest.mark.parametrize("substeps", [1, 5])
+def test_physics_substeps_preserve_control_and_reference_clock(monkeypatch, substeps):
+    """实际推进 0.2 秒，核对独立的物理计时、策略次数和未来参考索引。"""
+    original = _contract()
+    contract = original.with_physics_substeps(substeps)
+    motion = make_static_reference_motion(contract, num_frames=40)
+    calls = {"policy": 0, "physics": 0}
+
+    class CountingPolicy(ZeroPolicy):
+        """用无训练权重的策略记录推理次数，物理仍由真实 MuJoCo 执行。"""
+
+        def __call__(self, observation):
+            calls["policy"] += 1
+            return super().__call__(observation)
+
+    runner = Bumi3SonicSim2Sim(contract, motion, CountingPolicy(contract))
+    actual_step = mujoco.mj_step
+
+    def counted_step(model, data):
+        """只累计实际积分调用，不替换真实动力学计算。"""
+        calls["physics"] += 1
+        actual_step(model, data)
+
+    monkeypatch.setattr(mujoco, "mj_step", counted_step)
+    for _ in range(10):
+        runner.step_control()
+    assert calls == {"policy": 10, "physics": 40 * substeps}
+    assert runner.data.time == pytest.approx(0.2, abs=1e-12)
+    assert runner.motion_frame == 10
+    assert contract.control_dt == pytest.approx(0.02)
+    assert original.sim_dt == 0.005 and original.decimation == 4
+    np.testing.assert_array_equal(contract.armature_mujoco, original.armature_mujoco)
+    np.testing.assert_array_equal(contract.stiffness_mujoco, original.stiffness_mujoco)
+    np.testing.assert_array_equal(
+        motion.future_indices(runner.motion_frame, 10, contract.future_frame_stride, False),
+        [10, 15, 20, 25, 30, 35, 39, 39, 39, 39],
+    )
+
+
+@pytest.mark.parametrize("substeps", [0, -1, 1.5, True])
+def test_physics_substeps_reject_invalid_count(substeps):
+    """非正数、布尔值或非整数倍率必须在创建物理环境前被拒绝。"""
+    with pytest.raises(ValueError, match="physics_substeps 必须是正整数"):
+        _contract().with_physics_substeps(substeps)
 
 
 def test_load_training_pkl_converts_mujoco_and_xyzw(tmp_path: Path) -> None:
