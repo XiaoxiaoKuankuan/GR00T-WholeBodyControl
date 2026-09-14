@@ -4365,3 +4365,7 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - Isaac Lab 本次转换目录 `/tmp/IsaacLab/usd_20260914_184402_6311` 的 config.yaml 确认 asset_path 为新 4340 URDF；它是本轮 18:44:02 专用转换产物。独立 Python 无 pxr，未作关闭应用后的二次 USD 解析；已完成的真实 reset/step 与来源配置验证不受影响。该专用目录将在引用检查通过后精确清理，其他共享缓存保留。
 
 - 暂存检查发现新增 URDF 带入源文件一处空白行尾；只清除 SONIC 副本该空白，源 URDF 保持不变。最终仓库 URDF SHA256 更新为 `098f46181b75db4d965cdafc5901f4d78eeedfa4a63a2af2eab2a3ef88dbaf0d`，替代本节前述 19fa1a...；验证器指纹与报告同步。该调整不改变 XML 元素/属性或动力学。
+
+- 功能提交 `9c45a90bbfc817eddea29e091fca9e1fabbb4643` 已推送并在 noetix-volc 同分支 `git pull --ff-only` 完成；服务器工作区干净，两份 4340 资产哈希与本地一致。同步前后主进程 203594 和八 worker 203604–203611 的完整 argv/cwd/start_ticks 逐项相同，旧 XML/URDF 字节相同。
+- 原有正式模型和数据保留；全部本轮测试/回放进程均已结束，清理前逐进程 cmdline/cwd/fd 检查未引用本轮两个专用目录（清理进程及祖先进程除外）。指标、命令、来源和失败原因已归档，现按精确路径清理 `/tmp/bumi-4340-20260914-9u3liz4x` 及 `/tmp/IsaacLab/usd_20260914_184402_6311`，不触及其他共享缓存或用户产物。
+- 上述两个本轮专用目录已清理完成；交付记录另行提交与快进同步。
