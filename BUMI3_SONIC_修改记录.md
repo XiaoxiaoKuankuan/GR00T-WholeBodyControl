@@ -4329,3 +4329,7 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 
 - 交付前复核：Robot CLI `--physics-substeps 5 --headless --validate-only` PASS，日志确认 ONNX 参数来源、全部 21 个 armature=0.01 和 1000/50 Hz。共同导出入口通过 `env.config.get("robot", {}).get("type", "g1")` 判断 BUMI3，保留旧 G1 配置省略机器人类型时的默认行为；最终语法编译通过。
 - noetix-volc 同分支、HEAD `fc67431`、工作区干净；已保存 accelerate 主进程 203594 与八 worker 203604–203611 的完整 argv、cwd、start_ticks，供 fast-forward 后逐项比对。
+
+- 功能提交 `11f92e02467f5d87aad7773fd59c6972bb76f5da` 已 push，noetix-volc 已同分支 `git pull --ff-only`。同步前后主进程及八 worker 的完整 argv/cwd/start_ticks 逐项一致，远端工作区干净。
+- 已复核正式 Robot/SMPL 原 ONNX 与 `_control.onnx` 副本 SHA256 均保持上列值；真实导出/回放/pytest/CLI 进程已结束，逐进程 cmdline、cwd、打开文件未引用下列专用临时目录（清理进程及祖先进程除外）。关键命令、失败原因、指标和模型指纹已归档本记录及审计报告。开始精确清理 `/tmp/bumi-pd-metadata-20260914-2in7eq5j` 以及本轮三次 pytest 独有目录 `/tmp/pytest-of-weili/pytest-0`、`pytest-1`、`pytest-2`；仅在共享 pytest-current 链接指向本轮目录时移除该链接。正式数据、checkpoint、模型、源码、共享缓存和用户文件保留。
+- 上述四个本轮专用目录已清理完成；本段作为交付记录另行提交与同步。
