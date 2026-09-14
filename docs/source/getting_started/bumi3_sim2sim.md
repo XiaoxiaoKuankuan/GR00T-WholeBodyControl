@@ -17,6 +17,15 @@ python -m pip install "tyro==0.8.14" "typing_extensions==4.12.2"
 保留 Isaac Sim 5.1 要求的 `typing_extensions==4.12.2`；不要在此环境直接安装最新版
 Tyro，否则会升级该依赖并破坏 Isaac Sim 的版本契约。
 
+2026-09-14 起，真实策略必须携带 `sonic_bumi3_control` ONNX 元数据。新版导出入口
+从实际 Isaac Lab 环境的名义配置写入 Kp/Kd、默认角、动作缩放、力矩上限、策略顺序、
+50 Hz 周期和动作裁剪；运行器按名称读取，并同步观测零位。缺字段或顺序不匹配会报错，
+不会回退 YAML。旧 ONNX 应从对应 checkpoint 重新导出。
+
+本机 100000 模型已有保留原计算图、只添加元数据的 `*_g1_control.onnx` 和
+`*_smpl_control.onnx` 副本，原文件保留。详情、资产比较与回放结果见
+[控制元数据与动力学核对](bumi3_control_metadata_dynamics_20260914.md)。
+
 BUMI3 配置位于
 `gear_sonic/config/sim2sim/bumi3_sonic.yaml`，默认加载
 `gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`。
@@ -72,7 +81,8 @@ GUI 默认固定第一帧参考并等待按键，未设置 `--duration` 时持�
 **100000 轮模型的物理步长对照：** 若使用默认 5 ms 物理步出现首帧漂移或脚滑，
 可在原命令末尾增加 `--physics-substeps 5`。它将 MuJoCo 积分和显式 PD 更新
 细化为 1 ms，每个策略动作执行 20 个物理步；策略推理、本体历史和参考播放仍为
-50 Hz。XML、PD 增益、力矩上限、惯量和动作缩放均沿用原设置，无需重新导出模型。
+50 Hz。物理细分只改变积分与 PD 更新次数；控制参数仍从同一份 ONNX 元数据读取。
+调整细分倍率无需重新导出，但旧版缺元数据的 ONNX 须先按上节升级。
 默认值为 1，保留原 200 Hz 物理 / 50 Hz 策略；该参数要求正整数。
 启动日志会明确打印 `physics_substeps=5`、`sim_dt=0.001`、`decimation=20`、
 `physics_frequency_hz=1000` 和 `control_frequency_hz=50`。
@@ -240,17 +250,17 @@ Robot PKL 缺少关节速度字段时，按当前训练 MotionLib 的前向差�
 训练端的中心差分与 `sigma=2` 高斯滤波，reset 时再把世界角速度转为浮动根局部
 角速度。已有显式关节速度保持原值，NPZ/CSV 继续使用各自原有加载约定。
 
-控制按用户要求与 G1 部署保持相同方式：网络动作转换成目标角度，Python 使用 BUMI
-原有 Kp/Kd 计算并限制 PD 力矩，写入 XML 的 motor，由 Euler 积分器推进物理。
+控制按用户要求与 G1 部署保持相同方式：网络动作转换成目标角度，Python 使用 ONNX 元数据中的 BUMI3
+名义 Kp/Kd 和力矩上限计算并限制 PD 力矩，写入 XML 的 motor，由 Euler 积分器推进物理。
 `data.ctrl` 的单位是力矩，目标速度和前馈力矩均为零。启动日志应包含
 `pd_implementation=python_explicit_pd_motor`、`integrator=Euler`。
 
 XML 的“被动关节阻尼”是各电机关节本身的速度阻力，不是某些无电机关节。BUMI
 全部 21 个电机 hinge 的 XML `damping` 已由 0.001 对齐为 G1 的 0.05；这项与
-PD 的 `Kd` 分开，手臂 PD 的 `Kd=0.4` 等原有增益保持不变。八个肩/肘关节的
-运行时 `armature` 使用用户最新指定的 0.01，XML 八个肩肘关节也显式设为 0.01。
-其它关节 armature 保留原配置。这些是用户指定的部署参数，与当前 Lab 的手臂
-armature=0 不完全相同；无需改动已有 checkpoint 或重导出 ONNX。
+PD 的 `Kd` 分开。2026-09-14 按用户要求，全部 21 个驱动关节运行时 `armature`
+统一覆盖为 `0.01`，浮动根保持 `0`。原 XML 和训练端的 armature 数值保持原样，
+此项部署覆盖由 YAML 及运行时 `model.dof_armature` 日志明确记录。
+Kp/Kd 从 ONNX 读取；当前 100000 模型肩肘仍为 `8/0.4`。
 
 每个控制周期结束后仍刷新 MuJoCo 派生状态，保证下次策略读取的根姿态与最新
 关节状态同步；PKL 速度与训练算法对齐的修复同样保留。
@@ -429,10 +439,11 @@ python gear_sonic/tools/validate_bumi3_sim2sim.py \
 
 ## 5. 边界
 
-- 实际参数固定为 `sim_dt=0.005`、`decimation=4`、控制频率 50 Hz、参考 FPS 50。
-- 动作经过 `default + action_scale * policy_action`，其中 action scale 始终由
-  `0.25 * effort_limit / stiffness` 计算；外部 PD 输出的 `ctrl` 单位是 Nm，
-  力矩按 BUMI3 effort limit 截断后写入 motor，积分器为 Euler。
+- 默认 `sim_dt=0.005`、`decimation=4`；`--physics-substeps 5` 为 `0.001/20`。
+  两者控制频率均为 50 Hz、参考 FPS 均为 50。
+- 动作经过 `default + action_scale * policy_action`，默认角和缩放均读取 ONNX；
+  当前训练名义缩放由 `0.25 * effort_limit / stiffness` 生成。外部 PD 输出的
+  `ctrl` 单位是 Nm，力矩按 ONNX 中的 effort limit 截断后写入 motor，积分器为 Euler。
 - Python 入口只用于 MuJoCo sim2sim，不连接 BUMI3 实机总线。
 - 零策略 smoke 只证明接口、顺序、维度和有限值，不证明训练 checkpoint 的动作质量；
   真实效果仍需使用对应训练数据、真实 ONNX 和指定动作回放确认。

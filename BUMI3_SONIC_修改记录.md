@@ -4307,3 +4307,25 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   本地仅追加此操作记录；训练器、机器人资产、数据和依赖均未修改，无需为文档
   追加重复运行源码回归。文档差异检查通过，随后按持续授权提交、推送并快进同步；
   同步时核对当前 launcher/八 worker 的 PID、启动 tick、cwd 和完整 argv 不变。
+
+
+## 2026-09-14：ONNX 名义控制元数据与全部关节部署 armature=0.01
+
+- 分支 `feature/bumi-native-sonic-full-training`；起始 HEAD `fc67431b8093068b58be2d57e945ec6a2413485a`，本地与远端一致；用户原有 `g1.tar.gz` 保留。
+- 用户明确要求 PD 从 ONNX 读取，21 个驱动关节运行时 armature 全部设为 0.01。修改控制元数据模块、联合导出器、eval 入口、BUMI3 运行器、CLI、部署 YAML 和静态验证器；正在补充测试和使用说明。
+- 原正式 100000 Robot/SMPL ONNX 均无 metadata。新增带版本 JSON 契约，从实际 Isaac Lab 名义配置读取 PD、默认角、动作缩放、力矩上限、策略关节顺序、控制周期和动作裁剪；严禁随机化零位污染和缺字段时回退 YAML。G1/H2 未传入元数据时保留原导出行为。
+- armature 仅覆盖 MuJoCo 驱动关节，不修改训练配置、XML 刚体质量/惯量或浮动根。物理默认 200 Hz，可选五倍细分 1000 Hz，策略均 50 Hz。
+- 来源：SONIC MJCF SHA256 `1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3`；4340 MJCF `94ac99adf5f4512ac11903f521d5ec2f2fddb0413cfccec3e31a73d852a37719`。4340 仅只读对照，不混入 BUMI3 参数。legged_lab HEAD `df265177f4c9a4cd2d9dbc31d305d45f551a6cd8` 有其他用户修改，均保留。
+- 测试与实际回放：执行中，待记录结果；尚不作稳定性结论。临时证据目录 `/tmp/bumi-pd-metadata-20260914-2in7eq5j`；正式模型保留原件，新副本稍后记录。
+- 回滚：通过新的修复提交撤销本节涉及变更，使用保留的原 ONNX；不重写历史、不改变正在运行的训练。
+
+- 补充回归测试 `gear_sonic/tests/test_bumi3_control_metadata.py`，覆盖真实联合导出、旧通用调用兼容、参数名重排、错序/坏数据拒绝、故意不同于 YAML 的实际力矩、名义零位隔离和物理子步保留。首轮出现一个旧 CLI mock 没有 `contract` 属性的失败；给 ZeroPolicy 补齐显式契约接口后 68 项通过。再次核对运行器入口时保留调用者物理子步，仅覆盖 ONNX 控制字段，防止模型构造时的默认步长覆盖调用者设置。
+- 更新使用指南，说明旧模型元数据迁移和全部关节 armature 覆盖边界。正式 100000 Robot/SMPL 新副本已生成，原图字节一致；各 100 组随机输入比较原模型/新副本/实际重新导出模型，最大绝对误差均为 0。原 YAML 名义 PD、零位、缩放、限矩与真实导出元数据逐项完全相同。
+- 实际导出进程 exit=0；静态验证 PASS；无界面 SMPL CLI 五倍细分真实模型运行 3 秒通过，根高 0.464486 m。临时回放脚本初次因从核心模块导入数据集加载器失败，改为正确的 `bumi3_motion_dataset` 后已执行；失败发生在创建仿真前。
+
+- 最终测试：68 passed / 11 warnings（既有 ONNX tracer 与弃用提示、SMPL 转义提示）；静态验证 PASS，零策略只验证有限值。真实 Robot：200 Hz 首帧 10 s 10/10；200 Hz 和 1000 Hz 各首帧 30 s 10/10、完整 9067 帧播放 10/10，共 50 组，均无诊断倾覆/无 MuJoCo warning。30 s 保持最大根倾角 6.14225° / 6.10574°，最大结束净位移 5.75471 / 2.33422 cm；全过程最大位移 7.32503 / 3.65608 cm。完整播放脚滑仍存在，不能报告为全部质量合格；逐轨迹数据、计算方式、时间频率、具体质量/惯量/限位/接触差异已写入 `docs/source/getting_started/bumi3_control_metadata_dynamics_20260914.md`。
+- 新 Robot 模型 SHA256 `af600733d013d8925f5083806c26cfba60c121ed6a83d34c371478bb986d95fd`；新 SMPL `003287b9f4361834e279d55e776fc58bf7c2d94a181ff33ffa0fa959ba43c9e5`，文件位于原 run/exported 下，以 `_control.onnx` 结尾。原正式模型保留；新模型为本次交付产物，按仓库要求不进入 Git。
+- 本轮未做 GUI 人工观感、SMPL 全轨迹质量或实机验证；未启动或停止训练。noetix-volc 首次只读 SSH banner 超时，第二次恢复连接；后续提交/同步与进程保护结果待追加。ruff 未安装，未执行 ruff；已执行语法编译、pytest、静态验证及 diff 空白检查。
+
+- 交付前复核：Robot CLI `--physics-substeps 5 --headless --validate-only` PASS，日志确认 ONNX 参数来源、全部 21 个 armature=0.01 和 1000/50 Hz。共同导出入口通过 `env.config.get("robot", {}).get("type", "g1")` 判断 BUMI3，保留旧 G1 配置省略机器人类型时的默认行为；最终语法编译通过。
+- noetix-volc 同分支、HEAD `fc67431`、工作区干净；已保存 accelerate 主进程 203594 与八 worker 203604–203611 的完整 argv、cwd、start_ticks，供 fast-forward 后逐项比对。

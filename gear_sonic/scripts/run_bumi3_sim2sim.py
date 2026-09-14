@@ -5,7 +5,8 @@
 
 入口读取单条 PKL/NPZ/CSV 或包含多条动作的 JSON/YAML 数据集清单，构造与
 ``sonic_bumi3.yaml`` 一致的 1170 维联合 ONNX 输入，以 50 Hz 推理 21 维动作，
-再用 BUMI3 的 PD 参数在 MuJoCo 中执行。
+再读取 ONNX 的名义 PD、零位、动作缩放和力矩上限，在 MuJoCo 中执行。
+旧模型缺少控制元数据时须先重新导出，启动不会回退到 YAML 中的名义 PD。
 默认物理步长为 5 ms；--physics-substeps 5 可将物理与显式 PD 更新细化到 1 ms，
 每次策略动作执行 20 个物理步，策略推理、历史观测与参考播放仍保持 50 Hz。
 实际模型应使用
@@ -138,6 +139,8 @@ def main(args: Args) -> None:
     ):
         raise ValueError("数据集模式请在清单每项中指定 motion_key/关节顺序/四元数顺序")
     contract = Bumi3Contract.from_yaml(args.config).with_physics_substeps(args.physics_substeps)
+    policy = OnnxRobotPolicy(args.policy, contract, provider=args.provider, encoder=args.encoder)
+    contract = policy.contract
     if args.dataset is not None:
         motions = load_motion_dataset(args.dataset, contract, encoder=args.encoder)
         if args.motion_name is not None:
@@ -158,7 +161,6 @@ def main(args: Args) -> None:
             joint_order=args.joint_order, quaternion_order=args.quaternion_order,
         )]
     motion = motions[0]
-    policy = OnnxRobotPolicy(args.policy, contract, provider=args.provider, encoder=args.encoder)
     runner = Bumi3SonicSim2Sim(
         contract,
         motion,
@@ -185,6 +187,13 @@ def main(args: Args) -> None:
         "physics_substeps": args.physics_substeps,
         "physics_frequency_hz": 1.0 / contract.sim_dt,
         "pd_implementation": "python_explicit_pd_motor",
+        "control_parameters_source": contract.control_source,
+        "control_joint_order": list(contract.mujoco_joint_names),
+        "joint_stiffness": contract.stiffness_mujoco.tolist(),
+        "joint_damping": contract.damping_mujoco.tolist(),
+        "joint_effort_limit": contract.effort_mujoco.tolist(),
+        "default_joint_pos": contract.default_mujoco.tolist(),
+        "action_scale": contract.action_scale_mujoco.tolist(),
         "integrator": "Euler",
         "joint_passive_damping": runner.model.dof_damping[runner.dof_addresses].tolist(),
         "joint_armature": runner.model.dof_armature[runner.dof_addresses].tolist(),

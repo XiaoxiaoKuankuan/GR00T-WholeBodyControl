@@ -503,6 +503,15 @@ def main(override_config: omegaconf.OmegaConf):
             if not encoder_names:
                 raise ValueError("Universal-token actor 没有可导出的 encoder")
 
+            # BUMI3 的联合模型携带实际环境名义控制契约，排除域随机化零位/增益污染。
+            control_metadata = None
+            if env.config.get("robot", {}).get("type", "g1") == "bumi3":
+                from gear_sonic.utils.bumi3_control_metadata import build_bumi3_control_metadata
+
+                control_metadata = build_bumi3_control_metadata(
+                    env.env, action_clip=env.config.action_clip_value,
+                )
+
             for encoder_name in encoder_names:
                 if encoder_name not in actor_module.encoder_input_features:
                     raise ValueError(
@@ -517,6 +526,7 @@ def main(override_config: omegaconf.OmegaConf):
                         ".onnx", f"_{encoder_name}.onnx"
                     ),
                     batch_size=1,
+                    control_metadata=control_metadata,
                 )
 
             inference_helpers.export_universal_token_encoders_as_onnx(

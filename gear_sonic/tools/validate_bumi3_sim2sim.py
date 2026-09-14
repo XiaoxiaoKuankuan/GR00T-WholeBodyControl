@@ -235,12 +235,8 @@ def _validate_contract_values(contract: Bumi3Contract) -> None:
         for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
             assert np.isclose(scale_by_name[f"{side}_{suffix}_joint"], 0.125)
     assert np.isclose(scale_by_name["waist_yaw_joint"], 0.25 * 27.0 / 53.0)
-    # 四个踝关节保留原惯量，八个肩肘关节按用户要求使用与 XML 一致的 0.01。
-    assert np.count_nonzero(contract.armature_mujoco) == 12
-    for side in ("l", "r"):
-        for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
-            index = contract.mujoco_joint_names.index(f"{side}_{suffix}_joint")
-            assert np.isclose(contract.armature_mujoco[index], 0.01)
+    # 用户指定的部署覆盖应用于全部 21 个驱动关节，浮动根不在此数组中。
+    np.testing.assert_allclose(contract.armature_mujoco, 0.01, atol=1e-12)
     assert set(contract.velocity_mujoco.tolist()) == {9.0, 12.0}
 
 
@@ -264,6 +260,8 @@ def validate(args: argparse.Namespace) -> None:
         policy = ZeroPolicy(contract)
         smoke_kind = "zero_policy_static_reference"
     else:
+        policy = OnnxRobotPolicy(args.policy, contract, provider=args.provider)
+        contract = policy.contract
         motion = load_reference_motion(
             args.motion,
             contract,
@@ -271,7 +269,6 @@ def validate(args: argparse.Namespace) -> None:
             joint_order=args.joint_order,
             quaternion_order=args.quaternion_order,
         )
-        policy = OnnxRobotPolicy(args.policy, contract, provider=args.provider)
         smoke_kind = "real_onnx_real_reference"
 
     runner = Bumi3SonicSim2Sim(contract, motion, policy, loop_motion=True)

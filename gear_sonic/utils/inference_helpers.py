@@ -62,7 +62,8 @@ def export_policy_as_onnx(inference_model, path, exported_policy_name, example_o
 
 
 def export_universal_token_module_as_onnx(
-    universal_token_module, encoder_name, decoder_name, path, exported_model_name, batch_size=1
+    universal_token_module, encoder_name, decoder_name, path, exported_model_name, batch_size=1,
+    *, control_metadata=None,
 ):
     """Export UniversalTokenModule with a specific encoder and decoder as ONNX.
 
@@ -80,6 +81,7 @@ def export_universal_token_module_as_onnx(
         path: Directory path to save the ONNX model.
         exported_model_name: Name of the exported ONNX file.
         batch_size: Batch size for example input.
+        control_metadata: 可选的 ONNX 字符串元数据字典；BUMI3 用于传递名义控制契约。
     """
     os.makedirs(path, exist_ok=True)
     full_path = os.path.join(path, exported_model_name)
@@ -186,6 +188,12 @@ def export_universal_token_module_as_onnx(
             output_names=["action"],
             opset_version=13,
         )
+
+    # BUMI3 显式传入名义控制参数；未传入的 G1/H2 调用维持原有导出行为。
+    if control_metadata is not None:
+        from gear_sonic.utils.bumi3_control_metadata import attach_control_metadata
+
+        attach_control_metadata(full_path, control_metadata)
 
     print(f"\nExported ONNX model: {encoder_name} encoder -> {decoder_name} decoder")  # noqa: T201
     print(f"Saved to: {full_path}")  # noqa: T201

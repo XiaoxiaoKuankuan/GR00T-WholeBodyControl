@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # BUMI3 SONIC sim2sim 的完整运行契约。本配置把训练侧的时间参数、21 自由度顺序、
-# 初始姿态、PD 增益、力矩/速度上限、armature 和动作缩放规则集中在一个可审计文件中。
+# 仿真初始化、速度上限和部署 armature 集中管理；PD、默认角、动作缩放及力矩上限
+# 在真实策略运行时由 ONNX 控制元数据覆盖，下方名义值仅供无模型的静态校验使用。
 # Python 运行器会按关节名称解析 MuJoCo 地址，绝不假设 qpos[7:] 与策略顺序相同；
 # 启动时还会逐项验证配置、MJCF 和 ONNX 的维度，防止资产或 checkpoint 静默错配。
-# 按用户指定的部署设置，八个肩肘关节 armature=0.01，与 XML 显式值一致；训练端仍为 0。
+# 按用户指定的部署设置，全部 21 个驱动关节运行时 armature=0.01；浮动根保持 0。
+# 此处是部署覆盖，不改变训练端和原始 XML 的惯量参数。
 # XML 被动关节阻尼统一为 G1 的 0.05；下方 damping 字段仍只表示 BUMI 原有 PD 的 Kd。
 
 robot_type: bumi3
@@ -117,49 +119,49 @@ actuator_groups:
     velocity_limit: 12.0
     stiffness: 20.0
     damping: 1.0
-    armature: 0.0
+    armature: 0.01
   leg_roll:
     joint_names: [l_leg_roll_joint, r_leg_roll_joint]
     effort_limit: 50.0
     velocity_limit: 12.0
     stiffness: 45.0
     damping: 3.0
-    armature: 0.0
+    armature: 0.01
   leg_pitch:
     joint_names: [l_leg_pitch_joint, r_leg_pitch_joint]
     effort_limit: 50.0
     velocity_limit: 12.0
     stiffness: 45.0
     damping: 3.0
-    armature: 0.0
+    armature: 0.01
   knee_pitch:
     joint_names: [l_knee_pitch_joint, r_knee_pitch_joint]
     effort_limit: 50.0
     velocity_limit: 12.0
     stiffness: 45.0
     damping: 2.0
-    armature: 0.0
+    armature: 0.01
   waist:
     joint_names: [waist_yaw_joint]
     effort_limit: 27.0
     velocity_limit: 9.0
     stiffness: 53.0
     damping: 3.4
-    armature: 0.0
+    armature: 0.01
   ankle_pitch:
     joint_names: [l_ankle_pitch_joint, r_ankle_pitch_joint]
     effort_limit: 9.0
     velocity_limit: 12.0
     stiffness: 8.0
     damping: 0.5
-    armature: 0.012574
+    armature: 0.01
   ankle_roll:
     joint_names: [l_ankle_roll_joint, r_ankle_roll_joint]
     effort_limit: 9.0
     velocity_limit: 12.0
     stiffness: 8.0
     damping: 0.5
-    armature: 0.009608
+    armature: 0.01
   arms:
     joint_names:
       - l_arm_pitch_joint

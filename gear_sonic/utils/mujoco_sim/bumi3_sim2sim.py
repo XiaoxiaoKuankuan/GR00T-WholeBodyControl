@@ -17,12 +17,12 @@ position/quaternion 和关节状态进行 reset，
 只是 SONIC 为 checkpoint 兼容保留的 Robot Encoder 内部键名，并不使用 G1 资产。
 
 实现刻意不接入 G1 专用的 29 电机、Unitree DDS 或 C++ 硬件映射。仿真端使用
-BUMI3 配置中的 PD、力矩上限和 ``0.25 * effort / stiffness`` 动作缩放，使用
+联合 ONNX 元数据中的名义 PD、力矩上限、默认角和动作缩放，使用
 与 G1 部署相同的外部显式 PD：网络给出目标角度，Python 计算并限制力矩，再写入
 MuJoCo motor；Euler 积分器默认在 ``sim_dt=0.005``、``decimation=4`` 下运行。
 可通过物理细分契约降低积分步长并同比增加每次策略动作的物理步数；例如五倍细分为
 ``sim_dt=0.001``、``decimation=20``，策略、本体历史和参考动作仍按 50 Hz 更新。
-按用户要求，八个肩肘部署 armature 在 XML 和配置中均设为 0.01，被动阻尼保留 0.05；
+按用户要求，21 个驱动关节的运行时 armature 全部设为 0.01，被动阻尼保留 0.05；
 被动阻尼和 PD 的 Kd 是不同参数。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
@@ -173,7 +173,7 @@ def quaternion_heading(quaternion_wxyz: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class Bumi3Contract:
-    """从 YAML 解析出的 BUMI3 仿真、网络和执行器契约。"""
+    """YAML 提供仿真基础契约，实际策略的控制参数必须由 ONNX 元数据覆盖。"""
 
     config_path: Path
     model_path: Path
@@ -207,6 +207,24 @@ class Bumi3Contract:
     combined_policy_input_dim: int
     action_dim: int
     token_dim: int
+    control_source: str = "yaml_nominal_for_validation_only"
+
+    def with_onnx_metadata(self, metadata, source: str) -> "Bumi3Contract":
+        """加载名义控制参数，并同步更新观测零位和两种关节排列的动作缩放。"""
+        from gear_sonic.utils.bumi3_control_metadata import read_bumi3_control_metadata
+
+        values = read_bumi3_control_metadata(metadata, self.policy_joint_names, self.control_dt)
+        order = self.policy_to_mujoco
+        return replace(
+            self, stiffness_mujoco=values["joint_stiffness"][order],
+            damping_mujoco=values["joint_damping"][order],
+            effort_mujoco=values["joint_effort_limit"][order],
+            default_policy=values["default_joint_pos"],
+            default_mujoco=values["default_joint_pos"][order],
+            action_scale_policy=values["action_scale"],
+            action_scale_mujoco=values["action_scale"][order],
+            action_clip=values["action_clip"], control_source=source,
+        )
 
     @property
     def control_dt(self) -> float:
@@ -759,6 +777,8 @@ class OnnxRobotPolicy:
             else ["CPUExecutionProvider"]
         )
         self.session = ort.InferenceSession(str(policy_path), providers=providers)
+        self.control_metadata = self.session.get_modelmeta().custom_metadata_map
+        self.contract = contract.with_onnx_metadata(self.control_metadata, str(policy_path))
         if len(self.session.get_inputs()) != 1 or len(self.session.get_outputs()) != 1:
             raise ValueError("BUMI3 联合 ONNX 必须只有一个输入和一个输出")
         self.input_name = self.session.get_inputs()[0].name
@@ -786,6 +806,8 @@ class ZeroPolicy:
     """只供静态/动力学 smoke 使用的零动作策略，不用于效果评估。"""
 
     def __init__(self, contract: Bumi3Contract, *, encoder: EncoderMode = "robot"):
+        # 无模型测试同样携带其显式基础契约，便于 CLI 的依赖替换保持接口一致。
+        self.contract = contract
         self.input_dim = contract.policy_input_dim(encoder)
         self.output_dim = contract.action_dim
 
@@ -811,6 +833,11 @@ class Bumi3SonicSim2Sim:
         start_paused: bool = False,
         encoder: EncoderMode = "robot",
     ):
+        # 外部调用者也必须使用模型自带契约，防止只改 CLI 而其他入口继续读取 YAML PD。
+        if isinstance(policy, OnnxRobotPolicy):
+            contract = contract.with_onnx_metadata(
+                policy.control_metadata, policy.contract.control_source,
+            )
         self.contract = contract
         self.encoder = encoder
         self.policy_input_dim = contract.policy_input_dim(encoder)
