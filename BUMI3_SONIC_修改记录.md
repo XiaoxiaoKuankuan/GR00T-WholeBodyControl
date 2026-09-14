@@ -4204,3 +4204,10 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   中无其它进程 cmdline/cwd/fd 引用。精确删除专用目录，输出
   `BUMI100K_AUDIT_TEMP_CLEANUP_PASS`；保留测试源码、正式模型/数据、共享缓存
   及用户 `g1.tar.gz`。报告已保存关键指标、命令、方法和固定输入指纹。
+- 功能提交 `f5ea335676baf325f67ac570585bf065d6f8eea2` 已推送 GitHub 当前分支；
+  `noetix-volc` 在核对分支、旧 HEAD 和干净工作区后，以 `git pull --ff-only`
+  从 `b5af01c` 快进到同一提交，工作区仍干净。运行器、入口及测试源码 SHA256
+  与本地逐项一致，分别为 `e9fd7d7d39c9ad1deb405452fee86b880ccb284fcf2bc085f286898163bdb541`、
+  `f6ad9810e3ca9560737db14ee7229756b69b6bafd9af7fab9fa3bdd8bfd894f6`、
+  `954c8003c7a62f67d6c1f17426852715436ad25ab2d95cf0d87c1e7d9eca30d1`。
+  本条仅补记已完成交付事实，单独进行文档提交和快进同步；不改变已验证实现。
