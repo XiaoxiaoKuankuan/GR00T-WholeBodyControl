@@ -4211,3 +4211,99 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
   `f6ad9810e3ca9560737db14ee7229756b69b6bafd9af7fab9fa3bdd8bfd894f6`、
   `954c8003c7a62f67d6c1f17426852715436ad25ab2d95cf0d87c1e7d9eca30d1`。
   本条仅补记已完成交付事实，单独进行文档提交和快进同步；不改变已验证实现。
+
+## 2026-09-14：从 BUMI3 100000 步完整 checkpoint 续训至 200000 步
+
+- 用户明确授权在 `noetix-volc` 从已完成的 `model_step_100000.pt` 继续 resume
+  训练 100000 次 PPO 迭代，即累计目标 200000。起始分支为
+  `feature/bumi-native-sonic-full-training`，本地和服务器 HEAD 均为
+  `9ad12e0fa663ac9a6d1c290afb5642432413a1f1`；服务器工作区干净，本地仅有用户
+  `g1.tar.gz`，原样保留。八张 4090 D 均空闲，原任务已于 9 月 13 日 02:03
+  保存最终 100000 checkpoint，旧会话和 TensorBoard 不作停止或清理。
+- 来源为 `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_scratch_100k-20260909_141204/model_step_100000.pt`。
+  服务器 CPU 完整 `torch.load` 通过：393243920 bytes，SHA256 为
+  `60b499e2173fb0c17f004adac0083887c0dff3d009f8c4f074ddad54d400f6fd`，
+  global_step/max_steps 均为 100000，policy/value 状态项 45/17，优化器状态
+  59 项、四个具名角色组；Actor 实际 LR=1e-5，Critic=1e-3，无 HF scheduler。
+  checkpoint 包含 motion_lib 自适应采样状态；不使用 ONNX 或仅加载权重续训。
+- 为保留完整旧 run，将固定 checkpoint 复制并校验到新的续训目录，resume=true
+  加载该逐字节一致的副本。读取旧 `config.yaml` 的独立副本作为 Hydra 输入，
+  保持奖励、termination、观测、机器人、数据、每卡 4096 环境和所有 PPO 参数；
+  仅改变 resume/checkpoint、累计目标、实验标识和输出路径。新脚本使用详细中文
+  开头说明，正式 `.sh/.json/.source_config.yaml` 保存在 formal_logs，不提交模型或日志。
+- 预检发现旧配置的 exp_base 引用 Hydra runtime.choices.exp，独立加载必须显式
+  设为原 `manager/universal_token/all_modes/sonic_bumi3` 名称。另将环境内两项
+  输出目录变化从训练参数比较中单独核对；排除这些路径后 manager_env 完全一致。
+  这是预检修正，未启动失败训练或修改训练实现。Hydra 合成检查通过。
+- 停止条件预检调用服务器实际 `DefaultFlowCallback`：目标 max_steps=200000 时，
+  step=100001/199999 不停止，step=200000 停止。训练器加载 checkpoint 后会重新
+  设置 max_steps，并在 on_step_end 检查该回调；因此追加 100000，累计到 200000。
+- 本轮计划 tmux：`sonic_bumi3_resume100k_to200k_20260914_154409`；续训 run：
+  `/data/sonic_bumi3/runs/TRL_BUMI3_Track/manager/universal_token/all_modes/sonic_bumi3_uniform90_lr2e5_critic1e3_ee040_resume100k_to200k-20260914_154409`；正式终端日志：
+  `/data/sonic_bumi3/formal_logs/sonic_bumi3_resume100k_to200k_20260914_154409.log`。
+  启动命令、实际恢复、八 rank、TensorBoard 和新 checkpoint 证据完成后追加。
+- 正式材料准备于 15:45:56 完成，原配置副本 SHA256 为
+  `a903075d6cdf3685cd07173beacf4609cb8b3c164be73ee53c6a15762b288c89`。
+  15:46:52 首次启动 tmux pane `%54`（shell PID 202711）、launcher 202714、
+  workers 202724～202731；15:47:02 rank 0 在 Isaac Sim `SimulationApp._start_app`
+  原生初始化收到 SIGSEGV，rank 5 同样打印原生崩溃，随后 accelerate 退出。
+  未到模型加载、配置保存或 PPO 迭代，八张 GPU 恢复空闲；不将该尝试记为续训成功。
+- 首次独立加载保存配置没有带入原 `config/base/hydra.yaml` 的
+  `hydra.job.chdir=false`，日志显示 Hydra 1.1 在进入 main 前自动切换 cwd。
+  下一次启动显式恢复该原始运行设置；仅调整启动脚本，不修改训练参数或实现。
+  首次 `.log/.sh/.json/.exit_code` 按 attempt1 前缀归档，当前会话仅在确认 pane
+  已退出、GPU 空闲后重新启动；后续验证用于判断是否消除该初始化故障。
+- 15:49:21 第二次启动已显式设置 cwd，但 rank 0（PID 203146）仍于 15:49:31
+  在相同 `SimulationApp._start_app` 栈原生崩溃，未加载模型；因此 cwd 不是充分
+  修复。现场读取实际 Isaac Sim 实现确认，它把 sys.argv 的所有 unknown_args
+  追加到 Kit startup，独立配置参数 `--config-path/--config-name` 会继续传入原生 Kit。
+- 第三次改回原任务成功使用的常规 `+exp` 启动形式，移除上述两个 Hydra CLI flag，
+  仍通过原保存配置逐项核对最终配置。预检常规入口与原 run 的解析差异仅有
+  use_wandb 默认值，显式 false 后一致；分布式运行字段按实际 8 rank 核对，
+  其余只允许本次 resume、累计目标与输出路径差异。不改任何训练源代码、资产或依赖。
+  第二次正式日志/脚本/记录归档为 attempt2，新的当前日志单独记录第三次结果。
+- 第三次于 **15:52:47 CST** 启动，已越过前述 Kit 初始化故障并进入 PPO。
+  launcher 为 `203594`（start_ticks=1007848515），八 worker 为
+  `203604～203611`（start_ticks=1007848854），RANK/LOCAL_RANK 完整覆盖 0～7，
+  WORLD_SIZE 均为 8、cwd 均为 `/home/liwei/GR00T-WholeBodyControl`。
+  本轮新进程的完整 argv、PID、父进程与启动 tick 保存到同名前缀 `.health.json`。
+- 15:55:21 实际健康核验：日志包含 **8 次 `Loaded checkpoint from step 100000`**，
+  优化器输出 `mode=role-aware, actual_lr={'actor': 1e-05, 'critic': 0.001}`，
+  已从 iteration 100001 推进到 **100010**。自适应动作累计评估延续到约
+  44404648，quarantined_motions 保持 3917，未出现跳过恢复或形状不匹配日志。
+- 新 run 实际保存的 `config.yaml` SHA256 为
+  `655a6ba60ce9f4cbd5165e6033b06ea94fb1adde78d4ac9c0290b0dfcf23026e`。
+  与原配置解析比较通过：允许的 14 个叶子差异全部属于 resume/checkpoint、
+  累计 200000 目标或实验标识/输出路径；数据、观测、奖励、termination、
+  PPO 参数与 4096 × 8 环境保持一致。只读离线检查固定名称和时间插值，未写回配置。
+- TensorBoard 已从 **step 100001** 开始新事件文件；截至 100010 有 145 个 scalar
+  tag、1450 个点，NaN/Inf 为 0。Actor/Critic LR 为 1e-5/1e-3，value loss
+  约 0.04780、KL 约 0.02001、策略 std 约 0.47226。8 GPU 约占 15.7～16.1 GB，
+  当前采样利用率 50%～58%；初期吞吐约 2.90 秒/迭代，仅作健康证据。
+- 第三次当前日志的 Traceback、CUDA OOM、DistBackendError、ChildFailedError、
+  RuntimeError、Hydra job error 和原生 Fatal Python error 均为 0；仍有与旧任务
+  相同的 24 条 `ERROR_INCOMPATIBLE_DRIVER` 无窗口图形提示，但其后 PPO 已推进。
+  不将前两次启动失败藏入“零错误”描述，也不把当前有限健康检查称为续训完成或收敛。
+- 正式启动材料：执行 `/data/sonic_bumi3/formal_logs/sonic_bumi3_resume100k_to200k_20260914_154409.sh`，
+  内容使用 `/root/miniconda3/envs/liwei_lab/bin/python` 与同环境 accelerate，8 进程、
+  端口 29517、`+exp=manager/universal_token/all_modes/sonic_bumi3 +resume=true`、
+  固定 100000 checkpoint 副本、`algo.config.num_learning_iterations=200000`、
+  `hydra.job.chdir=false`，其余精确 argv 和环境记录在同名前缀 `.json`。
+  新 TensorBoard 为上述新 run 的 `tensorboard/`；固定编号模型每 2000 步保存，
+  `last.pt` 每 50 步保存，原正式 run、checkpoint 和 TensorBoard 保留。
+- 已知日志限制：当前 PrinterHVCallback 的 ETA 用已恢复的累计 tot_time 除以
+  本次从 1 计数的 batch_idx，会在 resume 初期显示严重偏大的 ETA；停止判断
+  使用 global_step/max_steps，已单独验证，不受 ETA 显示影响。本轮不为修正
+  显示而改动或重启已运行的训练器；耗时应以本次 TensorBoard 墙钟增量估算。
+- **15:57:51 最终启动验收通过**：实际 iteration 已到 100061，TensorBoard 为
+  145 个 tag、8845 个点，NaN/Inf=0。新 `last.pt` 完整 CPU 加载通过，大小
+  393244693 bytes，`global_step=100050`、`max_steps=200000`、episode=3278438400。
+  优化器仍有 59 项状态，所有 Adam step 为 **2001000**，证明继承原 2000000 次
+  optimizer 更新后继续执行 50 × 20 次更新；Actor/Critic LR 仍为 1e-5/1e-3。
+  自适应状态版本为 3，分箱长度 795420，动作状态长度 95358，已实际保存到新模型。
+- `.health.json` 保留上述配置、恢复日志、完整进程身份、TensorBoard 与新 checkpoint
+  证据；本次是用户授权的长期正式续训，当前会话和正式产物继续保留。前两次未进入
+  PPO 的启动故障日志按 attempt1/attempt2 保留供排查，不混入当前运行日志。
+  本地仅追加此操作记录；训练器、机器人资产、数据和依赖均未修改，无需为文档
+  追加重复运行源码回归。文档差异检查通过，随后按持续授权提交、推送并快进同步；
+  同步时核对当前 launcher/八 worker 的 PID、启动 tick、cwd 和完整 argv 不变。
