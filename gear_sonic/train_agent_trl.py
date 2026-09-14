@@ -57,6 +57,8 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 import yaml
 
+from gear_sonic.utils.bumi3_assets import configure_bumi3_assets
+
 from gear_sonic.trl.utils.common import (
     custom_instantiate,
     get_filtered_state_dict,
@@ -104,6 +106,8 @@ def create_manager_env(config, device, args_cli):
 
     from gear_sonic.envs.wrapper.manager_env_wrapper import ManagerEnvWrapper
 
+    # 评估旧 checkpoint 时同步参考模型，防止新 URDF 与历史 MJCF 混用。
+    configure_bumi3_assets(config)
     env_instance_cfg = custom_instantiate(config.manager_env)
 
     # Iteratively check the difference in attribute of env_instance_cfg1 and env_instance_cfg, print out the difference
@@ -167,6 +171,8 @@ def main(config: OmegaConf):
     elif config.get("checkpoint", None) is not None:
         resume_checkpoint(config)
 
+    # 在配置快照写入之前迁移，使保存的模型来源与实际环境保持一致。
+    configure_bumi3_assets(config)
     config.algo.trl.output_dir = str(Path(config.experiment_dir))
 
     script_args, training_args, model_args = parser.parse_dict(config.algo.trl)

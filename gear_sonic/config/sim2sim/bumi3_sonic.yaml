@@ -8,10 +8,10 @@
 # 启动时还会逐项验证配置、MJCF 和 ONNX 的维度，防止资产或 checkpoint 静默错配。
 # 按用户指定的部署设置，全部 21 个驱动关节运行时 armature=0.01；浮动根保持 0。
 # 此处是部署覆盖，不改变训练端和原始 XML 的惯量参数。
-# XML 被动关节阻尼统一为 G1 的 0.05；下方 damping 字段仍只表示 BUMI 原有 PD 的 Kd。
+# 4340 XML 被动关节阻尼保留来源的 0.001；下方 damping 字段仍只表示 BUMI 原有 PD 的 Kd。
 
 robot_type: bumi3
-model_path: ../../data/assets/robot_description/mjcf/bumi3.xml
+model_path: ../../data/assets/robot_description/mjcf/bumi3_4340.xml
 
 simulation:
   sim_dt: 0.005

@@ -4,7 +4,7 @@
 """验证 BUMI3 SONIC sim2sim 的资产、顺序、网络输入和闭环有限值。
 
 脚本只解析并锁定 SONIC 仓库内 BUMI3 MJCF，不读取任何外部机器人仓库；随后验证
-所有 mesh、21 DoF、22 robot bodies、22 个可视网格、14 个碰撞体、静态 reset
+所有 mesh、21 DoF、22 robot bodies、22 个可视网格、18 个碰撞网格、静态 reset
 无自碰撞/陷地、双向排列、动作缩放、PD/armature、SONIC 1170 维输入和 21 维输出，
 并检查红色参考影子只复制不参与物理的 22 个可视 geom、根高不跟随真实机器人。
 默认还会使用静态参考与零动作策略执行 100 个 50 Hz 控制周期（共 400 个 MuJoCo
@@ -36,31 +36,15 @@ from gear_sonic.utils.mujoco_sim.bumi3_sim2sim import (
 
 
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3"
+    "f4e11d57715fe6dc5ce867130425b823c38ff3940de12fcd60c9fbf118913aec"
 )
 
 EXPECTED_COLLISION_BODIES = {
-    "base_link",
-    "waist_yaw_link",
-    "l_arm_roll_link",
-    "l_elbow_pitch_link",
-    "r_arm_roll_link",
-    "r_elbow_pitch_link",
-    "l_leg_roll_link",
-    "l_knee_pitch_link",
-    "l_ankle_pitch_link",
-    "l_ankle_roll_link",
-    "r_leg_roll_link",
-    "r_knee_pitch_link",
-    "r_ankle_pitch_link",
-    "r_ankle_roll_link",
-}
-EXPECTED_CAPSULES = {
-    "base_link": ((-0.0013853, 0.0, 0.065525), (0.052, 0.06)),
-    "l_leg_roll_link": ((0.0, 0.0, -0.02), (0.03, 0.04)),
-    "r_leg_roll_link": ((0.0, 0.0, -0.02), (0.03, 0.04)),
-    "l_knee_pitch_link": ((0.008475, 0.0, -0.0894694), (0.025, 0.065)),
-    "r_knee_pitch_link": ((0.008475, 0.0, -0.0894694), (0.025, 0.065)),
+    "base_link", "waist_yaw_link",
+    *{f"{side}_{part}_link" for side in ("l", "r") for part in (
+        "arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch",
+        "leg_pitch", "leg_roll", "leg_yaw", "ankle_roll",
+    )},
 }
 
 
@@ -75,7 +59,7 @@ def _sha256(path: Path) -> str:
 def _validate_meshes(model_path: Path) -> int:
     root = ET.parse(model_path).getroot()
     compiler = root.find("compiler")
-    mesh_dir = model_path.parent / (compiler.get("meshdir") if compiler is not None else ".")
+    mesh_dir = model_path.parent / (compiler.get("meshdir", ".") if compiler is not None else ".")
     mesh_nodes = root.findall("./asset/mesh")
     missing = [node.get("file") for node in mesh_nodes if not (mesh_dir / node.get("file")).is_file()]
     if missing:
@@ -114,57 +98,31 @@ def _validate_model(contract: Bumi3Contract) -> mujoco.MjModel:
 
 
 def _validate_collision_contract(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
-    """验证 XML 编译后的可视/碰撞分离、简化 capsule 数值和地面高度。"""
-
+    """核对 4340 原始 24 个机器人 geom、实际可视网格和六维接触参数。"""
     robot_geom_ids = np.flatnonzero(model.geom_bodyid != 0)
-    visual_geom_ids = robot_geom_ids[model.geom_group[robot_geom_ids] == 1]
-    collision_geom_ids = robot_geom_ids[model.geom_group[robot_geom_ids] == 3]
-    assert robot_geom_ids.size == 36
-    assert visual_geom_ids.size == 22
-    assert collision_geom_ids.size == 14
-    assert np.all(model.geom_type[visual_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH)
-    assert np.all(model.geom_contype[visual_geom_ids] == 0)
-    assert np.all(model.geom_conaffinity[visual_geom_ids] == 0)
+    visual_geom_ids = robot_geom_ids[model.geom_rgba[robot_geom_ids, 3] > 0]
+    collision_geom_ids = robot_geom_ids[
+        (model.geom_contype[robot_geom_ids] != 0) | (model.geom_conaffinity[robot_geom_ids] != 0)
+    ]
+    assert (robot_geom_ids.size, visual_geom_ids.size, collision_geom_ids.size) == (24, 22, 18)
+    assert np.all(model.geom_type[robot_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH)
     assert np.all(model.geom_contype[collision_geom_ids] == 1)
-    assert np.all(model.geom_conaffinity[collision_geom_ids] == 0)
-    assert np.all(model.geom_condim[collision_geom_ids] == 3)
-
-    visual_names = {
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id))
-        for geom_id in visual_geom_ids
-    }
-    body_names = {
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
-        for body_id in range(1, model.nbody)
-    }
-    assert visual_names == {f"{body_name}_visual" for body_name in body_names}
-    collision_names = {
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id))
-        for geom_id in collision_geom_ids
-    }
-    assert collision_names == {
-        f"{body_name}_collision" for body_name in EXPECTED_COLLISION_BODIES
-    }
-
-    for body_name, (expected_pos, expected_size) in EXPECTED_CAPSULES.items():
-        geom_id = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_GEOM, f"{body_name}_collision"
-        )
-        assert geom_id >= 0
-        assert model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_CAPSULE
-        np.testing.assert_allclose(model.geom_pos[geom_id], expected_pos)
-        np.testing.assert_allclose(model.geom_size[geom_id, :2], expected_size)
-    mesh_collision_count = np.count_nonzero(
-        model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH
-    )
-    assert mesh_collision_count == 9
-
+    assert np.all(model.geom_conaffinity[collision_geom_ids] == 1)
+    assert np.all(model.geom_condim[collision_geom_ids] == 6)
+    assert {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[i]))
+        for i in collision_geom_ids
+    } == EXPECTED_COLLISION_BODIES
     ground_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
-    assert ground_id >= 0
-    assert np.isclose(model.geom_pos[ground_id, 2], 0.0)
-    assert model.geom_contype[ground_id] == 0
-    assert model.geom_conaffinity[ground_id] == 1
-    assert model.geom_condim[ground_id] == 3
+    assert ground_id >= 0 and np.isclose(model.geom_pos[ground_id, 2], 0)
+    assert model.geom_contype[ground_id] == model.geom_conaffinity[ground_id] == 1
+    assert model.geom_condim[ground_id] == 6
+    for i in [ground_id, *collision_geom_ids]:
+        np.testing.assert_allclose(model.geom_friction[i], [1, 0.05, 0.01])
+    for name in ("ground", "l_foot_collision", "r_foot_collision"):
+        i = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        np.testing.assert_allclose(model.geom_solref[i], [0.01, 1])
+        np.testing.assert_allclose(model.geom_solimp[i, :3], [0.9, 0.95, 0.001])
     return visual_geom_ids, collision_geom_ids
 
 
@@ -196,14 +154,14 @@ def _validate_static_reset_contacts(contract: Bumi3Contract) -> tuple[int, float
     assert not ground_penetrations, f"静态 reset 存在地面穿透: {ground_penetrations}"
     initial_contact_count = runner.data.ncon
 
-    # 下移根节点后必须只产生地面接触，证明碰撞 bitmask 没有误关触地能力。
+    # 默认姿态整体下移应产生足底地面接触；此检查不代表其他姿态没有自碰撞。
     runner.data.qpos[runner.root_qpos_address + 2] -= 0.04
     mujoco.mj_forward(runner.model, runner.data)
     assert runner.data.ncon > 0, "根节点下移后未产生地面接触"
     for contact_index in range(runner.data.ncon):
         contact = runner.data.contact[contact_index]
         assert ground_id in (int(contact.geom1), int(contact.geom2)), (
-            "碰撞 bitmask 未完全隔离机器人自碰撞"
+            "默认静态姿态下移后出现意外自接触"
         )
     return initial_contact_count, min(distances, default=0.0)
 
@@ -274,7 +232,7 @@ def validate(args: argparse.Namespace) -> None:
     runner = Bumi3SonicSim2Sim(contract, motion, policy, loop_motion=True)
     actual_armature = runner.model.dof_armature[runner.dof_addresses]
     np.testing.assert_allclose(actual_armature, contract.armature_mujoco, atol=1e-12)
-    np.testing.assert_allclose(runner.model.dof_damping[runner.dof_addresses], 0.05, atol=1e-12)
+    np.testing.assert_allclose(runner.model.dof_damping[runner.dof_addresses], 0.001, atol=1e-12)
     assert runner.model.opt.integrator == mujoco.mjtIntegrator.mjINT_EULER
     for field in (
         "geom_type",
@@ -311,9 +269,8 @@ def validate(args: argparse.Namespace) -> None:
     reference_markers = runner.reference_marker_specs(0, alpha=0.32)
     assert len(reference_markers) == 22
     assert runner.reference_visual_model is not runner.model
-    base_geom_id = mujoco.mj_name2id(
-        runner.model, mujoco.mjtObj.mjOBJ_GEOM, "base_link_visual"
-    )
+    base_body_id = mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+    base_geom_id = int(runner.model.body_geomadr[base_body_id])
     assert base_geom_id >= 0
     assert runner.model.geom_type[base_geom_id] == mujoco.mjtGeom.mjGEOM_MESH
     assert (
@@ -348,7 +305,7 @@ def validate(args: argparse.Namespace) -> None:
     print(
         "COLLISION_CONTRACT="
         f"visual_meshes:{visual_geom_ids.size},collision_geoms:{collision_geom_ids.size},"
-        "capsules:5,collision_meshes:9,self_collision:false,ground_z:0"
+        "capsules:0,collision_meshes:18,self_collision:true,condim:6,ground_z:0"
     )
     print(
         "INITIAL_CONTACT_GATE="
@@ -368,13 +325,13 @@ def validate(args: argparse.Namespace) -> None:
         "REFERENCE_RESET="
         f"root_position:{'motion' if motion.root_position_world is not None else 'fallback'},"
         f"anchor_body:{contract.anchor_body_name},anchor_source:mjcf_fk,"
-        "collision_source:bumi3_xml"
+        "collision_source:bumi3_4340_xml"
     )
     print(
         "POLICY_VISUAL="
         f"visual_geoms:{visual_geom_ids.size},collision_geoms:{collision_geom_ids.size},"
         "physics:true,state_source:dynamics_qpos,"
-        "collision_source:bumi3_xml,render_source:dynamics_bumi3_xml"
+        "collision_source:bumi3_4340_xml,render_source:dynamics_bumi3_4340_xml"
     )
     print(
         "REFERENCE_SHADOW="

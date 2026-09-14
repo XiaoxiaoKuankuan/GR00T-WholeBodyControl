@@ -5,7 +5,7 @@
 """验证 BUMI3 原生 SONIC 的资产、顺序、执行器和双编码器训练契约。
 
 脚本默认完成不依赖训练数据的全部检查：锁定 SONIC 仓库内 URDF/MJCF/mesh 指纹与
-BUMI3 爬行/跪地碰撞契约，验证 MJCF 的 22 个可视网格、14 个独立碰撞体和地面
+BUMI3 4340 碰撞契约，验证 MJCF 的 22 个可视网格、18 个启用接触的网格和地面
 高度，解析两种机器人描述并检查 mesh、验证 21 DoF/22
 body、双向顺序与 round trip、执行器动作缩放/无延迟，以及 Hydra 组合后的时间
 参数、网络输入维度和 Teleop 清除结果。动态机器人配置检查会启动 headless
@@ -36,8 +36,8 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "gear_sonic/config"
 ASSET_ROOT = REPO_ROOT / "gear_sonic/data/assets/robot_description"
-URDF_PATH = ASSET_ROOT / "urdf/bumi3/bumi.urdf"
-MJCF_PATH = ASSET_ROOT / "mjcf/bumi3.xml"
+URDF_PATH = ASSET_ROOT / "urdf/bumi3_4340/bumi3_4340.urdf"
+MJCF_PATH = ASSET_ROOT / "mjcf/bumi3_4340.xml"
 MESH_DIR = ASSET_ROOT / "meshes/bumi3"
 EXP_NAME = "manager/universal_token/all_modes/sonic_bumi3"
 EXPECTED_BUMI3_MUJOCO_DOF_NAMES = [
@@ -64,59 +64,20 @@ EXPECTED_BUMI3_MUJOCO_DOF_NAMES = [
     "r_ankle_roll_joint",
 ]
 EXPECTED_LOCAL_URDF_SHA256 = (
-    "0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955"
+    "098f46181b75db4d965cdafc5901f4d78eeedfa4a63a2af2eab2a3ef88dbaf0d"
 )
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3"
+    "f4e11d57715fe6dc5ce867130425b823c38ff3940de12fcd60c9fbf118913aec"
 )
 EXPECTED_LOCAL_MESH_BUNDLE_SHA256 = (
     "5d84767fbd21ec22434c1cba8145e4887d4f5910512d5a8efeac50781f3afa26"
 )
 
-# 圆柱轴使用 URDF 的局部 Z 轴。以下数值是用户在 BUMI3 STL 初始包围盒方案上
-# 明确指定的训练碰撞参数；验证脚本锁定这些值，防止后续静默回退或漂移。
-EXPECTED_CYLINDER_COLLISIONS = {
-    "base_link": {
-        "xyz": (-0.0013853, 0.0, 0.065525),
-        "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.052,
-        "length": 0.12,
-    },
-    "l_leg_roll_link": {
-        "xyz": (0.0, 0.0, -0.02),
-        "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.03,
-        "length": 0.08,
-    },
-    "r_leg_roll_link": {
-        "xyz": (0.0, 0.0, -0.02),
-        "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.03,
-        "length": 0.08,
-    },
-    "l_knee_pitch_link": {
-        "xyz": (0.008475, 0.0, -0.0894694),
-        "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.025,
-        "length": 0.13,
-    },
-    "r_knee_pitch_link": {
-        "xyz": (0.008475, 0.0, -0.0894694),
-        "rpy": (0.0, 0.0, 0.0),
-        "radius": 0.025,
-        "length": 0.13,
-    },
-}
-EXPECTED_MJCF_MESH_COLLISIONS = {
-    "waist_yaw_link",
-    "l_arm_roll_link",
-    "l_elbow_pitch_link",
-    "r_arm_roll_link",
-    "r_elbow_pitch_link",
-    "l_ankle_pitch_link",
-    "l_ankle_roll_link",
-    "r_ankle_pitch_link",
-    "r_ankle_roll_link",
+# 用户指定的 4340 原始 URDF 与 MJCF 碰撞布局并不完全相同，分别锁定，避免为通过
+# 检查擅自修改来源。URDF 无 base/膝碰撞；MJCF 无膝/踝 pitch 碰撞。
+URDF_NON_COLLISION_BODIES = {"base_link", "l_knee_pitch_link", "r_knee_pitch_link"}
+MJCF_NON_COLLISION_BODIES = {
+    "l_knee_pitch_link", "r_knee_pitch_link", "l_ankle_pitch_link", "r_ankle_pitch_link"
 }
 
 
@@ -151,119 +112,60 @@ def _parse_vector(value: str) -> tuple[float, ...]:
     return tuple(float(item) for item in value.split())
 
 
-def _validate_urdf_collision_policy(
-    urdf_root: ET.Element,
-) -> None:
-    """只根据 SONIC 仓库契约核对五个圆柱、九个 mesh 和无碰撞 link。"""
-
-    local_links = {node.attrib["name"]: node for node in urdf_root.findall("link")}
-
-    for link_name, local_link in local_links.items():
-        collisions = local_link.findall("collision")
-        if link_name in EXPECTED_CYLINDER_COLLISIONS:
-            assert len(collisions) == 1, f"{link_name} 必须恰好有一个圆柱 collision"
-            collision = collisions[0]
+def _validate_urdf_collision_policy(urdf_root: ET.Element) -> None:
+    """锁定来源 4340 的 19 个网格碰撞及其余三个无碰撞刚体。"""
+    count = 0
+    for link in urdf_root.findall("link"):
+        name = link.attrib["name"]
+        collisions = link.findall("collision")
+        assert len(collisions) == int(name not in URDF_NON_COLLISION_BODIES), name
+        for collision in collisions:
             origin = collision.find("origin")
             geometry = collision.find("geometry")
-            assert origin is not None and geometry is not None
-            cylinder = geometry.find("cylinder")
-            assert cylinder is not None, f"{link_name} collision 必须使用 cylinder"
-            assert len(geometry) == 1, f"{link_name} collision 不得混入 mesh 等其他几何"
-
-            expected = EXPECTED_CYLINDER_COLLISIONS[link_name]
-            assert _parse_vector(origin.attrib["xyz"]) == expected["xyz"]
-            assert _parse_vector(origin.attrib["rpy"]) == expected["rpy"]
-            assert math.isclose(float(cylinder.attrib["radius"]), expected["radius"])
-            assert math.isclose(float(cylinder.attrib["length"]), expected["length"])
-        elif link_name in EXPECTED_MJCF_MESH_COLLISIONS:
-            assert len(collisions) == 1, f"{link_name} 必须恰好有一个 mesh collision"
-            collision = collisions[0]
-            origin = collision.find("origin")
-            geometry = collision.find("geometry")
-            assert origin is not None and geometry is not None
-            mesh = geometry.find("mesh")
-            assert mesh is not None and len(geometry) == 1
             assert _parse_vector(origin.attrib["xyz"]) == (0.0, 0.0, 0.0)
             assert _parse_vector(origin.attrib["rpy"]) == (0.0, 0.0, 0.0)
-            assert mesh.attrib["filename"] == (
-                f"../../meshes/bumi3/{link_name}.STL"
-            )
-        else:
-            assert not collisions, f"{link_name} 按 SONIC BUMI3 契约不得包含 collision"
+            assert len(geometry) == 1 and geometry[0].tag == "mesh"
+            assert geometry[0].attrib["filename"] == f"../../meshes/bumi3/{name}.STL"
+            count += 1
+    assert count == 19
 
 
 def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
-    """逐 body 锁定 MJCF 的可视/碰撞分离、简化 capsule 和地面基准。"""
-
-    visual_default = mjcf_root.find("./default/default[@class='visual']/geom")
-    collision_default = mjcf_root.find("./default/default[@class='collision']/geom")
-    assert visual_default is not None and collision_default is not None
-    assert visual_default.attrib == {
-        "type": "mesh",
-        "contype": "0",
-        "conaffinity": "0",
-        "group": "1",
-        "density": "0",
-    }
-    assert collision_default.attrib == {
-        "contype": "1",
-        "conaffinity": "0",
-        "condim": "3",
-        "group": "3",
-        "density": "0",
-        "friction": "1 0.005 0.0001",
-        "rgba": "0 0 0 0",
-    }
-
+    """锁定 4340 可视/碰撞共用布局、六维接触及脚底/地面求解参数。"""
+    default = mjcf_root.find("./default/geom")
+    assert default.attrib == {"condim": "6", "friction": "1 0.05 0.01"}
+    foot = mjcf_root.find("./default/default[@class='foot_collision']/geom")
     ground = mjcf_root.find("./worldbody/geom[@name='ground']")
-    assert ground is not None
+    for node in (foot, ground):
+        for key, value in {
+            "contype": "1", "conaffinity": "1", "condim": "6",
+            "friction": "1 0.05 0.01", "solref": "0.01 1", "solimp": "0.9 0.95 0.001",
+        }.items():
+            assert node.attrib[key] == value
     assert _parse_vector(ground.attrib["pos"]) == (0.001, 0.0, 0.0)
-    assert ground.attrib["contype"] == "0"
-    assert ground.attrib["conaffinity"] == "1"
-    assert ground.attrib["condim"] == "3"
-    assert ground.attrib["friction"] == "1 0.005 0.0001"
-
-    body_nodes = {
-        node.attrib["name"]: node for node in mjcf_root.findall(".//body")
+    assert mjcf_root.find("option").attrib == {
+        "iterations": "80", "solver": "Newton", "cone": "elliptic", "impratio": "10"
     }
-    expected_collision_bodies = (
-        set(EXPECTED_CYLINDER_COLLISIONS) | EXPECTED_MJCF_MESH_COLLISIONS
-    )
-    assert len(expected_collision_bodies) == 14
-    for body_name, body_node in body_nodes.items():
-        direct_geoms = body_node.findall("geom")
-        visual_geoms = [node for node in direct_geoms if node.attrib.get("class") == "visual"]
-        collision_geoms = [
-            node for node in direct_geoms if node.attrib.get("class") == "collision"
-        ]
-        assert len(visual_geoms) == 1, f"{body_name} 必须恰好有一个 MJCF visual geom"
-        visual = visual_geoms[0]
-        assert visual.attrib["name"] == f"{body_name}_visual"
-        assert visual.attrib["mesh"] == body_name
-
-        expected_collision_count = int(body_name in expected_collision_bodies)
-        assert len(collision_geoms) == expected_collision_count, (
-            f"{body_name} MJCF collision 数量错误"
-        )
-        assert len(direct_geoms) == 1 + expected_collision_count, (
-            f"{body_name} 存在未归类的 MJCF geom"
-        )
-        if not collision_geoms:
-            continue
-
-        collision = collision_geoms[0]
-        assert collision.attrib["name"] == f"{body_name}_collision"
-        if body_name in EXPECTED_CYLINDER_COLLISIONS:
-            expected = EXPECTED_CYLINDER_COLLISIONS[body_name]
-            assert collision.attrib["type"] == "capsule"
-            assert _parse_vector(collision.attrib["pos"]) == expected["xyz"]
-            expected_size = (expected["radius"], expected["length"] / 2.0)
-            assert _parse_vector(collision.attrib["size"]) == expected_size
-            assert "mesh" not in collision.attrib
-        else:
-            assert body_name in EXPECTED_MJCF_MESH_COLLISIONS
-            assert collision.attrib["type"] == "mesh"
-            assert collision.attrib["mesh"] == body_name
+    visible_count = collision_count = 0
+    for body in mjcf_root.findall(".//body"):
+        name = body.attrib["name"]
+        geoms = body.findall("geom")
+        foot_body = name in ("l_ankle_roll_link", "r_ankle_roll_link")
+        assert len(geoms) == (2 if foot_body else 1), name
+        visible = [geom for geom in geoms if geom.get("class") != "foot_collision"]
+        assert len(visible) == 1 and float(visible[0].attrib["rgba"].split()[-1]) == 1
+        visible_count += 1
+        active = []
+        for geom in geoms:
+            assert geom.attrib["type"] == "mesh" and geom.attrib["mesh"] == name
+            if int(geom.get("contype", "1")) or int(geom.get("conaffinity", "1")):
+                active.append(geom)
+        assert len(active) == int(name not in MJCF_NON_COLLISION_BODIES), name
+        collision_count += len(active)
+        if foot_body:
+            assert active[0].attrib["class"] == "foot_collision"
+            assert active[0].attrib["name"] == f"{name[0]}_foot_collision"
+    assert (visible_count, collision_count) == (22, 18)
 
 
 def _validate_repository_assets() -> None:
@@ -315,7 +217,7 @@ def _validate_xml_and_meshes() -> dict[str, list[str]]:
     assert set(urdf_joints) == set(mjcf_joints), "URDF/MJCF joint 名称集合不一致"
     assert set(urdf_bodies) == set(mjcf_bodies), "URDF/MJCF body 名称集合不一致"
     assert urdf_root.attrib["name"] == "BUMI_V3.0_260119"
-    assert mjcf_root.attrib["model"] == "bumi3.0"
+    assert mjcf_root.attrib["model"] == "BUMI_V3.0_260119"
 
     # 当前 BUMI3 MJCF 含工作区修正后的 waist 轴和 arm-roll 限位；逐关节与
     # 权威 URDF 对比，避免命名相同但运动学方向或限位仍来自旧模型。
@@ -484,7 +386,7 @@ def _validate_resolved_configs() -> dict[str, int | float]:
     assert motion_cfg["freeze_frame_aug"] is True
     assert motion_cfg["teleop_sample_prob_when_smpl"] == 0.0
     assert motion_lib_cfg["robot_type"] == "bumi3"
-    assert motion_lib_cfg["asset"]["assetFileName"] == "bumi3.xml"
+    assert motion_lib_cfg["asset"]["assetFileName"] == "bumi3_4340.xml"
     assert motion_lib_cfg["wrist_mujoco_dof_indices"] == []
     # 三源索引已经逐条审计并在清单层降级异常 SMPL，不得继续误删旧 hq_all_v2
     # 的 55 个 key；运行时只承担同为 50 Hz 的最多两帧尾差对齐。
@@ -734,7 +636,7 @@ def _validate_runtime_robot_config(simulation_app) -> dict[str, list[int]]:  # n
     robot_cfg = bumi3.BUMI3_CFG
     assert robot_cfg.spawn.fix_base is False
     assert robot_cfg.spawn.asset_path == (
-        "gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf"
+        "gear_sonic/data/assets/robot_description/urdf/bumi3_4340/bumi3_4340.urdf"
     )
     assert robot_cfg.spawn.activate_contact_sensors is True
     assert robot_cfg.spawn.replace_cylinders_with_capsules is True

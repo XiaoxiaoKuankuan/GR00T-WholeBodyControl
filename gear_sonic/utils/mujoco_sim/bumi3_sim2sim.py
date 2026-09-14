@@ -22,7 +22,7 @@ position/quaternion 和关节状态进行 reset，
 MuJoCo motor；Euler 积分器默认在 ``sim_dt=0.005``、``decimation=4`` 下运行。
 可通过物理细分契约降低积分步长并同比增加每次策略动作的物理步数；例如五倍细分为
 ``sim_dt=0.001``、``decimation=20``，策略、本体历史和参考动作仍按 50 Hz 更新。
-按用户要求，21 个驱动关节的运行时 armature 全部设为 0.01，被动阻尼保留 0.05；
+按用户要求，21 个驱动关节的运行时 armature 全部设为 0.01，被动阻尼保留 4340 XML 的 0.001；
 被动阻尼和 PD 的 Kd 是不同参数。所有顺序、维度、ONNX 输入输出和有限值
 都会在启动时检查；任何不一致都会直接报错，而不是截断或补齐数据。GUI 默认把同一
 Robot 参考 qpos 经 MJCF FK 后作为红色半透明 decorative 影子叠加显示；影子使用独立
@@ -1015,9 +1015,9 @@ class Bumi3SonicSim2Sim:
     def _body_geom_ids(self, body_name: str) -> np.ndarray:
         """按 body 名称返回全部直接所属 geom，禁止依赖 XML 中的隐式编号。
 
-        BUMI3 MJCF 将原始 mesh 保留为可视 geom，并为需要参与接触的 link 另设
-        collision geom；同一个 body 因此可以合法拥有一个或两个 geom。调用方必须再按
-        geom 名称或 ``group`` 区分用途，不能假设每个 body 只有一个 mesh。
+        4340 的部分网格共用于可视和碰撞，脚部另有透明碰撞网格；同一 body 可以
+        合法拥有一个或两个 geom。调用方应按透明度和接触掩码区分用途，不能依赖
+        旧资产的 group 编号或假设每个 body 只有一个 mesh。
         """
 
         body_id = mujoco.mj_name2id(
@@ -1150,9 +1150,9 @@ class Bumi3SonicSim2Sim:
     ) -> list[dict[str, Any]]:
         """从原始 XML 的 resolved MjvScene 复制 22 个 robot 可视 mesh。
 
-        group=3 的 collision geom 只服务 MuJoCo 接触计算，不能被重新着色后加入红色参考
-        影子；否则 capsule/透明碰撞网格会覆盖原始 link 外观，使影子与 policy 机器人看起来
-        使用了不同模型。这里固定只复制 XML 中 group=1 的 22 个可视 geom。
+        4340 的可视网格与部分碰撞网格共用 geom，不能依赖旧资产的 group=1 标记。
+        按 mesh 类型和非零透明度选择实际可见的 22 个网格，排除地面与两个透明足底
+        碰撞体；复制结果仅用于场景装饰，不修改原模型的碰撞或动力学属性。
         """
 
         mujoco.mjv_updateScene(
@@ -1174,7 +1174,10 @@ class Bumi3SonicSim2Sim:
                 continue
             if int(self.reference_visual_model.geom_bodyid[model_geom_id]) == 0:
                 continue
-            if int(self.reference_visual_model.geom_group[model_geom_id]) != 1:
+            if (
+                self.reference_visual_model.geom_type[model_geom_id] != mujoco.mjtGeom.mjGEOM_MESH
+                or self.reference_visual_model.geom_rgba[model_geom_id, 3] <= 0.0
+            ):
                 continue
 
             rgba = np.asarray(resolved_geom.rgba, dtype=np.float32).copy()
@@ -1314,7 +1317,7 @@ class Bumi3SonicSim2Sim:
         MuJoCo 编译器会平移、旋转 mesh 顶点，最低点必须由编译顶点和 geom 世界
         变换共同计算，不能使用踝关节原点、可视包围盒或未变换的 STL 高度。
         仅移动真实浮动根的 Z，保留 qvel、朝向、关节、参考数据和独立影子模型。
-        本方法只支持当前 BUMI 的水平 plane 与具名脚部 mesh；资产契约不符时明确
+        本方法只支持当前 BUMI 的水平 plane 与每个踝 roll 刚体上的唯一触地 mesh；资产契约不符时明确
         报错，避免换成其他地形或碰撞形状后仍套用错误的几何校正。
         """
         model, data = self.model, self.data
@@ -1331,15 +1334,19 @@ class Bumi3SonicSim2Sim:
         ground_height = float(data.geom_xpos[ground_id, 2])
         feet = {}
         for side in ("l", "r"):
-            name = f"{side}_ankle_roll_link_collision"
-            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
-            if geom_id < 0 or model.geom_type[geom_id] != mujoco.mjtGeom.mjGEOM_MESH:
-                raise ValueError(f"初始化防穿地缺少脚部碰撞 mesh: {name}")
-            if not (
-                (model.geom_contype[geom_id] & model.geom_conaffinity[ground_id])
-                or (model.geom_contype[ground_id] & model.geom_conaffinity[geom_id])
-            ):
-                raise ValueError(f"脚部碰撞体未启用地面接触: {name}")
+            body_name = f"{side}_ankle_roll_link"
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            # 依据所属刚体和触地掩码定位，兼容 4340 与旧资产不同的足碰撞体名称。
+            candidates = [
+                int(i) for i in np.flatnonzero(model.geom_bodyid == body_id)
+                if model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH
+                and ((model.geom_contype[i] & model.geom_conaffinity[ground_id])
+                     or (model.geom_contype[ground_id] & model.geom_conaffinity[i]))
+            ]
+            if body_id < 0 or len(candidates) != 1:
+                raise ValueError(f"初始化要求 {body_name} 上恰好有一个触地 mesh: {candidates}")
+            geom_id = candidates[0]
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or body_name
             mesh_id = int(model.geom_dataid[geom_id])
             start = int(model.mesh_vertadr[mesh_id])
             count = int(model.mesh_vertnum[mesh_id])

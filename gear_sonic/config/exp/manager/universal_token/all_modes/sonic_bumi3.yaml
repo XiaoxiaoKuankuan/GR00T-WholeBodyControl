@@ -257,7 +257,7 @@ manager_env:
         # 同一 PKL 的 smpl_joints 已由数据准备脚本离线 FK 到 Z-up，不再二次旋转。
         smpl_y_up: true
         asset:
-          assetFileName: "bumi3.xml"
+          assetFileName: "bumi3_4340.xml"
         robot_type: "bumi3"
         wrist_mujoco_dof_indices: []
 

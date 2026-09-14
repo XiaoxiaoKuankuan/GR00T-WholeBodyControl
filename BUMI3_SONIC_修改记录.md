@@ -4333,3 +4333,35 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 功能提交 `11f92e02467f5d87aad7773fd59c6972bb76f5da` 已 push，noetix-volc 已同分支 `git pull --ff-only`。同步前后主进程及八 worker 的完整 argv/cwd/start_ticks 逐项一致，远端工作区干净。
 - 已复核正式 Robot/SMPL 原 ONNX 与 `_control.onnx` 副本 SHA256 均保持上列值；真实导出/回放/pytest/CLI 进程已结束，逐进程 cmdline、cwd、打开文件未引用下列专用临时目录（清理进程及祖先进程除外）。关键命令、失败原因、指标和模型指纹已归档本记录及审计报告。开始精确清理 `/tmp/bumi-pd-metadata-20260914-2in7eq5j` 以及本轮三次 pytest 独有目录 `/tmp/pytest-of-weili/pytest-0`、`pytest-1`、`pytest-2`；仅在共享 pytest-current 链接指向本轮目录时移除该链接。正式数据、checkpoint、模型、源码、共享缓存和用户文件保留。
 - 上述四个本轮专用目录已清理完成；本段作为交付记录另行提交与同步。
+
+
+## 2026-09-14：按用户要求切换 4340 训练与部署资产
+
+- 分支 `feature/bumi-native-sonic-full-training`，起始 HEAD `22ecc509e146f6e87bbf0b8e65955e42e8db7db6`；与远端一致，用户 `g1.tar.gz` 保留。legged_lab 为 feature/amp、HEAD df265177f4c9a4cd2d9dbc31d305d45f551a6cd8，已有 E1 等修改全部保护。
+- 用户明确指定改用 legged_lab 的 bumi3_4340 XML/URDF，并再次确认 XML/URDF 同步肩 roll 限位。这一明确来源要求覆盖 agent.md 旧版仅限 bumi3 目录的约束。
+- 源 MJCF 修改前 SHA256 94ac99adf5f4512ac11903f521d5ec2f2fddb0413cfccec3e31a73d852a37719，源 URDF 98da93ccb02c4955b04cb1eba5e0ae64d48ab40c8188123d2fa7b72c1e33cc90。源文件定点修改左右肩 roll 为 [-0.14,1.94]/[-1.94,0.14]，XML 顶层 geom、脚碰撞类与地面统一 friction=1 0.05 0.01、condim=6。
+- 新增 SONIC `mjcf/bumi3_4340.xml` 和 `urdf/bumi3_4340/bumi3_4340.urdf`，只调整 mesh 引用相对路径；22 个 STL 与既有 meshes/bumi3 逐个 SHA256 完全相同，因此复用网格。保留原 bumi3.xml/bumi.urdf 字节，保护已经启动的旧资产训练及其后续动作库重载。
+- 后续修改范围：训练/部署/参考 FK 入口、保存配置的旧路径迁移、可视影子与足碰撞体定位、验证器/测试/指南；PD 与动作缩放继续读 ONNX，部署 armature=0.01 保留。4340 自碰撞掩码与原生 mesh 布局保留，不转换成旧模型碰撞近似。
+- 验证执行中，暂不报告仿真质量；临时证据目录 /tmp/bumi-4340-20260914-9u3liz4x。本轮不启动、停止或重启正式训练。回滚使用新的修复提交恢复旧默认路径，源 XML/URDF 可按本节定点反向修改，不影响其他用户工作。
+
+- 训练机器人默认路径、exp 中 MotionLib 的 MJCF、sim2sim YAML 及两个数据准备工具的当前目标模型已切到新增 4340 文件。新增 `bumi3_assets.py` 在训练快照前与评估环境创建前迁移已知旧路径，G1/H2 不变，未知 BUMI3 自定义路径明确报错。
+- 运行器足部定位按 ankle_roll 刚体的唯一触地 mesh，不再硬编码旧 geom 名；参考影子按实际非透明 mesh 选择，适配 4340 默认 group=0，运行时不改变任何碰撞体。集成与部署验证器改为严格锁定 4340 指纹、19 个 URDF 碰撞网格/18 个 MJCF 碰撞网格、22 个可视网格、21 关节及指定接触参数；单元测试同步更新对应断言。
+- 初次手动加载漏传 from_yaml 的路径，构造前 TypeError，补齐后加载通过：MJCF 质量 20.7073094 kg，22 个影子网格，静态初始化接触 0，19 个启用 geom（含地面）全部 dim=6/friction=1 0.05 0.01。
+
+- 新增 7 项资产迁移/兼容性/质量限位测试。首次 pytest 命令误包含不存在的 test_bumi3_onnx_export.py，未执行测试；改为实际四组既有文件和新增资产测试后 74 通过、1 失败。失败是角速度回归测试依赖旧根惯性主轴不对齐，而 4340 根主轴恰好对齐；测试实例显式旋转惯性主轴，保留原测试检错能力，不修改运行器或资产。部署验证首轮 PASS，但输出字符串仍带旧 5 capsule/9 mesh 注释，已改为真实 0/18/self_collision=true。零策略会摔倒，其有限值结果不作为质量通过。
+
+- 实际 Isaac Lab 单环境 reset + 10 步零动作已完成，exit=0，日志明确打印 4340 skeleton 加载、21 DoF/22 bodies、smoke 通过。19 条本机 CPU core 拓扑探测提示保留在诊断中，之后环境成功建立；未执行优化器训练。
+- 角速度测试第二轮运行时直接改 body_iquat 仍未触发编译时轴对齐优化路径，因此改为测试专用 XML 在编译前旋转惯性主轴；75 项数字曾在中间消息误报，已立即纠正，以最终 pytest 汇总为准。新增数据工具回归，当前 4340 与旧 SONIC 21 个关节顺序/轴/限位匹配；数据来源白名单保留精确旧 SONIC 指纹，不再用动力学完全相同的旧注释描述可读性。
+
+- 88 项 pytest 最终通过、11 条既有提示。源/副本 27 项 MuJoCo 编译字段完全一致，URDF 仅 mesh 路径不同。新增 4340 迁移报告与 legged_lab 侧源修改记录，更新当前使用指南；.gitignore 明确放行两份 4340 代码资产，避免新增模型被忽略而服务器缺文件。
+- 真实 100000 Robot ONNX 在新资产执行 40 组（10 轨迹 × 200/1000 Hz × 首帧保持30s/完整播放），全部完成、warning=0、无诊断倾覆。每频率完整播放9067帧；静态最大结束净位移 5.80335/3.39807 cm，最大倾角 7.41511/7.35382°。未测接触点脚滑速，不作无脚滑结论；全部逐轨迹指标与命令见 docs/source/getting_started/bumi3_4340_asset_migration_20260914.md。
+- 源 XML 新 SHA256 4bc25c1d1ce3650f1c3c7c46bc31fe4fce54672f45e47d74bc773120da0d5ddb；源 URDF e9bff4e0d81f9d876ef5f636e6ff3cc214e79b9d701c4b06b104d6aa61a4d1c6；仓库 MJCF f4e11d57715fe6dc5ce867130425b823c38ff3940de12fcd60c9fbf118913aec；仓库 URDF 19fa1a100c6a039cdbc42f004938d6cdce0f76de7c1bc19ee6bce1df3c54bd77。
+
+- 数据来源白名单与资产迁移定点复核 12 项通过；最终 MuJoCo 验证器 PASS，输出确认 0 capsule/18 collision mesh/self_collision=true/condim=6。补齐当前源注释与导入排版，语法检查和 diff 空白检查待提交前执行。
+- noetix-volc 同分支起始 HEAD 22ecc50、工作区干净；已新鲜保存主进程 203594 和八 worker 203604–203611 的完整 argv/cwd/start_ticks，提交同步后逐项对照，旧资产路径继续保留。
+
+- 提交前全部变更 Python 文件语法编译与 git diff --check 通过；再次核对旧 SONIC XML/URDF SHA256 未变。完整报告命令已整理为可复制续行形式，源 legged_lab 文件保持本轮定点修改，不提交或推送该仓库其他用户工作。
+
+- Isaac Lab 本次转换目录 `/tmp/IsaacLab/usd_20260914_184402_6311` 的 config.yaml 确认 asset_path 为新 4340 URDF；它是本轮 18:44:02 专用转换产物。独立 Python 无 pxr，未作关闭应用后的二次 USD 解析；已完成的真实 reset/step 与来源配置验证不受影响。该专用目录将在引用检查通过后精确清理，其他共享缓存保留。
+
+- 暂存检查发现新增 URDF 带入源文件一处空白行尾；只清除 SONIC 副本该空白，源 URDF 保持不变。最终仓库 URDF SHA256 更新为 `098f46181b75db4d965cdafc5901f4d78eeedfa4a63a2af2eab2a3ef88dbaf0d`，替代本节前述 19fa1a...；验证器指纹与报告同步。该调整不改变 XML 元素/属性或动力学。

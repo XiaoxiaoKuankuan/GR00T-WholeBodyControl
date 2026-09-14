@@ -68,7 +68,7 @@ SMPL_NUM_JOINTS = 24
 MAX_AUDIT_FRAMES_PER_CLIP = 256
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CURRENT_MJCF_PATH = REPO_ROOT / "gear_sonic/data/assets/robot_description/mjcf/bumi3.xml"
+CURRENT_MJCF_PATH = REPO_ROOT / "gear_sonic/data/assets/robot_description/mjcf/bumi3_4340.xml"
 
 BUMI3_MUJOCO_DOF_NAMES = [
     "waist_yaw_joint",
@@ -170,15 +170,19 @@ CURRENT_DOF_NAMES, CURRENT_DOF_AXES, CURRENT_DOF_RANGES = _load_mjcf_joint_contr
 )
 CURRENT_MJCF_SHA256 = _sha256(CURRENT_MJCF_PATH)
 
-# hq4 PASS50 和 Mine 数据是在碰撞层修正前生成的。该版本与当前版本的关节、质量、
-# 惯量和执行器契约相同，差异仅限已经由集成验证器锁定的可视/碰撞 geom 与地面。
-# 这里只接受该精确历史指纹和当前指纹，不能把任意旧 MJCF 当作兼容来源。
+# 来源白名单只表示关节数据可读，不表示不同资产的质量、惯量或接触动力学相同。
+# 4340 与上一版 SONIC 的 21 个关节顺序、轴和修正后限位一致；保留精确历史指纹，
+# 允许既有数据继续进入索引，同时用当前 4340 契约重新执行关节范围审计。
+LEGACY_SONIC_MJCF_SHA256 = (
+    "1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3"
+)
 PRE_COLLISION_MJCF_SHA256 = (
     "02874afebbe30ba1f90218394c8f9953f5d7a808e6b9950e7964c731da6dfbfe"
 )
 COMPATIBLE_DATA_MJCF_SHA256S = {
     CURRENT_MJCF_SHA256,
     PRE_COLLISION_MJCF_SHA256,
+    LEGACY_SONIC_MJCF_SHA256,
 }
 
 
@@ -244,7 +248,7 @@ def _load_key_whitelist(path: Path, label: str) -> set[str]:
 
 
 def _require_compatible_source_mjcf(label: str, source_sha256: Any) -> str:
-    """只接受当前或已审核的碰撞修正前 BUMI3 MJCF 完整指纹。"""
+    """只接受当前 4340 或已审核历史数据源的精确 MJCF 指纹。"""
 
     if not isinstance(source_sha256, str) or source_sha256 not in (
         COMPATIBLE_DATA_MJCF_SHA256S

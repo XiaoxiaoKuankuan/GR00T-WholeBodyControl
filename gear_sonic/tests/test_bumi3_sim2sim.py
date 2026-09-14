@@ -6,8 +6,8 @@
 测试覆盖名称生成的 IsaacLab/MuJoCo 双向排列、训练 PKL 与部署 CSV 的顺序/浮动根
 状态约定、根水平轨迹首帧归零且相对位移不变、BUMI3 Mimic NPZ 的命名根 body 提取、
 参考状态 reset、``base_link`` 统一锚点语义、1170 维联合 policy 输入、
-不会跟随真实机器人高度的半透明参考影子、白色 policy 使用 XML 中彼此分离的原始
-可视网格与审核后碰撞体、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
+不会跟随真实机器人高度的半透明参考影子、白色 policy 保留 4340 XML 的原始
+可视网格与共用碰撞网格布局、直立/横躺倾角诊断，以及零动作下的无界面 MuJoCo
 闭环，以及外部 PD 力矩限制、手臂部署惯量/被动阻尼、阻尼衰减和积分后根观测同步。
 初始化防穿地测试直接调用接触求解核验最小间隙，覆盖倾斜脚掌、不同地面高度、
 离地动作、非零起始帧和初速度保留，避免用实现自身的顶点算法生成期望值。
@@ -19,6 +19,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import joblib
 import mujoco
@@ -357,7 +358,7 @@ def _foot_plane_contact_distances(runner, qpos):
     mujoco.mj_forward(runner.model, scratch)
     ground = mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
     feet = {
-        mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_ankle_roll_link_collision")
+        mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_foot_collision")
         for side in ("l", "r")
     }
     return [
@@ -462,7 +463,7 @@ def test_explicit_pd_matches_force_law_and_effort_limits() -> None:
         )
     assert np.any(np.isclose(np.abs(expected), contract.effort_mujoco))
     assert runner.model.opt.integrator == mujoco.mjtIntegrator.mjINT_EULER
-    np.testing.assert_allclose(runner.model.dof_damping[runner.dof_addresses], 0.05)
+    np.testing.assert_allclose(runner.model.dof_damping[runner.dof_addresses], 0.001)
     for side in ("l", "r"):
         for suffix in ("arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch"):
             index = contract.mujoco_joint_names.index(f"{side}_{suffix}_joint")
@@ -472,7 +473,7 @@ def test_explicit_pd_matches_force_law_and_effort_limits() -> None:
 def test_arm_velocity_decays_without_contact_or_policy() -> None:
     """隔离接触和神经网络后，初始手臂角速度应衰减，不能被数值阻尼放大。
 
-    该测试使用用户指定的手臂 armature=0.01 和 XML 阻尼 0.05，在无重力、离地
+    该测试使用用户指定的手臂 armature=0.01 和 XML 阻尼 0.001，在无重力、离地
     状态注入 1rad/s 的 arm-yaw 速度，验证当前外部 PD 与部署惯量组合可以衰减扰动。
     测试检查真实物理响应，避免仅检查有限值和输入维度而漏掉动力学异常。
     """
@@ -545,42 +546,25 @@ def test_runtime_visual_and_collision_geoms_match_original_xml() -> None:
     ):
         np.testing.assert_allclose(getattr(runner.model, field), getattr(xml_model, field))
 
-    robot_geom_ids = np.flatnonzero(runner.model.geom_bodyid != 0)
-    visual_geom_ids = robot_geom_ids[runner.model.geom_group[robot_geom_ids] == 1]
-    collision_geom_ids = robot_geom_ids[runner.model.geom_group[robot_geom_ids] == 3]
-    assert robot_geom_ids.size == 36
-    assert visual_geom_ids.size == 22
-    assert collision_geom_ids.size == 14
-    assert np.all(runner.model.geom_type[visual_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH)
-    assert np.all(runner.model.geom_contype[visual_geom_ids] == 0)
-    assert np.all(runner.model.geom_conaffinity[visual_geom_ids] == 0)
-    assert np.count_nonzero(
-        runner.model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_CAPSULE
-    ) == 5
-    assert np.count_nonzero(
-        runner.model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH
-    ) == 9
-    assert np.all(runner.model.geom_contype[collision_geom_ids] == 1)
-    assert np.all(runner.model.geom_conaffinity[collision_geom_ids] == 0)
-    collision_names = {
-        mujoco.mj_id2name(runner.model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id))
-        for geom_id in collision_geom_ids
-    }
-    assert collision_names == {
-        "base_link_collision",
-        "waist_yaw_link_collision",
-        "l_arm_roll_link_collision",
-        "l_elbow_pitch_link_collision",
-        "r_arm_roll_link_collision",
-        "r_elbow_pitch_link_collision",
-        "l_leg_roll_link_collision",
-        "l_knee_pitch_link_collision",
-        "l_ankle_pitch_link_collision",
-        "l_ankle_roll_link_collision",
-        "r_leg_roll_link_collision",
-        "r_knee_pitch_link_collision",
-        "r_ankle_pitch_link_collision",
-        "r_ankle_roll_link_collision",
+    model = runner.model
+    robot = np.flatnonzero(model.geom_bodyid != 0)
+    visible = robot[model.geom_rgba[robot, 3] > 0]
+    collision = robot[(model.geom_contype[robot] != 0) | (model.geom_conaffinity[robot] != 0)]
+    assert (len(robot), len(visible), len(collision)) == (24, 22, 18)
+    assert np.all(model.geom_type[robot] == mujoco.mjtGeom.mjGEOM_MESH)
+    assert np.all(model.geom_contype[collision] == 1)
+    assert np.all(model.geom_conaffinity[collision] == 1)
+    assert np.all(model.geom_condim[collision] == 6)
+    np.testing.assert_allclose(model.geom_friction[collision], np.tile([1, 0.05, 0.01], (18, 1)))
+    assert {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[i]))
+        for i in collision
+    } == {
+        "base_link", "waist_yaw_link",
+        *{f"{side}_{part}_link" for side in ("l", "r") for part in (
+            "arm_pitch", "arm_roll", "arm_yaw", "elbow_pitch",
+            "leg_pitch", "leg_roll", "leg_yaw", "ankle_roll",
+        )},
     }
 
 
@@ -612,8 +596,8 @@ def test_reset_pose_has_no_self_collision_or_ground_penetration() -> None:
     assert not self_contacts
     assert not ground_penetrations
 
-    # 主动下移浮动根后必须产生地面接触，证明 bitmask 只关闭机器人-机器人接触，
-    # 没有把脚、膝、肘等用于爬行/跪地的碰撞能力一并关闭。
+    # 默认姿态整体下移应产生足底地面接触；4340 保留原始自碰撞能力，
+    # 此处无自接触仅针对该姿态，不代表所有轨迹或姿态均无自接触。
     runner.data.qpos[runner.root_qpos_address + 2] -= 0.04
     mujoco.mj_forward(runner.model, runner.data)
     assert runner.data.ncon > 0
@@ -683,10 +667,18 @@ def test_robot_encoder_anchor_uses_base_root_and_ignores_waist_joint() -> None:
     )
 
 
-def test_base_angular_velocity_uses_link_axes_not_inertia_principal_axes() -> None:
+def test_base_angular_velocity_uses_link_axes_not_inertia_principal_axes(tmp_path: Path) -> None:
     """非对角 fullinertia 下角速度仍必须表达在 base_link 连杆坐标系。"""
 
     contract = _contract()
+    # 在编译前构造主轴旋转的副本，避免编译器将原 4340 根节点标记为轴对齐并优化。
+    # 临时 XML 只属于本测试；交付资产的质量、主轴与碰撞定义保持不变。
+    tree = ET.parse(contract.model_path)
+    tree.find("./compiler").set("meshdir", str((contract.model_path.parent / "../meshes/bumi3").resolve()))
+    tree.find("./worldbody/body/inertial").set("quat", f"{np.cos(0.25)} 0 {np.sin(0.25)} 0")
+    test_xml = tmp_path / "rotated_inertia.xml"
+    tree.write(test_xml)
+    contract = replace(contract, model_path=test_xml)
     runner = Bumi3SonicSim2Sim(
         contract,
         make_static_reference_motion(contract),
@@ -789,7 +781,7 @@ def test_reference_shadow_copies_resolved_mjv_scene_as_decorative_geoms() -> Non
             continue
         if int(runner.reference_visual_model.geom_bodyid[geom_id]) == 0:
             continue
-        if int(runner.reference_visual_model.geom_group[geom_id]) != 1:
+        if runner.reference_visual_model.geom_rgba[geom_id, 3] <= 0:
             continue
         expected_geoms.append(geom)
 
@@ -797,9 +789,8 @@ def test_reference_shadow_copies_resolved_mjv_scene_as_decorative_geoms() -> Non
     assert markers
     # policy 动力学模型和参考模型都从同一 XML 加载，base 均必须
     # 保留原始 mesh；两者区别只是 qpos 状态和是否参与物理。
-    dynamics_base_geom_id = mujoco.mj_name2id(
-        runner.model, mujoco.mjtObj.mjOBJ_GEOM, "base_link_visual"
-    )
+    base_body_id = mujoco.mj_name2id(runner.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+    dynamics_base_geom_id = int(runner.model.body_geomadr[base_body_id])
     assert dynamics_base_geom_id >= 0
     # 两个模型从同一 XML 加载并已在 runner 中校验相同拓扑，因此 geom id 对应一致。
     reference_base_geom_id = dynamics_base_geom_id

@@ -5,8 +5,9 @@
 
 """BUMI3 在 Isaac Lab 与 SONIC 中使用的原生机器人配置。
 
-本模块只复刻参考 ``Bumi_CFG`` 当前实际生效的 URDF、初始姿态、刚体属性和
-名义 PD 执行器参数，不依赖 ``NoetixRobot`` Python 包。为减少基础训练变量，
+本模块按用户指定加载 ``bumi3_4340`` URDF 的质量、惯量、碰撞与限位；
+初始姿态和名义 PD 执行器参数继续使用现有 SONIC BUMI3 契约，不依赖
+``NoetixRobot`` Python 包。为减少基础训练变量，
 执行器改用与 G1 相同的无延迟 ``ImplicitActuatorCfg``；力矩、速度、KP/KD、
 armature 和动作缩放仍保持 BUMI3 参考数值。它同时以关节/刚体名称
 自动构造 Isaac Lab 与 MuJoCo 的双向顺序映射，并在导入时核对 BUMI3 参考配置
@@ -208,7 +209,7 @@ BUMI3_ISAACLAB_TO_MUJOCO_MAPPING = {
 BUMI3_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
-        asset_path=f"{ASSET_DIR}/robot_description/urdf/bumi3/bumi.urdf",
+        asset_path=f"{ASSET_DIR}/robot_description/urdf/bumi3_4340/bumi3_4340.urdf",
         activate_contact_sensors=True,
         replace_cylinders_with_capsules=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(

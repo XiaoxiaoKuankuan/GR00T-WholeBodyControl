@@ -28,7 +28,14 @@ Tyro，否则会升级该依赖并破坏 Isaac Sim 的版本契约。
 
 BUMI3 配置位于
 `gear_sonic/config/sim2sim/bumi3_sonic.yaml`，默认加载
-`gear_sonic/data/assets/robot_description/mjcf/bumi3.xml`。
+`gear_sonic/data/assets/robot_description/mjcf/bumi3_4340.xml`。
+
+2026-09-14 按用户要求切换到 legged_lab 的 4340 源资产。训练使用仓库内
+`urdf/bumi3_4340/bumi3_4340.urdf`，MotionLib 也使用新 4340 XML；两者肩 roll
+限位同步为左 `[-0.14, 1.94]`、右 `[-1.94, 0.14]` rad。旧 checkpoint 的参考模型
+路径在新进程创建环境前显式迁移，历史 config.yaml 不写回。已经运行的训练继续
+使用启动时的资产。来源、副本一致性和本轮回放见
+[4340 资产迁移记录](bumi3_4340_asset_migration_20260914.md)。
 
 如果在另一台机器建立不含 Isaac Lab 的纯 MuJoCo 环境，仍可使用
 `python -m pip install -e "gear_sonic[sim]"`；项目的 `sim` extra 已固定兼容版 Tyro。
@@ -87,7 +94,7 @@ GUI 默认固定第一帧参考并等待按键，未设置 `--duration` 时持�
 启动日志会明确打印 `physics_substeps=5`、`sim_dt=0.001`、`decimation=20`、
 `physics_frequency_hz=1000` 和 `control_frequency_hz=50`。
 
-2026-09-14 的 100000 轮 Robot 模型在本地十条参考上完成了 30 s 首帧保持与完整
+切换 4340 之前，2026-09-14 的 100000 轮 Robot 模型在旧资产十条参考上完成了 30 s 首帧保持与完整
 播放的细分对照，站立漂移和多数动作的承重脚滑速明显降低；快速动态动作仍有
 滑移，不能解释为全动作接触质量已与 Lab 等价。实际脚碰撞、Mimic/G1 差异、
 完整指标和证据边界见 [100000 轮 sim2sim 对照记录](bumi3_sim2sim_100k_audit_20260914.md)。
@@ -256,7 +263,7 @@ Robot PKL 缺少关节速度字段时，按当前训练 MotionLib 的前向差�
 `pd_implementation=python_explicit_pd_motor`、`integrator=Euler`。
 
 XML 的“被动关节阻尼”是各电机关节本身的速度阻力，不是某些无电机关节。BUMI
-全部 21 个电机 hinge 的 XML `damping` 已由 0.001 对齐为 G1 的 0.05；这项与
+全部 21 个电机 hinge 的当前 4340 XML `damping` 为 `0.001`，保留来源值；这项与
 PD 的 `Kd` 分开。2026-09-14 按用户要求，全部 21 个驱动关节运行时 `armature`
 统一覆盖为 `0.01`，浮动根保持 `0`。原 XML 和训练端的 armature 数值保持原样，
 此项部署覆盖由 YAML 及运行时 `model.dof_armature` 日志明确记录。
@@ -269,26 +276,28 @@ Kp/Kd 从 ONNX 读取；当前 100000 模型肩肘仍为 `8/0.4`。
 以及等待 10s→完整播放→再保持 10s 均未摔倒，本组结果使用恢复后的显式 PD、
 当时手臂 armature=0.03、XML 阻尼 0.05。后续按用户要求将手臂降为 0.01，
 该配置的实际验收另记于诊断记录第 13 节。历史定位与当前验收见
-[wave 首帧摔倒诊断记录](bumi3_wave_sim2sim_audit_20260910.md)。本次修改只需
-退出旧 sim2sim 进程并重新运行原命令，无需重新导出 ONNX 或重新训练。
+[wave 首帧摔倒诊断记录](bumi3_wave_sim2sim_audit_20260910.md)。该历史结果不是本轮 4340 资产的验证结论。
+当前代码加载新 XML 需重新启动 sim2sim；原模型仍是旧资产训练的策略。
 
-sim2sim 是 MuJoCo 闭环，所有碰撞完全以 `bumi3.xml` 为准。XML 里保留 22 个原始
-link mesh 作为 `group=1` 的可视 geom，并把 14 个审核后的接触几何单独设为
-`group=3`：base、双侧 leg-roll 和双侧 knee 使用简化 capsule，其余 9 个需要接触的
-link 使用 mesh；arm-pitch/arm-yaw、leg-pitch/leg-yaw 不参与碰撞。地面 Z 基准为
-`0 m`，与重定向数据和世界坐标原点统一；加载器不会改动动作原始根高度。机器人碰撞体使用
-`contype=1/conaffinity=0`，地面使用互补的 `contype=0/conaffinity=1`，因此保留
-机器人与地面的接触，但不会计算机器人 link 之间的自碰撞。运行器不会根据
-Isaac Lab URDF 或其他仓库规则再次覆盖这些定义；启动验证会将运行时
-`geom_type/bodyid/contype/conaffinity/pos/quat/size/friction/solref/solimp` 与重新加载
-的 XML 编译结果逐数组比较，并检查静态 reset 无自碰撞和地面穿透。
+sim2sim 当前全部碰撞以 `bumi3_4340.xml` 为准。它保留来源 4340 的 24 个机器人
+geom：22 个不透明可视 mesh，其中部分同时参与碰撞，另有两个透明足底碰撞 mesh。
+18 个网格启用接触；膝、踝 pitch mesh 不参与接触。机器人和地面均为
+`contype=1/conaffinity=1`，保留源模型的自碰撞能力。全部接触 geom 使用
+`condim=6`、`friction="1 0.05 0.01"`；脚底与地面保持
+`solref="0.01 1"`、`solimp="0.9 0.95 0.001"`。求解器保持
+Newton、80 次迭代、elliptic 摩擦锥、`impratio=10`，地面 Z=0。
+
+参考影子按实际可见 mesh 筛选，兼容 4340 的 group=0，不要求旧版 group=1/3
+布局。运行器不替换原网格、刚体惯量或碰撞掩码；验证器逐数组比较运行时 geom 与
+原 XML。源 URDF 有 19 个碰撞 mesh（无 base/双膝），源 XML 有 18 个（无双膝/
+双踝 pitch），本次分别忠实保留，不能据此声称两个仿真器的碰撞完全相同。
 
 旧大集若按 `Z=-0.02 m` 地面制作，切换到当前 XML 后可能出现约 1--2 cm 的初始穿地。
 当前按用户要求在 reset 时显式记录并校正真实机器人的初始根高；参考数据和红色影子
 仍保留原始高度，便于观察数据地面基准差异。是否需要校正整段数据，应另行审计
 整段支撑接触及坐标来源，不能直接套用首帧偏移量。
 
-ONNX 只保存网络权重与张量接口（Robot 为 1170→21，SMPL 为 1470→21），不包含参考轨迹、锚点 body 名称或 FK
+当前 ONNX 保存网络与名义控制元数据、张量接口（Robot 为 1170→21，SMPL 为 1470→21），不包含参考轨迹、锚点 body 名称或 FK
 结果；这些观测语义由 sim2sim 运行器负责重建。因此换动作文件或部署实现时仍必须使用
 本配置和运行器，不能只凭 ONNX 文件名推断观测正确。
 

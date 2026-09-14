@@ -1243,7 +1243,7 @@ def _parser() -> argparse.ArgumentParser:
     build_parser.add_argument(
         "--mjcf",
         type=Path,
-        default=repo_root / "gear_sonic/data/assets/robot_description/mjcf/bumi3.xml",
+        default=repo_root / "gear_sonic/data/assets/robot_description/mjcf/bumi3_4340.xml",
     )
     build_parser.add_argument(
         "--human-joints-info",
@@ -1258,7 +1258,7 @@ def _parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--mjcf",
         type=Path,
-        default=repo_root / "gear_sonic/data/assets/robot_description/mjcf/bumi3.xml",
+        default=repo_root / "gear_sonic/data/assets/robot_description/mjcf/bumi3_4340.xml",
     )
     validate_parser.set_defaults(func=validate)
     return parser

@@ -219,6 +219,8 @@ data/
 /gear_sonic/data/assets/robot_description/urdf/*
 !/gear_sonic/data/assets/robot_description/urdf/bumi3/
 !/gear_sonic/data/assets/robot_description/urdf/bumi3/bumi.urdf
+!/gear_sonic/data/assets/robot_description/urdf/bumi3_4340/
+!/gear_sonic/data/assets/robot_description/urdf/bumi3_4340/bumi3_4340.urdf
 !/gear_sonic/data/assets/robot_description/meshes/
 /gear_sonic/data/assets/robot_description/meshes/*
 !/gear_sonic/data/assets/robot_description/meshes/bumi3/
@@ -226,6 +228,7 @@ data/
 !/gear_sonic/data/assets/robot_description/mjcf/
 /gear_sonic/data/assets/robot_description/mjcf/*
 !/gear_sonic/data/assets/robot_description/mjcf/bumi3.xml
+!/gear_sonic/data/assets/robot_description/mjcf/bumi3_4340.xml
 bones_seed_smpl/
 sonic_release/
 # Training output logs
